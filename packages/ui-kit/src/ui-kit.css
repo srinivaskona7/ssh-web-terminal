@@ -43,7 +43,8 @@
   border-color: var(--color-accent-hover);
 }
 
-.ui-btn--danger {
+.ui-btn--danger,
+.ui-btn--destructive {
   background: var(--color-status-danger);
   color: var(--color-bg-canvas);
   border-color: var(--color-status-danger);

@@ -2,12 +2,14 @@ import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
 test.describe('WebSSH Studio E2E & Accessibility Suite (M0-M8)', () => {
-  test('renders clean terminal workspace, passes WCAG AA axe-core audit across themes, and persists theme preference', async ({
+  test('renders clean terminal workspace at 17px default font size, passes WCAG AA axe-core audit across themes, and persists theme preference', async ({
     page
   }) => {
     await page.goto('/');
     await expect(page.getByTestId('workspace-root')).toBeVisible();
     await expect(page.getByTestId('terminal-viewport')).toBeVisible();
+    await expect(page.getByTestId('terminal-viewport')).toContainText('WebSSH Studio v1.0.0');
+    await expect(page.getByTestId('font-size-badge')).toHaveText('17px');
 
     // Run axe-core WCAG 2.1 AA audit on dark theme
     const darkAxe = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();
@@ -43,10 +45,30 @@ test.describe('WebSSH Studio E2E & Accessibility Suite (M0-M8)', () => {
     await expect(page.getByTestId('status-bar')).toBeVisible();
   });
 
-  test('imports ~/.ssh/config with ProxyJump, displays TOFU and KEY CHANGED modals, and opens Command Palette', async ({
+  test('executes interactive terminal commands, opens New Connection modal, connects and disconnects, and imports ~/.ssh/config', async ({
     page
   }) => {
     await page.goto('/');
+    const viewport = page.getByTestId('terminal-viewport');
+    await viewport.focus();
+    await page.keyboard.type('help');
+    await page.keyboard.press('Enter');
+    await expect(viewport).toContainText('Available local commands: connect <user@host>, pubkey, font <size>, clear, vault');
+
+    // Open New Connection modal via topbar button
+    await page.getByTestId('new-connection-btn').click();
+    await expect(page.getByTestId('connect-modal')).toBeVisible();
+    await page.getByTestId('connect-host-input').fill('edge-01.prod.internal');
+    await page.getByTestId('connect-user-input').fill('ubuntu');
+    await page.getByTestId('connect-modal-submit-btn').click();
+
+    await expect(page.getByTestId('tab-session-1')).toContainText('ubuntu@edge-01.prod.internal');
+    await expect(page.getByTestId('disconnect-btn')).toBeVisible();
+
+    // Disconnect and verify New Connection button returns
+    await page.getByTestId('disconnect-btn').click();
+    await expect(page.getByTestId('new-connection-btn')).toBeVisible();
+
     await page.getByTestId('nav-hosts').click();
     await page.getByTestId('import-ssh-config-btn').click();
     await expect(page.getByTestId('host-card-staging-web')).toBeVisible();

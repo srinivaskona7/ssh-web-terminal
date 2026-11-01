@@ -13,3 +13,5 @@ See synchronized plan in `/Users/sr20536224wipro.com/.apple-gemini/.gemini/tmp/t
 - [x] **Step 7 (M6) — Customization**
 - [x] **Step 8 (M7) — Productivity & Security Extras**
 - [x] **Step 9 (M8) — Hardening, Verification & Release**
+- [x] **Step 10 — Interactive Terminal, Font Scaling & Connection Modal (`apps/web/src/ui/App.tsx`)**
+- [x] **Step 11 — macOS Terminal & VS Code IDE UI Upgrade + 50-Feature Interactive Workbench (`apps/web/src/ui/App.tsx`, `app.css`)**

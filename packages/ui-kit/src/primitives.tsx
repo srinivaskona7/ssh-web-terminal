@@ -5,7 +5,7 @@ import { Icon } from './icons.js';
 
 export interface ButtonProps {
   children?: ComponentChildren;
-  variant?: 'default' | 'primary' | 'danger' | 'ghost';
+  variant?: 'default' | 'primary' | 'danger' | 'destructive' | 'ghost';
   type?: 'button' | 'submit' | 'reset';
   disabled?: boolean;
   onClick?: (e: MouseEvent) => void;
@@ -26,7 +26,8 @@ export function Button({
   testId,
   className = ''
 }: ButtonProps): JSX.Element {
-  const variantClass = variant === 'default' ? '' : `ui-btn--${variant}`;
+  const normalizedVariant = variant === 'destructive' ? 'danger' : variant;
+  const variantClass = normalizedVariant === 'default' ? '' : `ui-btn--${normalizedVariant} ${variant === 'destructive' ? 'ui-btn--destructive' : ''}`.trim();
   return (
     <button
       type={type}

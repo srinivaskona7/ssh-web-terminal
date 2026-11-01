@@ -20,6 +20,139 @@
   z-index: 9999;
 }
 
+/* 1. macOS Window Title Bar & Native Menu Bar */
+.webssh-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-3);
+  background-color: var(--color-bg-surface);
+  border-bottom: var(--border-hairline);
+  gap: var(--space-3);
+  user-select: none;
+}
+
+.webssh-titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.webssh-traffic-lights {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.webssh-traffic-light {
+  width: var(--space-3);
+  height: var(--space-3);
+  border-radius: var(--radius-pill);
+  border: var(--border-hairline);
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--motion-fast), opacity var(--motion-fast);
+}
+
+.webssh-traffic-light:hover {
+  opacity: 0.85;
+}
+
+.webssh-traffic-light--close {
+  background-color: var(--color-status-danger);
+  border-color: var(--color-status-danger);
+}
+
+.webssh-traffic-light--minimize {
+  background-color: var(--color-status-warning);
+  border-color: var(--color-status-warning);
+}
+
+.webssh-traffic-light--fullscreen {
+  background-color: var(--color-status-success);
+  border-color: var(--color-status-success);
+}
+
+.webssh-window-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-font-sans);
+  font-weight: 500;
+}
+
+.webssh-menubar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  position: relative;
+}
+
+.webssh-menu-group {
+  position: relative;
+}
+
+.webssh-menu-trigger {
+  background: transparent;
+  border: var(--border-hairline);
+  border-color: transparent;
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size-xs);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.webssh-menu-trigger:hover,
+.webssh-menu-trigger--open {
+  background-color: var(--color-bg-elevated);
+  border-color: var(--color-border-subtle);
+}
+
+.webssh-menu-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 220px;
+  background-color: var(--color-bg-surface);
+  border: var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elevation-3);
+  padding: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0);
+  z-index: 2000;
+}
+
+.webssh-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size-xs);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.webssh-menu-item:hover {
+  background-color: var(--color-accent-primary);
+  color: var(--color-bg-canvas);
+}
+
+/* 2. macOS / VS Code Tab Strip & Top-Right Quick Bar */
 .webssh-topbar {
   display: flex;
   align-items: center;
@@ -28,6 +161,7 @@
   background-color: var(--color-bg-surface);
   border-bottom: var(--border-hairline);
   gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
 .webssh-tabs {
@@ -42,18 +176,60 @@
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-1) var(--space-3);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   border: var(--border-hairline);
   background-color: var(--color-bg-canvas);
   color: var(--color-fg-secondary);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-font-sans);
   cursor: pointer;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+}
+
+.webssh-tab:hover {
+  background-color: var(--color-bg-elevated);
+  color: var(--color-fg-primary);
 }
 
 .webssh-tab--active {
   background-color: var(--color-bg-elevated);
   color: var(--color-fg-primary);
   border: var(--border-strong);
+  box-shadow: var(--elevation-1);
+}
+
+.webssh-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--color-fg-secondary);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.webssh-tab-close:hover {
+  color: var(--color-status-danger);
+}
+
+.webssh-tab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-pill);
+  border: var(--border-hairline);
+  background-color: var(--color-bg-canvas);
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.webssh-tab-add:hover {
+  background-color: var(--color-bg-elevated);
 }
 
 .webssh-status-dot {
@@ -61,14 +237,29 @@
   height: var(--space-2);
   border-radius: var(--radius-pill);
   background-color: var(--color-status-success);
+  display: inline-block;
 }
 
 .webssh-status-dot--reconnecting {
   background-color: var(--color-status-warning);
 }
 
-.webssh-status-dot--offline {
-  background-color: var(--color-status-danger);
+.webssh-status-dot--offline,
+.webssh-status-dot--disconnected {
+  background-color: var(--color-fg-muted);
+}
+
+.font-size-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  border: var(--border-hairline);
+  background-color: var(--color-bg-canvas);
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-xs);
 }
 
 .webssh-banner {
@@ -79,6 +270,7 @@
   background-color: var(--color-bg-elevated);
   border-bottom: var(--border-hairline);
   font-size: var(--font-size-sm);
+  gap: var(--space-2);
 }
 
 .webssh-workspace-body {
@@ -88,6 +280,10 @@
   overflow: hidden;
 }
 
+.webssh-workspace-body--right {
+  flex-direction: row-reverse;
+}
+
 .webssh-rail {
   display: flex;
   flex-direction: column;
@@ -95,6 +291,7 @@
   padding: var(--space-2);
   background-color: var(--color-bg-surface);
   border-right: var(--border-hairline);
+  overflow-y: auto;
 }
 
 .webssh-main {
@@ -104,6 +301,18 @@
   min-width: 0;
   min-height: 0;
   background-color: var(--color-bg-canvas);
+}
+
+.webssh-split-container {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.webssh-split-container--vertical {
+  flex-direction: column;
 }
 
 .webssh-terminal-viewport {
@@ -119,12 +328,40 @@
   position: relative;
 }
 
+.webssh-terminal-viewport:focus-visible {
+  outline: var(--border-focus-ring);
+  outline-offset: calc(-1 * var(--space-1));
+}
+
+.webssh-xterm-mount {
+  width: 100%;
+  min-height: var(--space-4);
+}
+
 .webssh-terminal-cursor {
   display: inline-block;
   width: var(--space-2);
   height: var(--space-4);
   background-color: var(--color-terminal-cursor);
   vertical-align: text-bottom;
+  animation: webssh-cursor-blink 1s step-end infinite;
+}
+
+.webssh-terminal-cursor--bar {
+  width: var(--space-1);
+}
+
+.webssh-terminal-cursor--underline {
+  height: var(--space-1);
+}
+
+@keyframes webssh-cursor-blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 .webssh-statusbar {
