@@ -15,3 +15,4 @@ See synchronized plan in `/Users/sr20536224wipro.com/.apple-gemini/.gemini/tmp/t
 - [x] **Step 9 (M8) — Hardening, Verification & Release**
 - [x] **Step 10 — Interactive Terminal, Font Scaling & Connection Modal (`apps/web/src/ui/App.tsx`)**
 - [x] **Step 11 — macOS Terminal & VS Code IDE UI Upgrade + 50-Feature Interactive Workbench (`apps/web/src/ui/App.tsx`, `app.css`)**
+- [ ] **Step 12 — Advanced Feature Suite: Telemetry HUD, Port Forwarding Studio, Smart Shell (Blocks/Autocomplete/Safety/Redaction), Advanced SFTP (Diff/Chmod/Tail/Relay), and FIDO2/CA/Playbooks**
