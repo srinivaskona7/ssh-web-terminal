@@ -1,0 +1,17 @@
+/node_modules/
+/dist/
+/coverage/
+/test-results/
+/playwright-report/
+/blob-report/
+/.vite/
+/apps/web/dist/
+/apps/web/coverage/
+/packages/ui-kit/dist/
+/packages/protocol/dist/
+/apps/gateway/gateway
+/apps/gateway/coverage.out
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local

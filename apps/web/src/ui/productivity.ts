@@ -1,0 +1,387 @@
+export const DEFAULT_RECORDING_CAP_BYTES = 64 * 1024 * 1024; // 64 MiB
+export const HARD_MAX_RECORDING_CAP_BYTES = 256 * 1024 * 1024; // 256 MiB
+
+const NL = String.fromCharCode(10);
+const ESC = String.fromCharCode(27);
+const BEL = String.fromCharCode(7);
+
+export interface CommandItem {
+  id: string;
+  title: string;
+  category: 'Connection' | 'Terminal' | 'Files' | 'View' | 'Security' | 'Preferences';
+  shortcut?: string;
+  keywords?: string[];
+  run: () => void | Promise<void>;
+}
+
+/**
+ * Fuzzy-scores a query against a target string. Returns -1 if not all characters appear in order.
+ */
+export function fuzzyScore(query: string, target: string): number {
+  const q = query.trim().toLowerCase();
+  if (!q) return 1;
+  const t = target.toLowerCase();
+  let qIdx = 0;
+  let score = 0;
+  let consecutive = 0;
+
+  for (let i = 0; i < t.length && qIdx < q.length; i++) {
+    if (t[i] === q[qIdx]) {
+      qIdx++;
+      consecutive++;
+      score += 10 + consecutive * 5 - i * 0.1;
+    } else {
+      consecutive = 0;
+    }
+  }
+  return qIdx === q.length ? score : -1;
+}
+
+export class CommandPaletteRegistry {
+  private readonly commands = new Map<string, CommandItem>();
+
+  register(item: CommandItem): void {
+    this.commands.set(item.id, item);
+  }
+
+  search(query: string): CommandItem[] {
+    const items = Array.from(this.commands.values());
+    if (!query.trim()) {
+      return items;
+    }
+    const scored = items
+      .map((item) => {
+        const haystack = [item.title, item.category, ...(item.keywords ?? [])].join(' ');
+        return { item, score: fuzzyScore(query, haystack) };
+      })
+      .filter((x) => x.score >= 0)
+      .sort((a, b) => b.score - a.score);
+    return scored.map((s) => s.item);
+  }
+
+  execute(id: string): void | Promise<void> {
+    const cmd = this.commands.get(id);
+    if (!cmd) {
+      throw new Error(`Command not found: ${id}`);
+    }
+    return cmd.run();
+  }
+}
+
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+  description?: string;
+  tags: string[];
+}
+
+export function extractSnippetVariables(template: string): string[] {
+  const vars = new Set<string>();
+  const re = /\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(template)) !== null) {
+    if (match[1]) {
+      vars.add(match[1]);
+    }
+  }
+  return Array.from(vars);
+}
+
+export function interpolateSnippet(template: string, values: Record<string, string>): string {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, key: string) => {
+    return Object.prototype.hasOwnProperty.call(values, key) ? (values[key] ?? '') : `{{${key}}}`;
+  });
+}
+
+export class SnippetLibrary {
+  private readonly snippets = new Map<string, Snippet>();
+
+  constructor(initial: Snippet[] = []) {
+    for (const s of initial) {
+      this.snippets.set(s.id, s);
+    }
+  }
+
+  upsert(snippet: Snippet): Snippet {
+    this.snippets.set(snippet.id, snippet);
+    return snippet;
+  }
+
+  remove(id: string): boolean {
+    return this.snippets.delete(id);
+  }
+
+  list(query = ''): Snippet[] {
+    const q = query.trim().toLowerCase();
+    return Array.from(this.snippets.values()).filter((s) => {
+      if (!q) return true;
+      return (
+        s.name.toLowerCase().includes(q) ||
+        s.command.toLowerCase().includes(q) ||
+        s.tags.some((t) => t.toLowerCase().includes(q))
+      );
+    });
+  }
+}
+
+export class BroadcastManager {
+  private enabled = false;
+  private readonly targetPaneIds = new Set<string>();
+
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  toggleTargetPane(paneId: string): boolean {
+    if (this.targetPaneIds.has(paneId)) {
+      this.targetPaneIds.delete(paneId);
+      return false;
+    }
+    this.targetPaneIds.add(paneId);
+    return true;
+  }
+
+  getTargets(): string[] {
+    return Array.from(this.targetPaneIds);
+  }
+
+  dispatchInput(input: string, writer: (paneId: string, data: string) => void): number {
+    if (!this.enabled) return 0;
+    let count = 0;
+    for (const paneId of this.targetPaneIds) {
+      writer(paneId, input);
+      count++;
+    }
+    return count;
+  }
+}
+
+export interface AsciicastHeader {
+  version: 2;
+  width: number;
+  height: number;
+  timestamp: number;
+  title?: string;
+}
+
+export type AsciicastEvent = [number, 'o' | 'i', string];
+
+export class AsciicastRecorder {
+  private readonly header: AsciicastHeader;
+  private readonly events: AsciicastEvent[] = [];
+  private readonly startTimeMs: number;
+  private readonly maxBytes: number;
+  private currentBytes = 0;
+  private capped = false;
+
+  constructor(
+    width: number,
+    height: number,
+    title = 'WebSSH Session',
+    maxBytes = DEFAULT_RECORDING_CAP_BYTES,
+    startTimeMs = Date.now()
+  ) {
+    this.startTimeMs = startTimeMs;
+    this.maxBytes = Math.min(Math.max(1024, maxBytes), HARD_MAX_RECORDING_CAP_BYTES);
+    this.header = {
+      version: 2,
+      width,
+      height,
+      timestamp: Math.floor(this.startTimeMs / 1000),
+      title
+    };
+  }
+
+  recordOutput(data: string, nowMs = Date.now()): boolean {
+    return this.appendEvent('o', data, nowMs);
+  }
+
+  recordInput(data: string, nowMs = Date.now()): boolean {
+    return this.appendEvent('i', data, nowMs);
+  }
+
+  private appendEvent(kind: 'o' | 'i', data: string, nowMs: number): boolean {
+    const elapsedSec = Number(Math.max(0, (nowMs - this.startTimeMs) / 1000).toFixed(4));
+    const eventTuple: AsciicastEvent = [elapsedSec, kind, data];
+    const serialized = JSON.stringify(eventTuple) + NL;
+    const byteLen = new TextEncoder().encode(serialized).byteLength;
+
+    if (this.currentBytes + byteLen > this.maxBytes) {
+      this.capped = true;
+      return false;
+    }
+    this.currentBytes += byteLen;
+    this.events.push(eventTuple);
+    return true;
+  }
+
+  isCapped(): boolean {
+    return this.capped;
+  }
+
+  getByteLength(): number {
+    return this.currentBytes;
+  }
+
+  exportCast(): string {
+    const lines = [JSON.stringify(this.header), ...this.events.map((e) => JSON.stringify(e))];
+    return lines.join(NL) + NL;
+  }
+}
+
+export function parseAsciicastV2(castText: string): {
+  header: AsciicastHeader;
+  events: AsciicastEvent[];
+  durationSec: number;
+} {
+  const lines = castText
+    .split(NL)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) {
+    throw new Error('Empty asciicast v2 recording');
+  }
+  const header = JSON.parse(lines[0]!) as AsciicastHeader;
+  if (header.version !== 2) {
+    throw new Error(`Unsupported asciicast version: ${String(header.version)}`);
+  }
+  const events: AsciicastEvent[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const parsed = JSON.parse(lines[i]!) as AsciicastEvent;
+    events.push(parsed);
+  }
+  const durationSec = events.length > 0 ? (events[events.length - 1]?.[0] ?? 0) : 0;
+  return { header, events, durationSec };
+}
+
+export function scrubAsciicastOutput(events: AsciicastEvent[], targetTimeSec: number): string {
+  let out = '';
+  for (const [ts, kind, text] of events) {
+    if (ts > targetTimeSec) break;
+    if (kind === 'o') {
+      out += text;
+    }
+  }
+  return out;
+}
+
+export interface KeybindingEntry {
+  actionId: string;
+  description: string;
+  shortcut: string;
+}
+
+export interface KeybindingConflict {
+  shortcut: string;
+  actionIds: string[];
+}
+
+export function normalizeShortcut(shortcut: string): string {
+  return shortcut
+    .trim()
+    .toLowerCase()
+    .split('+')
+    .map((s) => s.trim())
+    .sort()
+    .join('+');
+}
+
+export class KeybindingRegistry {
+  private readonly bindings = new Map<string, KeybindingEntry>();
+
+  constructor(defaults: KeybindingEntry[] = []) {
+    for (const d of defaults) {
+      this.bindings.set(d.actionId, d);
+    }
+  }
+
+  rebind(actionId: string, newShortcut: string, description = actionId): KeybindingConflict[] {
+    const existing = this.bindings.get(actionId);
+    this.bindings.set(actionId, {
+      actionId,
+      description: existing?.description ?? description,
+      shortcut: newShortcut
+    });
+    return this.detectConflicts();
+  }
+
+  detectConflicts(): KeybindingConflict[] {
+    const byShortcut = new Map<string, string[]>();
+    for (const b of this.bindings.values()) {
+      const norm = normalizeShortcut(b.shortcut);
+      const list = byShortcut.get(norm) ?? [];
+      list.push(b.actionId);
+      byShortcut.set(norm, list);
+    }
+    const conflicts: KeybindingConflict[] = [];
+    for (const [shortcut, actionIds] of byShortcut.entries()) {
+      if (actionIds.length > 1) {
+        conflicts.push({ shortcut, actionIds });
+      }
+    }
+    return conflicts;
+  }
+
+  list(): KeybindingEntry[] {
+    return Array.from(this.bindings.values());
+  }
+}
+
+export interface CompletionNotification {
+  exitCode: number;
+  reason: 'osc133' | 'bell';
+  timestamp: number;
+}
+
+/**
+ * Inspects PTY output stream for OSC 133 command completion (`\x1b]133;D;<exitCode>\x07`) or bell (`\x07`).
+ */
+export function detectCommandCompletion(ptyChunk: string): CompletionNotification | null {
+  const osc133Prefix = `${ESC}]133;D`;
+  const idx = ptyChunk.indexOf(osc133Prefix);
+  if (idx >= 0) {
+    const after = ptyChunk.slice(idx + osc133Prefix.length);
+    const codeMatch = after.match(/^;([0-9]+)/);
+    const exitCode = codeMatch && codeMatch[1] ? Number.parseInt(codeMatch[1], 10) : 0;
+    return {
+      exitCode,
+      reason: 'osc133',
+      timestamp: Date.now()
+    };
+  }
+  if (ptyChunk.includes(BEL)) {
+    return {
+      exitCode: 0,
+      reason: 'bell',
+      timestamp: Date.now()
+    };
+  }
+  return null;
+}
+
+export const SPECIAL_KEYS_ROW = ['Esc', 'Tab', 'Ctrl', 'Alt', 'Up', 'Down', 'Left', 'Right'] as const;
+export type SpecialKeyLabel = (typeof SPECIAL_KEYS_ROW)[number];
+
+export function translateSpecialKey(key: SpecialKeyLabel): string {
+  switch (key) {
+    case 'Esc':
+      return ESC;
+    case 'Tab':
+      return String.fromCharCode(9);
+    case 'Up':
+      return `${ESC}[A`;
+    case 'Down':
+      return `${ESC}[B`;
+    case 'Right':
+      return `${ESC}[C`;
+    case 'Left':
+      return `${ESC}[D`;
+    default:
+      return '';
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "./src",
+    "outDir": "./dist-types",
+    "paths": {
+      "@webssh/protocol": ["../../packages/protocol/src/index.ts"],
+      "@webssh/ui-kit": ["../../packages/ui-kit/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/ui-kit" }
+  ]
+}

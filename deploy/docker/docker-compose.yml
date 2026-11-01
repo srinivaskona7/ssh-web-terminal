@@ -1,0 +1,24 @@
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    ports:
+      - "8080:8080"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      LISTEN_ADDR: ":8080"
+      ALLOWED_ORIGINS: "http://localhost:4173,https://localhost:4173"
+      SESSION_GRACE: "15m"
+      RING_BUFFER_BYTES: "4194304"
+      MAX_SESSIONS_PER_USER: "10"
+      RATE_LIMITS: "30"
+    healthcheck:
+      test: ["CMD", "/webssh-gateway", "-healthcheck"]
+      interval: 15s
+      timeout: 3s
+      retries: 3

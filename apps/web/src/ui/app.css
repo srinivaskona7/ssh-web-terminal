@@ -1,0 +1,205 @@
+.webssh-app {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  background-color: var(--color-bg-canvas);
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size-md);
+  line-height: var(--font-line-height-ui);
+  overflow: hidden;
+}
+
+.webssh-app--pseudo-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  z-index: 9999;
+}
+
+.webssh-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-3);
+  background-color: var(--color-bg-surface);
+  border-bottom: var(--border-hairline);
+  gap: var(--space-2);
+}
+
+.webssh-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  overflow-x: auto;
+}
+
+.webssh-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: var(--border-hairline);
+  background-color: var(--color-bg-canvas);
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.webssh-tab--active {
+  background-color: var(--color-bg-elevated);
+  color: var(--color-fg-primary);
+  border: var(--border-strong);
+}
+
+.webssh-status-dot {
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-pill);
+  background-color: var(--color-status-success);
+}
+
+.webssh-status-dot--reconnecting {
+  background-color: var(--color-status-warning);
+}
+
+.webssh-status-dot--offline {
+  background-color: var(--color-status-danger);
+}
+
+.webssh-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-3);
+  background-color: var(--color-bg-elevated);
+  border-bottom: var(--border-hairline);
+  font-size: var(--font-size-sm);
+}
+
+.webssh-workspace-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.webssh-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  background-color: var(--color-bg-surface);
+  border-right: var(--border-hairline);
+}
+
+.webssh-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background-color: var(--color-bg-canvas);
+}
+
+.webssh-terminal-viewport {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-terminal-inset);
+  background-color: var(--color-terminal-bg);
+  color: var(--color-terminal-fg);
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-md);
+  line-height: var(--font-line-height-terminal);
+  overflow: auto;
+  position: relative;
+}
+
+.webssh-terminal-cursor {
+  display: inline-block;
+  width: var(--space-2);
+  height: var(--space-4);
+  background-color: var(--color-terminal-cursor);
+  vertical-align: text-bottom;
+}
+
+.webssh-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-3);
+  background-color: var(--color-bg-surface);
+  border-top: var(--border-hairline);
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-xs);
+  gap: var(--space-3);
+}
+
+.webssh-fullscreen-hover-zone {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--space-3);
+  z-index: 10000;
+}
+
+.webssh-fullscreen-overlay-bar {
+  position: fixed;
+  top: var(--space-2);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-panel);
+  background-color: var(--color-bg-overlay);
+  border: var(--border-strong);
+  box-shadow: var(--elevation-2);
+  z-index: 10001;
+}
+
+.webssh-fullscreen-toast {
+  position: fixed;
+  bottom: var(--space-5);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-pill);
+  background-color: var(--color-bg-overlay);
+  border: var(--border-strong);
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-sm);
+  box-shadow: var(--elevation-2);
+  z-index: 10002;
+}
+
+.webssh-panel-content {
+  flex: 1;
+  padding: var(--space-4);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.webssh-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-3);
+}
+
+.webssh-special-keys {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background-color: var(--color-bg-surface);
+  border-top: var(--border-hairline);
+  overflow-x: auto;
+}
