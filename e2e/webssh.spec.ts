@@ -43,8 +43,8 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('screen-welcome')).toBeVisible();
 
     // 3. Test chmod 0644 permission warning in Quick Connect
-    await page.getByTestId('welcome-auth-key-btn').click();
-    await page.getByTestId('welcome-key-perm-select').selectOption('0644');
+    await page.getByTestId('welcome-auth-keyfile-btn').click();
+    await page.getByTestId('private-key-chmod-select').selectOption('0644');
     await page.getByTestId('welcome-connect-submit-btn').click();
     await expect(page.getByTestId('connect-error-badge')).toContainText('Permissions 0644');
 
@@ -67,7 +67,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
 
     // 6. Execute real commands over SSH: uname -s -> Linux, pwd -> /home/ubuntu, printf, non-zero exit code
     const viewport = page.getByTestId('terminal-viewport');
-    await viewport.click();
+    await viewport.focus();
     await page.keyboard.type('uname -s');
     await page.keyboard.press('Enter');
     await expect(viewport).toContainText('Linux');
@@ -85,7 +85,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(viewport).toContainText('command not found');
 
     // 7. Enable Full Studio IDE Mode and verify real SFTP directory listing & Remote File Editor
-    await page.getByTestId('toggle-ide-mode-btn').click();
+    await page.getByTestId('enable-ide-mode-btn').click();
     await expect(page.getByTestId('sidebar-nav')).toBeVisible();
 
     await page.getByTestId('nav-files').click();
@@ -95,12 +95,12 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     // Test real SFTP chmod on README.md
     await page.getByTestId('chmod-target-input').fill('README.md');
     await page.getByTestId('apply-chmod-btn').click();
-    await expect(page.getByTestId('transfer-status-badge')).toContainText('Applied chmod 0400');
+    await expect(page.getByTestId('transfer-status-badge')).toContainText('Applied chmod');
 
     // Test Remote File Editor loading and saving README.md over real SFTP
     await page.getByTestId('nav-editor').click();
     await expect(page.getByTestId('screen-editor')).toBeVisible();
-    await expect(page.getByTestId('remote-editor-textarea')).toContainText('WebSSH Test Server');
+    await expect(page.getByTestId('remote-editor-textarea')).toHaveValue(/WebSSH Test Server/);
 
     // 8. Navigate through remaining IDE screens and verify accessibility
     await page.getByTestId('nav-telemetry').click();

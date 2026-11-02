@@ -423,10 +423,13 @@ export function App(): JSX.Element {
 
   const refreshSftpDirectory = async (
     targetPath = sftpCurrentPath,
-    sessionClient = liveSessionRef.current
+    sessionClient = liveSessionRef.current,
+    preserveStatus = false
   ): Promise<void> => {
     if (!sessionClient || !sessionClient.isConnected) {
-      setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
+      if (!preserveStatus) {
+        setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
+      }
       return;
     }
     try {
@@ -434,12 +437,16 @@ export function App(): JSX.Element {
       if (res.ok && res.entries) {
         setSftpCurrentPath(targetPath);
         setSftpRawEntries(res.entries);
-        setTransferStatus(`Listed ${res.entries.length} remote items in ${targetPath}`);
-      } else {
+        if (!preserveStatus) {
+          setTransferStatus(`Listed ${res.entries.length} remote items in ${targetPath}`);
+        }
+      } else if (!preserveStatus) {
         setTransferStatus(`SFTP list error: ${res.error ?? 'Unknown error'}`);
       }
     } catch (err) {
-      setTransferStatus(`SFTP list failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (!preserveStatus) {
+        setTransferStatus(`SFTP list failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   };
 
@@ -2090,7 +2097,7 @@ export function App(): JSX.Element {
             </Button>
 
             {ideMode ? (
-              <>
+              <div data-testid="sidebar-nav" style={{ display: 'contents' }}>
                 <Button
                   variant={activeScreen === 'features' ? 'primary' : 'ghost'}
                   onClick={() => setActiveScreen('features')}
@@ -2161,7 +2168,7 @@ export function App(): JSX.Element {
                 >
                   <Icon name="settings" /> Settings
                 </Button>
-              </>
+              </div>
             ) : null}
           </nav>
         ) : null}
@@ -2179,6 +2186,7 @@ export function App(): JSX.Element {
                     data-testid="terminal-viewport"
                     className="webssh-terminal-viewport"
                     style={{ fontSize: `${fontSize}px`, fontFamily }}
+                    onClick={() => terminalViewRef.current?.focus()}
                     onKeyDown={handleTerminalKeyDown}
                   >
                     {/* Progressive 5-Color ASCII Banner (Lime -> Yellow -> Orange -> Coral -> Pink, Zero Copyrights) */}
@@ -3267,7 +3275,7 @@ export function App(): JSX.Element {
                   Storage Guard: {quotaSnap.percentUsed}% of 256 MiB cap (256 KiB chunks, SHA-256 verified)
                 </Badge>
               </div>
-              <p>{transferStatus}</p>
+              <p data-testid="transfer-status-badge">{transferStatus}</p>
               <input
                 type="search"
                 className="ui-input"
@@ -3298,7 +3306,7 @@ export function App(): JSX.Element {
                 </div>
                 <ul>
                   {sftpEntries.map((entry) => (
-                    <li key={entry.path}>
+                    <li key={entry.path} data-testid={`sftp-row-${entry.name}`}>
                       <strong>{entry.isDir ? `[DIR] ${entry.name}` : entry.name}</strong> — {entry.size} bytes ({entry.mode})
                     </li>
                   ))}
@@ -3313,7 +3321,17 @@ export function App(): JSX.Element {
                       {chmodFormatted.octal} ({chmodFormatted.symbolic})
                     </Badge>
                   </div>
-                  <p>Target: <code>{chmodTargetFile}</code></p>
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+                    <label htmlFor="chmod-target-input">Target:</label>
+                    <input
+                      id="chmod-target-input"
+                      type="text"
+                      className="ui-input"
+                      value={chmodTargetFile}
+                      onInput={(e) => setChmodTargetFile((e.target as HTMLInputElement).value)}
+                      data-testid="chmod-target-input"
+                    />
+                  </div>
                   <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
                     <label>
                       <input
@@ -3375,7 +3393,7 @@ export function App(): JSX.Element {
                               setTransferStatus(
                                 `Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`
                               );
-                              void refreshSftpDirectory(sftpCurrentPath, activeClient);
+                              void refreshSftpDirectory(sftpCurrentPath, activeClient, true);
                             } else {
                               setTransferStatus(`chmod failed on ${chmodTargetFile}: ${res.error ?? 'Unknown error'}`);
                             }
@@ -3518,6 +3536,7 @@ export function App(): JSX.Element {
                 className="ui-input"
                 rows={10}
                 aria-label="Remote file content"
+                data-testid="remote-editor-textarea"
                 value={editorContent}
                 onInput={(e) => {
                   setEditorContent((e.target as HTMLTextAreaElement).value);

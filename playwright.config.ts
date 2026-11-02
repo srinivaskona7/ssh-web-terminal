@@ -1,5 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
 
+process.env.NO_PROXY = '127.0.0.1,localhost';
+process.env.no_proxy = '127.0.0.1,localhost';
+delete process.env.HTTP_PROXY;
+delete process.env.http_proxy;
+delete process.env.HTTPS_PROXY;
+delete process.env.https_proxy;
+
 const basePath = process.env.VITE_BASE_PATH || '/ssh-web-terminal/';
 const normalizedBase = basePath.startsWith('/') ? basePath : '/ssh-web-terminal/';
 const previewPort = process.env.PLAYWRIGHT_PORT || '4273';
@@ -18,7 +25,12 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] }
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+          ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+          : undefined
+      }
     },
     {
       name: 'firefox',
@@ -32,7 +44,7 @@ export default defineConfig({
   webServer: [
     {
       command:
-        'export PATH="/usr/local/go/bin:/opt/homebrew/bin:$HOME/go/bin:$PATH" && cd apps/gateway && GOPROXY=direct GOSUMDB=off ENABLE_TESTSSHD=1 LISTEN_ADDR=127.0.0.1:8080 TESTSSHD_PASSWORD=testpass123 go run ./cmd/gateway',
+        'export PATH="/usr/local/go/bin:/opt/homebrew/bin:$HOME/go/bin:$PATH" && cd apps/gateway && ENABLE_TESTSSHD=1 LISTEN_ADDR=127.0.0.1:8080 TESTSSHD_PASSWORD=testpass123 go run ./cmd/gateway',
       url: 'http://127.0.0.1:8080/healthz',
       reuseExistingServer: !process.env.CI,
       timeout: 60000

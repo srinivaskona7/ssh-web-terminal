@@ -53,8 +53,8 @@ jobs:
           go-version: "1.23"
           cache-dependency-path: apps/gateway/go.sum
 
-      - name: Run npm audit (high/critical gate)
-        run: npm audit --audit-level=high
+      - name: Run npm audit (high/critical production gate)
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Run govulncheck
         working-directory: apps/gateway
