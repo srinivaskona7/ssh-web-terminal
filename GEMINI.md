@@ -7,6 +7,7 @@ Synchronized with `memory/MEMORY.md` and `memory/SESSION_PLAN.md`.
 - `packages/ui-kit/`: Design token pipeline (`tokens.json` → `tokens.css` & TypeScript definitions), theme presets, self-hosted WOFF2 fonts, 1.5px line icons, and accessible UI primitives.
 - `packages/protocol/`: Binary framing (`[type:u8][channel:u16][seq:u64][len:u32][payload]`), control message schema, credit-based flow control, and sequence replay helpers for TypeScript and Go.
 - `apps/web/`: Vite + Preact + TypeScript strict client (`src/vault`, `src/transport`, `src/terminal`, `src/files`, `src/prefs`, `src/hosts`, `src/ui`).
+- `apps/relay/`: Cloudflare Worker WebSocket-to-TCP SSH relay (`src/index.ts`, `src/policy.ts`, `wrangler.jsonc`) using `cloudflare:sockets` `connect()`.
 - `apps/gateway/`: Go 1.22+ WebSocket-to-SSH/SFTP gateway (`internal/policy`, `internal/session`, `internal/sshbridge`, `internal/sftpbridge`, `internal/auth`, `internal/audit`).
 - `e2e/`: Playwright cross-browser E2E, full-screen, and `@axe-core/playwright` accessibility suites.
 - `deploy/`: Distroless non-root Docker config (`deploy/docker`) and Fly.io configuration (`deploy/fly`).

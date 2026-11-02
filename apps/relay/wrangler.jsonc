@@ -1,0 +1,26 @@
+{
+  // Cloudflare Worker SSH Relay Configuration (GitHub Pages -> Cloudflare Worker -> Approved SSH Hosts)
+  // Deploy via Cloudflare Workers Builds (Root directory: apps/relay) or `npx wrangler deploy`.
+  "name": "webssh-studio-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-02-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    // Comma-separated allowed browser Origins (never use "*" in production)
+    "ALLOWED_ORIGINS": "https://srinivaskona7.github.io,http://localhost:4173,http://127.0.0.1:4173,http://localhost:4273,http://127.0.0.1:4273",
+    // Comma-separated approved SSH target hostnames, IPs, or wildcard patterns (e.g. "ec2-*.compute.amazonaws.com,203.0.113.10").
+    // REQUIRED: Empty ALLOWED_SSH_TARGETS denies all connections by default (never an open TCP proxy).
+    "ALLOWED_SSH_TARGETS": "",
+    // Comma-separated permitted SSH TCP ports
+    "ALLOWED_SSH_PORTS": "22,2222",
+    // Connection & banner handshake timeout in milliseconds
+    "CONNECT_TIMEOUT_MS": "8000",
+    // Idle stream timeout in milliseconds (15 minutes)
+    "IDLE_TIMEOUT_MS": "900000"
+  }
+  // Secrets (configure in Cloudflare Dashboard -> Worker -> Settings -> Variables and Secrets, NEVER commit):
+  // - RELAY_AUTH_TOKEN: Required shared bearer/subprotocol/query token for authenticating WebSocket clients
+}

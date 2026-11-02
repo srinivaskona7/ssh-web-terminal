@@ -24,10 +24,12 @@ import { HostRegistry, type HostProfile } from '../hosts';
 import { PreferencesStore, type CursorShape, type LayoutPreset } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
 import {
+  BrowserSshRelaySessionClient,
   LiveGatewaySessionClient,
   deriveGatewayHealthUrl,
   resolveGatewayWsUrl,
-  validateGatewayWsUrl
+  validateGatewayWsUrl,
+  type TransportBackendMode
 } from '../transport';
 import {
   AsciicastRecorder,
@@ -166,7 +168,7 @@ export function App(): JSX.Element {
 
   const vault = useMemo(() => new KeyVault(), []);
   const knownHosts = useMemo(() => new KnownHostsStore(), []);
-  const liveSessionRef = useRef<LiveGatewaySessionClient | null>(null);
+  const liveSessionRef = useRef<LiveGatewaySessionClient | BrowserSshRelaySessionClient | null>(null);
   const hostKeyDecisionResolverRef = useRef<((trusted: boolean) => void) | null>(null);
   const storageGuard = useMemo(() => new StorageGuard(), []);
   const snippetLib = useMemo(
@@ -258,6 +260,15 @@ export function App(): JSX.Element {
   const [editorContent, setEditorContent] = useState('');
   const [editorSaved, setEditorSaved] = useState(true);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
+  const [transportMode, setTransportMode] = useState<TransportBackendMode>(() => {
+    try {
+      const saved = globalThis.localStorage?.getItem('webssh.transport.mode');
+      if (saved === 'cloudflare-relay' || saved === 'go-gateway') return saved;
+    } catch {
+      // ignore
+    }
+    return 'go-gateway';
+  });
   const [gatewayUrl, setGatewayUrl] = useState<string>(() => resolveGatewayWsUrl());
   const [gatewayAuthToken, setGatewayAuthToken] = useState<string>(() => {
     try {
@@ -651,20 +662,21 @@ export function App(): JSX.Element {
             ? 'private_key'
             : 'remote_signer';
 
-      const client = new LiveGatewaySessionClient({
+      const sessionParams = {
+        transportMode,
         gatewayUrl: gwValidation.normalizedUrl,
         gatewayAuthToken,
         host: hostVal,
         port: portNum,
         user: userVal,
-        authMethod: protocolAuthMethod,
+        authMethod: protocolAuthMethod as 'password' | 'private_key' | 'remote_signer',
         password: connectPassword,
         privateKeyPem: authMethod === 'Private Key (.pem / id_rsa)' ? uploadedKeyContent : undefined,
         publicKey: authMethod === 'Argon2id Ed25519 Key' ? generatedPubKey : undefined,
         keyFingerprint: generatedFp,
         cols,
         rows,
-        onPtyData: (_channel, data) => {
+        onPtyData: (_channel: number, data: Uint8Array) => {
           try {
             xtermAdapterRef.current?.writeBytes(data);
           } catch {
@@ -681,7 +693,14 @@ export function App(): JSX.Element {
             setTerminalLines((prev) => [...prev.slice(-200), ...cleaned]);
           }
         },
-        onHostKeyPrompt: async (prompt) => {
+        onHostKeyPrompt: async (prompt: {
+          type: 'hostkey_prompt';
+          host: string;
+          port: number;
+          algorithm: string;
+          fingerprint: string;
+          publicKeyBase64: string;
+        }) => {
           const v = knownHosts.verify(
             prompt.host,
             prompt.port,
@@ -715,7 +734,13 @@ export function App(): JSX.Element {
           );
           return true;
         },
-        onSignRequest: async (req) => {
+        onSignRequest: async (req: {
+          type: 'sign_request';
+          requestId: string;
+          keyFingerprint: string;
+          algorithm: string;
+          dataBase64: string;
+        }) => {
           const allKeys = vault.listKeys();
           if (allKeys[0]) {
             const resp = await vault.signChallenge(
@@ -726,18 +751,23 @@ export function App(): JSX.Element {
           }
           return '';
         },
-        onChannelClosed: (channel) => {
+        onChannelClosed: (channel: number) => {
           setTabs((prev) =>
             prev.map((t) => (t.channelId === channel ? { ...t, connected: false } : t))
           );
         },
-        onStateChange: (st) => {
+        onStateChange: (st: string) => {
           if (st === 'disconnected') {
             setConnectionState('disconnected');
             setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
           }
         }
-      });
+      };
+
+      const client =
+        transportMode === 'cloudflare-relay'
+          ? new BrowserSshRelaySessionClient(sessionParams)
+          : new LiveGatewaySessionClient(sessionParams);
 
       try {
         const meta = await client.connect();
@@ -779,6 +809,11 @@ export function App(): JSX.Element {
         if (meta.sftpReady) {
           void refreshSftpDirectory('~', client);
           void loadRemoteFileIntoEditor('README.md', client);
+        } else {
+          setSftpRawEntries([]);
+          setTransferStatus(
+            'Cloudflare Worker TCP Relay active — Terminal PTY, Tabs, Split Panes & Exec are live. SFTP, Remote Editor, and Ring-Buffer Resume require Go SSH/SFTP Gateway mode.'
+          );
         }
       } catch (err) {
         liveSessionRef.current = null;
@@ -2864,9 +2899,38 @@ export function App(): JSX.Element {
                   onSubmit={handleConnectSubmit}
                   style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}
                 >
+                  <div>
+                    <label htmlFor="welcome-transport-mode-select">SSH Transport Mode</label>
+                    <select
+                      id="welcome-transport-mode-select"
+                      className="ui-input"
+                      value={transportMode}
+                      onChange={(e) => {
+                        const mode = (e.target as HTMLSelectElement).value as TransportBackendMode;
+                        setTransportMode(mode);
+                        try {
+                          globalThis.localStorage?.setItem('webssh.transport.mode', mode);
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      data-testid="welcome-transport-mode-select"
+                    >
+                      <option value="go-gateway">
+                        Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)
+                      </option>
+                      <option value="cloudflare-relay">
+                        Cloudflare Worker SSH Relay (Browser SSH-2.0 over cloudflare:sockets — Zero Target Agent)
+                      </option>
+                    </select>
+                  </div>
                   <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}>
                     <div style={{ flex: 2, minWidth: '220px' }}>
-                      <label htmlFor="welcome-gateway-url-input">SSH Gateway WebSocket Endpoint (WSS / WS)</label>
+                      <label htmlFor="welcome-gateway-url-input">
+                        {transportMode === 'cloudflare-relay'
+                          ? 'Cloudflare Worker Relay Endpoint (wss://<worker>.workers.dev/ws)'
+                          : 'SSH Gateway WebSocket Endpoint (WSS / WS)'}
+                      </label>
                       <input
                         id="welcome-gateway-url-input"
                         type="text"
@@ -3786,7 +3850,36 @@ export function App(): JSX.Element {
       >
         <form onSubmit={handleConnectSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
           <div>
-            <label htmlFor="connect-gateway-input">SSH Gateway WebSocket URL</label>
+            <label htmlFor="modal-transport-mode-select">SSH Transport Mode</label>
+            <select
+              id="modal-transport-mode-select"
+              className="ui-input"
+              value={transportMode}
+              onChange={(e) => {
+                const mode = (e.target as HTMLSelectElement).value as TransportBackendMode;
+                setTransportMode(mode);
+                try {
+                  globalThis.localStorage?.setItem('webssh.transport.mode', mode);
+                } catch {
+                  // ignore
+                }
+              }}
+              data-testid="modal-transport-mode-select"
+            >
+              <option value="go-gateway">
+                Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)
+              </option>
+              <option value="cloudflare-relay">
+                Cloudflare Worker SSH Relay (Browser SSH-2.0 over cloudflare:sockets — Zero Target Agent)
+              </option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="connect-gateway-input">
+              {transportMode === 'cloudflare-relay'
+                ? 'Cloudflare Worker Relay URL (wss://<worker>.workers.dev/ws)'
+                : 'SSH Gateway WebSocket URL'}
+            </label>
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <input
                 id="connect-gateway-input"

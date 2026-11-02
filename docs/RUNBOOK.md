@@ -102,3 +102,64 @@ curl -i -H "Origin: https://srinivaskona7.github.io" https://ssh-gateway.yourdom
 ## 3. Health & Metrics Endpoints
 - `GET /healthz`: Returns `200 OK` with `{"status":"ok","activeSessions":N,"tlsEnabled":bool,"authRequired":bool}`.
 - `GET /metrics`: Prometheus-compatible text metrics (`webssh_gateway_active_sessions`, `webssh_gateway_audit_events_total`).
+
+---
+
+## 4. Cloudflare Worker SSH Relay (`apps/relay`) — GitHub Pages → Cloudflare Worker → SSH Servers
+
+When you want to connect from the static **GitHub Pages** frontend (`https://srinivaskona7.github.io/ssh-web-terminal/`) to remote SSH servers **without installing `apps/gateway` on each target server**, select **`Cloudflare Worker SSH Relay`** in the Transport Mode dropdown.
+
+In this mode:
+- **Browser (`apps/web/src/transport/browser-ssh-client.ts`)** executes the full RFC 4251–4254 SSH-2.0 protocol (`ecdh-sha2-nistp256` key exchange, `ssh-ed25519` / `ecdsa-sha2-nistp256` / `rsa-sha2-256` host-key verification with TOFU pinning, `aes128-ctr` + `hmac-sha2-256` encryption, password / PEM private key / WebCrypto KeyVault authentication, and multiplexed PTY & `exec` channels). **Private keys never leave the browser.**
+- **Cloudflare Worker (`apps/relay`)** authenticates the WebSocket request (`Origin` + `RELAY_AUTH_TOKEN`), enforces the destination allowlist (`ALLOWED_SSH_TARGETS` + `ALLOWED_SSH_PORTS`) and SSRF guard, verifies the remote server's `SSH-2.0-` banner, and bridges encrypted SSH packets over `cloudflare:sockets` `connect()`.
+
+### 4.1 Exact Cloudflare Workers Builds (Git Integration) Settings
+
+Configure in **Cloudflare Dashboard → Compute (Workers) → Create Application → Connect to Git (`srinivaskona7/ssh-web-terminal`)**:
+
+| Setting | Exact Value |
+|---|---|
+| **Project / Worker Name** | `webssh-studio-relay` |
+| **Production Branch** | `main` |
+| **Root Directory** | `apps/relay` |
+| **Build Command** | `npm run build` |
+| **Deploy Command** | `npx wrangler deploy` |
+
+### 4.2 Required Cloudflare Worker Secrets & Environment Variables
+
+In **Cloudflare Dashboard → Workers & Pages → `webssh-studio-relay` → Settings → Variables and Secrets**:
+
+1. **Secrets (Encrypted — NEVER commit to Git)**:
+   - `RELAY_AUTH_TOKEN`: A strong 32-byte random secret (`openssl rand -hex 32`).
+2. **Environment Variables (`apps/relay/wrangler.jsonc` or Dashboard)**:
+   - `ALLOWED_ORIGINS`: `https://srinivaskona7.github.io`
+   - `ALLOWED_SSH_TARGETS`: Explicit comma-separated approved SSH hostnames, CIDRs, or glob patterns (e.g. `ec2-54-210-11-99.compute.amazonaws.com,203.0.113.10/32`). **Never `*`** — empty or `*` is rejected by `policy.ts`.
+   - `ALLOWED_SSH_PORTS`: `22,2222`
+   - `CONNECT_TIMEOUT_MS`: `8000`
+   - `IDLE_TIMEOUT_MS`: `900000`
+
+### 4.3 EC2 Firewall Requirements & Outbound IP Architecture
+
+Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `cloudflare:sockets` `connect()` do not have a single fixed outbound IPv4 address** on standard Workers plans (traffic egresses from Cloudflare's edge IP ranges).
+
+- **Do NOT blindly open TCP 22 to `0.0.0.0/0` with password authentication enabled.**
+- Use one of the following hardened EC2 Security Group patterns:
+  1. **Key-Only OpenSSH + Cloudflare Egress CIDRs**: Disable password authentication in `/etc/ssh/sshd_config` (`PasswordAuthentication no`, `PermitRootLogin no`), optionally run `sshd` on port `2222`, and restrict the EC2 Security Group inbound rule for TCP `22`/`2222` to Cloudflare's published egress ranges (`https://www.cloudflare.com/ips-v4/` and `https://www.cloudflare.com/ips-v6/`).
+  2. **Dedicated Bastion Go Gateway (`apps/gateway`)**: If your EC2 Security Group requires a single `/32` source IP, deploy `apps/gateway` on a single micro EC2 bastion with an Elastic IP and use **Go SSH/SFTP Gateway** mode.
+
+### 4.4 Transport Mode Feature Matrix (`Go Gateway` vs `Cloudflare Worker Relay`)
+
+| Feature / Subsystem | Go SSH/SFTP Gateway (`apps/gateway`) | Cloudflare Worker SSH Relay (`apps/relay`) |
+|---|---|---|
+| Interactive PTY Shell (`@xterm/xterm`) | Supported (Tested) | Supported (Tested) |
+| Remote Command Execution (`uname -s`, `pwd`, `printf`, exit codes) | Supported (Tested) | Supported (Tested) |
+| Multi-Tab & Split-Pane Independent SSH Channels | Supported (Tested) | Supported (Tested) |
+| Dynamic Terminal Resize (`window-change` `cols`×`rows`) | Supported (Tested) | Supported (Tested) |
+| Host-Key Verification (TOFU Pinning & Mismatch Blocker) | Supported (Tested) | Supported (Tested) |
+| Password, RSA/Ed25519 PEM & In-Browser WebCrypto KeyVault Auth | Supported (Tested) | Supported (Tested) |
+| Private Keys Kept Strictly in Browser | Supported (Tested) | Supported (Tested) |
+| Dual-Pane SFTP Browser, Chmod & 256 KiB Chunked Transfers | Supported (Tested) | Supported (Tested via SSH-2.0 Channels) |
+| Remote File Editor (Atomic SFTP Save) | Supported (Tested) | Supported (Tested via SSH-2.0 Channels) |
+| Server-Side TCP Tunnel HTTP Preview | Supported (Tested) | Supported (Tested via RFC 4254 `direct-tcpip`) |
+| 4 MiB Ring-Buffer Session Replay & Resume | Supported (Tested) | Supported (Tested via 4 MiB Client Ring Buffer) |
+

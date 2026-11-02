@@ -514,7 +514,10 @@ export function resolveGatewayWsUrl(explicitUrl?: string): string {
   return `${proto}://${hostname}:8080/ws`;
 }
 
+export type TransportBackendMode = 'go-gateway' | 'cloudflare-relay';
+
 export interface LiveConnectParams {
+  transportMode?: TransportBackendMode;
   gatewayUrl?: string;
   gatewayAuthToken?: string;
   host: string;

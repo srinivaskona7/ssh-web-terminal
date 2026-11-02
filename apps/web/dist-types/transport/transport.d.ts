@@ -98,7 +98,9 @@ export interface GatewayUrlValidationResult {
 export declare function validateGatewayWsUrl(rawUrl: string): GatewayUrlValidationResult;
 export declare function deriveGatewayHealthUrl(wsUrl: string): string;
 export declare function resolveGatewayWsUrl(explicitUrl?: string): string;
+export type TransportBackendMode = 'go-gateway' | 'cloudflare-relay';
 export interface LiveConnectParams {
+    transportMode?: TransportBackendMode;
     gatewayUrl?: string;
     gatewayAuthToken?: string;
     host: string;

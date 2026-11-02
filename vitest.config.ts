@@ -18,6 +18,7 @@ export default defineConfig({
     setupFiles: ['./apps/web/src/test-setup.ts'],
     include: [
       'packages/**/*.test.ts',
+      'apps/relay/src/**/*.test.ts',
       'apps/web/src/**/*.test.ts',
       'apps/web/src/**/*.test.tsx'
     ],
@@ -26,6 +27,7 @@ export default defineConfig({
       reporter: ['text', 'json-summary'],
       include: [
         'packages/protocol/src/**/*.ts',
+        'apps/relay/src/**/*.ts',
         'apps/web/src/vault/**/*.ts',
         'apps/web/src/transport/**/*.ts',
         'apps/web/src/files/**/*.ts',
