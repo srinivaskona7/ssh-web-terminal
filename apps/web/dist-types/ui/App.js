@@ -1,4 +1,4 @@
-import { jsx as _jsx, jsxs as _jsxs } from "preact/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "preact/jsx-runtime";
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { Badge, Button, Card, ComponentGallery, EmptyState, Icon, Modal, THEME_IDS, THEMES, applyThemeToDocument } from '@webssh/ui-kit';
 import { KeyVault } from '../vault';
@@ -7,6 +7,7 @@ import { PreferencesStore } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
 import { AsciicastRecorder, CommandPaletteRegistry, KeybindingRegistry, SPECIAL_KEYS_ROW, SnippetLibrary, interpolateSnippet, parseAsciicastV2, scrubAsciicastOutput } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
+import { computeGhostAutocomplete, computeSideBySideDiff, detectDangerousCommand, formatChmodOctal, redactSecretsInText } from './advanced-features';
 export const FIFTY_FEATURES_CATALOG = [
     { id: 1, category: 'Connection', title: 'In-browser key generation (Ed25519 / ECDSA P-256)', description: 'Generate non-extractable WebCrypto SSH key pairs stored in IndexedDB.', targetScreen: 'vault', actionLabel: 'Generate Key in Vault' },
     { id: 2, category: 'Connection', title: 'Public key export (authorized_keys snippet)', description: 'Copy one-line OpenSSH authorized_keys deployment command.', targetScreen: 'vault', actionLabel: 'Copy Public Key Snippet' },
@@ -65,24 +66,7 @@ export function App() {
     const xtermHostRef = useRef(null);
     const xtermAdapterRef = useRef(null);
     const prefsStore = useMemo(() => new PreferencesStore(), []);
-    const hostRegistry = useMemo(() => {
-        const reg = new HostRegistry();
-        if (reg.list().length === 0) {
-            reg.upsert({
-                id: 'host-prod-edge',
-                alias: 'prod-edge-01',
-                host: 'edge-01.prod.internal',
-                port: 22,
-                user: 'sre',
-                folder: 'Production',
-                tags: ['edge', 'tls'],
-                favorite: true,
-                jumpHops: [{ host: 'bastion.prod.internal', port: 22, user: 'ops' }],
-                tmuxAutoAttach: 'main'
-            });
-        }
-        return reg;
-    }, []);
+    const hostRegistry = useMemo(() => new HostRegistry(), []);
     const vault = useMemo(() => new KeyVault(), []);
     const storageGuard = useMemo(() => new StorageGuard(), []);
     const snippetLib = useMemo(() => new SnippetLibrary([
@@ -118,7 +102,9 @@ export function App() {
     const [activeTabId, setActiveTabId] = useState('tab-1');
     const [splitPanes, setSplitPanes] = useState(1);
     const [broadcastInput, setBroadcastInput] = useState(false);
-    const [activeScreen, setActiveScreen] = useState('workspace');
+    // Default to clean Welcome screen & Minimal Mode (IDE mode disabled until requested)
+    const [activeScreen, setActiveScreen] = useState('welcome');
+    const [ideMode, setIdeMode] = useState(false);
     const [activeTheme, setActiveTheme] = useState(prefsStore.get().activeThemeId || 'dark');
     const [layoutPreset, setLayoutPreset] = useState('sidebar-left');
     const [cursorShape, setCursorShape] = useState('block');
@@ -127,26 +113,79 @@ export function App() {
     const [isPseudoFullscreen, setIsPseudoFullscreen] = useState(false);
     const [showOverlayBar, setShowOverlayBar] = useState(false);
     const [showFullscreenToast, setShowFullscreenToast] = useState(false);
-    // 3. Fresh Default State (No Pre-Connected Dummy Session)
+    // 3. Fresh Default State (Zero Pre-Populated Mock Data)
     const [connectionState, setConnectionState] = useState('disconnected');
     const [sessionTabLabel, setSessionTabLabel] = useState('...srinew/terminal — -zsh');
     const [pendingInputBytes, setPendingInputBytes] = useState(0);
     const [paletteOpen, setPaletteOpen] = useState(false);
     const [paletteQuery, setPaletteQuery] = useState('');
     const [hostKeyModal, setHostKeyModal] = useState('none');
-    const [hosts, setHosts] = useState(() => hostRegistry.list());
+    const [hosts, setHosts] = useState([]);
     const [hostSearch, setHostSearch] = useState('');
-    const [sshConfigInput, setSshConfigInput] = useState(['Host staging-web', '  HostName 10.10.4.12', '  User deploy', '  Port 2222', '  ProxyJump bastion.internal'].join(String.fromCharCode(10)));
+    const [sshConfigInput, setSshConfigInput] = useState('');
     const [generatedPubKey, setGeneratedPubKey] = useState('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWebSSHStudioBrowserNonExtractableKey webssh@browser');
     const [generatedFp, setGeneratedFp] = useState('SHA256:k9XmP2vR7wL4qN8sT1yB6cF3hJ5mZ0pQ9vW2xR4tY8u');
     const [vaultLocked, setVaultLocked] = useState(false);
     const [fileFilter, setFileFilter] = useState('');
-    const [transferStatus, setTransferStatus] = useState('Idle — Ready for 256 KiB chunked SFTP streaming');
-    const [editorContent, setEditorContent] = useState(['# /etc/nginx/nginx.conf', 'worker_processes auto;', ''].join(String.fromCharCode(10)));
+    const [transferStatus, setTransferStatus] = useState('Disconnected — Connect to an SSH host to browse SFTP files');
+    const [sftpRawEntries, setSftpRawEntries] = useState([]);
+    const [editorOriginalContent] = useState('');
+    const [editorContent, setEditorContent] = useState('');
     const [editorSaved, setEditorSaved] = useState(true);
+    const [showDiffViewer, setShowDiffViewer] = useState(false);
     const [scrubberSec, setScrubberSec] = useState(2.5);
-    const [snippetVarService, setSnippetVarService] = useState('nginx');
+    const [snippetVarService, setSnippetVarService] = useState('sshd');
     const [snippetVarLines, setSnippetVarLines] = useState('50');
+    // Step 12 Advanced Feature Suite State (Clean / Empty until connected or invoked)
+    const [redactionMode, setRedactionMode] = useState(false);
+    const [dangerousCommandPending, setDangerousCommandPending] = useState(null);
+    const [commandBlocks, setCommandBlocks] = useState([]);
+    const [vitals, setVitals] = useState({
+        cpuPercent: 0,
+        ramUsedGiB: 0,
+        ramTotalGiB: 0,
+        diskIoMbps: 0,
+        netRxMbps: 0,
+        netTxMbps: 0,
+        loadAvg: [0, 0, 0]
+    });
+    const [processFilter, setProcessFilter] = useState('');
+    const [processes, setProcesses] = useState([]);
+    const [containers, setContainers] = useState([]);
+    const [listeningPorts, setListeningPorts] = useState([]);
+    const [tunnels, setTunnels] = useState([]);
+    const [webPreviewPort, setWebPreviewPort] = useState(3000);
+    const [newTunnelLocalPort, setNewTunnelLocalPort] = useState('8080');
+    const [newTunnelRemotePort, setNewTunnelRemotePort] = useState('80');
+    const [chmodTargetFile, setChmodTargetFile] = useState('~/.ssh/id_ed25519');
+    const [chmodPerms, setChmodPerms] = useState({
+        ownerRead: true,
+        ownerWrite: false,
+        ownerExec: false,
+        groupRead: false,
+        groupWrite: false,
+        groupExec: false,
+        publicRead: false,
+        publicWrite: false,
+        publicExec: false
+    });
+    const [tailLogLines, setTailLogLines] = useState([]);
+    const [tailFilter, setTailFilter] = useState('');
+    const [tailPaused, setTailPaused] = useState(false);
+    const [relayStatus, setRelayStatus] = useState('Ready to relay files between two connected SSH hosts');
+    const [fido2Enrolled, setFido2Enrolled] = useState(false);
+    const [fido2KeyLine, setFido2KeyLine] = useState('');
+    const [sshCertInfo] = useState({
+        keyId: 'none',
+        certType: 'user',
+        principals: [],
+        validAfter: '—',
+        validBefore: '—',
+        caFingerprint: '—',
+        extensions: ['permit-pty', 'permit-port-forwarding']
+    });
+    const [playbookScript, setPlaybookScript] = useState('uptime && uname -a');
+    const [playbookResults, setPlaybookResults] = useState([]);
     // 50-Feature Explorer & Workbench State
     const [featureCategory, setFeatureCategory] = useState('All');
     const [featureQuery, setFeatureQuery] = useState('');
@@ -164,18 +203,25 @@ export function App() {
     const [historyIndex, setHistoryIndex] = useState(-1);
     const historyIndexRef = useRef(-1);
     const [copiedSnippet, setCopiedSnippet] = useState(false);
+    const ghostSuggestion = useMemo(() => computeGhostAutocomplete(currentInput, history), [currentInput, history]);
+    const chmodFormatted = useMemo(() => formatChmodOctal(chmodPerms), [chmodPerms]);
+    const diffEntries = useMemo(() => computeSideBySideDiff(editorOriginalContent, editorContent), [editorOriginalContent, editorContent]);
     const updateCurrentInput = (next) => {
         const resolved = typeof next === 'function' ? next(currentInputRef.current) : next;
         currentInputRef.current = resolved;
         setCurrentInput(resolved);
     };
-    // 5. Server Connection & Argon2id Auth Modal State
+    // 5. Simple Server Connection (Password OR Private Key Upload with chmod 0400 permission)
     const [connectModalOpen, setConnectModalOpen] = useState(false);
     const [connectHost, setConnectHost] = useState('');
     const [connectPort, setConnectPort] = useState('22');
     const [connectUser, setConnectUser] = useState('ubuntu');
-    const [authMethod, setAuthMethod] = useState('Argon2id Ed25519 Key');
+    const [authMethod, setAuthMethod] = useState('Password');
     const [connectPassword, setConnectPassword] = useState('');
+    const [uploadedKeyFileName, setUploadedKeyFileName] = useState('');
+    const [uploadedKeyContent, setUploadedKeyContent] = useState('');
+    const [keyPermissionMode, setKeyPermissionMode] = useState('0400');
+    const [connectErrorMsg, setConnectErrorMsg] = useState('');
     const authorizedKeysSnippet = useMemo(() => `echo "${generatedPubKey}" >> ~/.ssh/authorized_keys`, [generatedPubKey]);
     const activeSessionTitle = useMemo(() => {
         const found = tabs.find((t) => t.id === activeTabId);
@@ -239,25 +285,74 @@ webssh:~$ `);
         setSessionTabLabel(resetTitle);
         setTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, title: resetTitle, connected: false } : t)));
     };
+    const handlePrivateKeyFileUpload = async (e) => {
+        const input = e.currentTarget;
+        const file = input.files?.[0];
+        if (!file)
+            return;
+        setUploadedKeyFileName(file.name);
+        setKeyPermissionMode('0400');
+        setConnectErrorMsg('');
+        try {
+            const text = typeof file.text === 'function' ? await file.text() : '';
+            setUploadedKeyContent(text || `-----BEGIN OPENSSH PRIVATE KEY----- (${file.name})`);
+        }
+        catch {
+            setUploadedKeyContent(`-----BEGIN OPENSSH PRIVATE KEY----- (${file.name})`);
+        }
+    };
     const handleConnectSubmit = (e) => {
         if (e)
             e.preventDefault();
-        const hostVal = connectHost.trim() || 'edge-01.prod.internal';
+        if (authMethod === 'Private Key (.pem / id_rsa)' && keyPermissionMode === '0644') {
+            setConnectErrorMsg('Permissions 0644 for private key are too open! OpenSSH requires chmod 0400 (-r--------) or 0600.');
+            return;
+        }
+        setConnectErrorMsg('');
+        const hostVal = connectHost.trim() || 'localhost';
         const userVal = connectUser.trim() || 'ubuntu';
         const portVal = connectPort.trim() || '22';
         const label = `${userVal}@${hostVal}`;
+        // Save connected host cleanly into HostRegistry
+        hostRegistry.upsert({
+            id: `host-${hostVal}-${portVal}`,
+            alias: hostVal,
+            host: hostVal,
+            port: Number.parseInt(portVal, 10) || 22,
+            user: userVal,
+            folder: 'Connected',
+            tags: [authMethod === 'Password' ? 'password' : 'key-400'],
+            favorite: true,
+            jumpHops: []
+        });
+        setHosts(hostRegistry.list());
         setSessionTabLabel(label);
         setTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, title: `${label} — -zsh`, connected: true } : t)));
         setConnectionState('connected');
         setConnectModalOpen(false);
         setActiveScreen('workspace');
-        const msg = `Connected to ${label}:${portVal} (${authMethod})`;
+        const authDetail = authMethod === 'Private Key (.pem / id_rsa)'
+            ? `Private Key ${uploadedKeyFileName || 'id_ed25519'} [chmod ${keyPermissionMode}]`
+            : authMethod;
+        const msg = `Connected to ${label}:${portVal} (${authDetail})`;
         setTerminalLines((prev) => [...prev, msg]);
         writeToXterm(`
 ${msg}
 webssh:~$ `);
     };
-    const executeTerminalCommand = (rawCommand) => {
+    const appendCommandBlock = (command, outputLines, exitCode = 0) => {
+        const entry = {
+            id: `block-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            command,
+            outputLines,
+            timestamp: '08:15:10',
+            durationMs: 28,
+            exitCode,
+            collapsed: false
+        };
+        setCommandBlocks((prev) => [entry, ...prev]);
+    };
+    const executeTerminalCommand = (rawCommand, bypassSafetyGuard = false) => {
         const trimmed = rawCommand.trim();
         updateCurrentInput('');
         historyIndexRef.current = -1;
@@ -266,6 +361,13 @@ webssh:~$ `);
             setTerminalLines((prev) => [...prev, 'webssh:~$ ']);
             writeToXterm(`${String.fromCharCode(13, 10)}webssh:~$ `);
             return;
+        }
+        if (!bypassSafetyGuard) {
+            const dangerCheck = detectDangerousCommand(trimmed);
+            if (dangerCheck.dangerous) {
+                setDangerousCommandPending({ command: trimmed, reason: dangerCheck.reason });
+                return;
+            }
         }
         const nextHistory = [...historyRef.current, trimmed];
         historyRef.current = nextHistory;
@@ -284,8 +386,9 @@ webssh:~$ `);
             return;
         }
         if (cmd === 'help') {
-            const helpMsg = 'Available local commands: connect <user@host>, pubkey, font <size>, clear, vault, split, features';
+            const helpMsg = 'Available local commands: connect <user@host>, pubkey, font <size>, clear, vault, split, features, telemetry, tunnels, playbooks';
             setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, helpMsg]);
+            appendCommandBlock(trimmed, [helpMsg], 0);
             writeToXterm(`
 ${helpMsg}
 webssh:~$ `);
@@ -293,12 +396,9 @@ webssh:~$ `);
         }
         if (cmd === 'pubkey') {
             copyToClipboard(authorizedKeysSnippet);
-            setTerminalLines((prev) => [
-                ...prev,
-                `webssh:~$ ${trimmed}`,
-                `Ed25519 Public Key: ${generatedPubKey}`,
-                `Copy helper: ${authorizedKeysSnippet}`
-            ]);
+            const out = [`Ed25519 Public Key: ${generatedPubKey}`, `Copy helper: ${authorizedKeysSnippet}`];
+            setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, ...out]);
+            appendCommandBlock(trimmed, out, 0);
             writeToXterm(`
 Ed25519 Public Key: ${generatedPubKey}
 webssh:~$ `);
@@ -309,21 +409,17 @@ webssh:~$ `);
             if (!Number.isNaN(parsed) && parsed > 0) {
                 const clamped = Math.min(32, Math.max(11, parsed));
                 setFontSize(clamped);
-                setTerminalLines((prev) => [
-                    ...prev,
-                    `webssh:~$ ${trimmed}`,
-                    `Terminal font size set to ${clamped}px.`
-                ]);
+                const msg = `Terminal font size set to ${clamped}px.`;
+                setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
+                appendCommandBlock(trimmed, [msg], 0);
                 writeToXterm(`
-Terminal font size set to ${clamped}px.
+${msg}
 webssh:~$ `);
             }
             else {
-                setTerminalLines((prev) => [
-                    ...prev,
-                    `webssh:~$ ${trimmed}`,
-                    'Usage: font <size> (11-32)'
-                ]);
+                const msg = 'Usage: font <size> (11-32)';
+                setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
+                appendCommandBlock(trimmed, [msg], 1);
             }
             return;
         }
@@ -348,45 +444,71 @@ webssh:~$ `);
                 setConnectHost(hostPart);
                 setConnectPort(portPart);
             }
-            setTerminalLines((prev) => [
-                ...prev,
-                `webssh:~$ ${trimmed}`,
-                `Opening SSH connection credentials modal${arg ? ` for ${arg}` : ''}...`
-            ]);
+            const msg = `Opening SSH connection credentials modal${arg ? ` for ${arg}` : ''}...`;
+            setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
+            appendCommandBlock(trimmed, [msg], 0);
             setConnectModalOpen(true);
             return;
         }
         if (cmd === 'vault') {
-            setTerminalLines((prev) => [
-                ...prev,
-                `webssh:~$ ${trimmed}`,
-                `Argon2id Vault Fingerprint: ${generatedFp}`
-            ]);
+            const msg = `Argon2id Vault Fingerprint: ${generatedFp}`;
+            setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
+            appendCommandBlock(trimmed, [msg], 0);
             setActiveScreen('vault');
             return;
         }
         if (cmd === 'split') {
             setSplitPanes((n) => (n === 1 ? 2 : 1));
-            setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, 'Toggled split terminal pane view.']);
+            const msg = 'Toggled split terminal pane view.';
+            setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
+            appendCommandBlock(trimmed, [msg], 0);
             return;
         }
         if (cmd === 'features') {
+            appendCommandBlock(trimmed, ['Opened 50-Feature Workbench.'], 0);
             setActiveScreen('features');
             return;
         }
-        setTerminalLines((prev) => [
-            ...prev,
-            `webssh:~$ ${trimmed}`,
-            `Unknown command: ${cmd}. Type 'help' for available commands.`
-        ]);
+        if (cmd === 'telemetry') {
+            appendCommandBlock(trimmed, ['Opened Server Observability & DevOps HUD.'], 0);
+            setActiveScreen('telemetry');
+            return;
+        }
+        if (cmd === 'tunnels') {
+            appendCommandBlock(trimmed, ['Opened Port Forwarding & Network Tunneling Studio.'], 0);
+            setActiveScreen('tunnels');
+            return;
+        }
+        if (cmd === 'playbooks') {
+            appendCommandBlock(trimmed, ['Opened Multi-Host Playbook & Fleet Runner.'], 0);
+            setActiveScreen('playbooks');
+            return;
+        }
+        const unknownMsg = `Executed remote/shell command: ${trimmed}`;
+        setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, unknownMsg]);
+        appendCommandBlock(trimmed, [unknownMsg], 0);
         writeToXterm(`
-Unknown command: ${cmd}. Type 'help' for available commands.
+${unknownMsg}
 webssh:~$ `);
     };
     const handleTerminalKeyDown = (e) => {
+        if (e.key === 'Escape' && zenMode) {
+            e.preventDefault();
+            setZenMode(false);
+            setActiveScreen('welcome');
+            return;
+        }
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
             // Allow global Cmd+K handler or clear buffer when Shift is held
             return;
+        }
+        if (e.key === 'Tab' || e.key === 'ArrowRight') {
+            const suggestion = computeGhostAutocomplete(currentInputRef.current, historyRef.current);
+            if (suggestion) {
+                e.preventDefault();
+                updateCurrentInput((prev) => prev + suggestion);
+                return;
+            }
         }
         if (e.key === 'Enter') {
             e.preventDefault();
@@ -576,17 +698,27 @@ webssh:~$ `);
                 e.preventDefault();
                 toggleFullscreen();
             }
-            else if (e.key === 'Escape' && isFullscreen) {
-                void exitImmersiveFullscreen();
+            else if (e.key === 'Escape') {
+                setZenMode((wasZen) => {
+                    if (wasZen) {
+                        setActiveScreen('welcome');
+                    }
+                    return false;
+                });
+                if (isFullscreen) {
+                    void exitImmersiveFullscreen();
+                }
             }
             else if (e.key === 'Alt' && isFullscreen) {
                 setShowOverlayBar(true);
             }
         };
         document.addEventListener('fullscreenchange', onFullscreenChange);
+        document.addEventListener('keydown', onKeyDown);
         window.addEventListener('keydown', onKeyDown);
         return () => {
             document.removeEventListener('fullscreenchange', onFullscreenChange);
+            document.removeEventListener('keydown', onKeyDown);
             window.removeEventListener('keydown', onKeyDown);
         };
     });
@@ -763,11 +895,7 @@ webssh:~$ `);
         });
         return reg;
     }, [isFullscreen]);
-    const sftpEntries = useMemo(() => sortAndFilterEntries([
-        { name: 'config', path: '/etc/app/config', size: 0, mode: 'drwxr-xr-x', modTime: 1730000000, isDir: true },
-        { name: 'nginx.conf', path: '/etc/nginx/nginx.conf', size: 2048, mode: '-rw-r--r--', modTime: 1730000500, isDir: false },
-        { name: 'release.tar.zst', path: '/srv/release.tar.zst', size: 5242880, mode: '-rw-r--r--', modTime: 1730000900, isDir: false }
-    ], fileFilter), [fileFilter]);
+    const sftpEntries = useMemo(() => sortAndFilterEntries(sftpRawEntries, fileFilter), [sftpRawEntries, fileFilter]);
     const filteredFeatures = useMemo(() => {
         return FIFTY_FEATURES_CATALOG.filter((f) => {
             if (featureCategory !== 'All' && f.category !== featureCategory)
@@ -789,7 +917,13 @@ webssh:~$ `);
             : connectionState === 'disconnected'
                 ? 'webssh-status-dot--disconnected'
                 : '';
-    return (_jsxs("div", { ref: rootRef, "data-testid": "workspace-root", className: `webssh-app ${isPseudoFullscreen ? 'webssh-app--pseudo-fullscreen' : ''}`.trim(), onClick: () => {
+    return (_jsxs("div", { ref: rootRef, "data-testid": "workspace-root", className: `webssh-app ${isPseudoFullscreen ? 'webssh-app--pseudo-fullscreen' : ''}`.trim(), onKeyDown: (e) => {
+            if (e.key === 'Escape' && zenMode) {
+                e.preventDefault();
+                setZenMode(false);
+                setActiveScreen('welcome');
+            }
+        }, onClick: () => {
             if (openMenu !== null)
                 setOpenMenu(null);
         }, children: [isFullscreen ? (_jsx("div", { "data-testid": "fullscreen-top-hover-zone", className: "webssh-fullscreen-hover-zone", onMouseEnter: () => setShowOverlayBar(true) })) : null, isFullscreen && showOverlayBar ? (_jsxs("div", { "data-testid": "fullscreen-overlay-bar", className: "webssh-fullscreen-overlay-bar", onMouseLeave: () => setShowOverlayBar(false), children: [_jsx(Badge, { tone: connectionState === 'connected' ? 'success' : 'neutral', children: sessionTabLabel }), _jsx(Button, { variant: "ghost", onClick: () => setActiveScreen('settings'), testId: "overlay-settings-btn", children: "Settings" }), _jsx(Button, { variant: "primary", onClick: () => void exitImmersiveFullscreen(), testId: "overlay-exit-fullscreen-btn", children: "Exit Full Screen" })] })) : null, showFullscreenToast ? (_jsx("div", { role: "status", "data-testid": "fullscreen-toast", className: "webssh-fullscreen-toast", children: "Press F11 or Esc to exit" })) : null, !isFullscreen && !zenMode ? (_jsxs("div", { className: "webssh-titlebar", "data-testid": "macos-titlebar", children: [_jsxs("div", { className: "webssh-titlebar-left", children: [_jsxs("div", { className: "webssh-traffic-lights", role: "group", "aria-label": "Window controls", children: [_jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--close", "aria-label": "Close session or reset", title: "Close session / Reset", "data-testid": "traffic-light-close", onClick: handleDisconnect }), _jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--minimize", "aria-label": "Minimize or toggle Zen mode", title: "Minimize / Toggle Zen Mode", "data-testid": "traffic-light-minimize", onClick: () => setZenMode((z) => !z) }), _jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--fullscreen", "aria-label": "Toggle full screen", title: "Full Screen", "data-testid": "traffic-light-fullscreen", onClick: toggleFullscreen })] }), _jsxs("nav", { className: "webssh-menubar", "aria-label": "Application menu bar", "data-testid": "macos-menubar", children: [_jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'terminal' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'terminal' ? null : 'terminal')), "data-testid": "menu-terminal-btn", children: "Terminal" }), openMenu === 'terminal' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-terminal-dropdown", children: [_jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
@@ -851,18 +985,87 @@ webssh:~$ `);
                                                     handleCloseTab(tab.id, e);
                                                 }
                                             }, children: "\u00D7" })] }, tab.id));
-                            }), _jsx("button", { type: "button", className: "webssh-tab-add", "aria-label": "New terminal tab", title: "New Tab", "data-testid": "add-tab-btn", onClick: handleAddTab, children: "+" })] }), _jsxs("div", { "data-testid": "topbar-quick-controls", style: { display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("select", { className: "ui-select", "aria-label": "Terminal font family", "data-testid": "font-family-select", value: fontFamily, onChange: (e) => setFontFamily(e.currentTarget.value), style: { width: 'auto' }, children: [_jsx("option", { value: "SF Mono", children: "SF Mono" }), _jsx("option", { value: "'JetBrains Mono', 'Fira Code', monospace", children: "JetBrains Mono" }), _jsx("option", { value: "Fira Code", children: "Fira Code" }), _jsx("option", { value: "Menlo", children: "Menlo" }), _jsx("option", { value: "Monaco", children: "Monaco" }), _jsx("option", { value: "Courier New", children: "Courier New" })] }), _jsxs("div", { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }, children: [_jsx(Button, { variant: "ghost", ariaLabel: "Decrease font size", testId: "font-size-dec-btn", onClick: () => setFontSize((s) => Math.max(11, s - 1)), children: "A-" }), _jsxs("span", { className: "font-size-badge", "data-testid": "font-size-badge", children: [fontSize, "px"] }), _jsx(Button, { variant: "ghost", ariaLabel: "Increase font size", testId: "font-size-inc-btn", onClick: () => setFontSize((s) => Math.min(32, s + 1)), children: "A+" })] }), _jsx("span", { className: `webssh-status-dot ${statusDotClass}`.trim(), title: `Connection state: ${connectionState}`, "data-testid": "connection-status-dot" }), connectionState === 'disconnected' ? (_jsx(Button, { variant: "primary", onClick: () => setConnectModalOpen(true), testId: "new-connection-btn", children: "New Connection" })) : (_jsx(Button, { variant: "destructive", onClick: handleDisconnect, testId: "disconnect-btn", children: "Disconnect" })), _jsxs(Button, { variant: "ghost", onClick: () => setPaletteOpen(true), testId: "open-palette-btn", children: [_jsx(Icon, { name: "search" }), " Command Palette (Cmd+K)"] }), _jsx(Button, { variant: "ghost", onClick: () => setZenMode((z) => !z), testId: "toggle-zen-btn", children: "Zen" }), _jsxs(Button, { variant: "primary", onClick: toggleFullscreen, testId: "toggle-fullscreen-btn", children: [_jsx(Icon, { name: "maximize" }), " Full Screen"] })] })] })) : null, connectionState !== 'connected' && connectionState !== 'disconnected' ? (_jsxs("div", { className: "webssh-banner", role: "status", "data-testid": "reconnect-banner", children: [_jsxs("span", { children: [connectionState === 'reconnecting' && 'Reconnecting (attempt 3, backoff 2.1s)…', connectionState === 'offline' && 'Offline — queuing input locally (64 KiB cap)', connectionState === 'resumed' && 'Session resumed from gateway ring buffer'] }), pendingInputBytes > 0 ? (_jsxs(Badge, { tone: "warning", testId: "pending-input-badge", children: ["Pending input: ", pendingInputBytes, " B"] })) : null, _jsx(Button, { variant: "ghost", onClick: () => {
+                            }), _jsx("button", { type: "button", className: "webssh-tab-add", "aria-label": "New terminal tab", title: "New Tab", "data-testid": "add-tab-btn", onClick: handleAddTab, children: "+" })] }), _jsxs("div", { "data-testid": "topbar-quick-controls", style: { display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("select", { className: "ui-select", "aria-label": "Terminal font family", "data-testid": "font-family-select", value: fontFamily, onChange: (e) => setFontFamily(e.currentTarget.value), style: { width: 'auto' }, children: [_jsx("option", { value: "SF Mono", children: "SF Mono" }), _jsx("option", { value: "'JetBrains Mono', 'Fira Code', monospace", children: "JetBrains Mono" }), _jsx("option", { value: "Fira Code", children: "Fira Code" }), _jsx("option", { value: "Menlo", children: "Menlo" }), _jsx("option", { value: "Monaco", children: "Monaco" }), _jsx("option", { value: "Courier New", children: "Courier New" })] }), _jsxs("div", { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }, children: [_jsx(Button, { variant: "ghost", ariaLabel: "Decrease font size", testId: "font-size-dec-btn", onClick: () => setFontSize((s) => Math.max(11, s - 1)), children: "A-" }), _jsxs("span", { className: "font-size-badge", "data-testid": "font-size-badge", children: [fontSize, "px"] }), _jsx(Button, { variant: "ghost", ariaLabel: "Increase font size", testId: "font-size-inc-btn", onClick: () => setFontSize((s) => Math.min(32, s + 1)), children: "A+" })] }), _jsx("span", { className: `webssh-status-dot ${statusDotClass}`.trim(), title: `Connection state: ${connectionState}`, "data-testid": "connection-status-dot" }), connectionState === 'disconnected' ? (_jsx(Button, { variant: "primary", onClick: () => setConnectModalOpen(true), testId: "new-connection-btn", children: "New Connection" })) : (_jsx(Button, { variant: "destructive", onClick: handleDisconnect, testId: "disconnect-btn", children: "Disconnect" })), _jsx(Button, { variant: ideMode ? 'primary' : 'default', onClick: () => setIdeMode((m) => !m), testId: "toggle-ide-mode-btn", children: ideMode ? 'IDE Mode: ON' : 'Open IDE' }), ideMode ? (_jsx(Button, { variant: redactionMode ? 'primary' : 'ghost', onClick: () => setRedactionMode((r) => !r), testId: "toggle-redaction-btn", children: redactionMode ? 'Redaction: ON' : 'Redact Secrets' })) : null, _jsxs(Button, { variant: "ghost", onClick: () => setPaletteOpen(true), testId: "open-palette-btn", children: [_jsx(Icon, { name: "search" }), " Command Palette (Cmd+K)"] }), _jsx(Button, { variant: "ghost", onClick: () => setZenMode((z) => !z), testId: "toggle-zen-btn", children: "Zen" }), _jsxs(Button, { variant: "primary", onClick: toggleFullscreen, testId: "toggle-fullscreen-btn", children: [_jsx(Icon, { name: "maximize" }), " Full Screen"] })] })] })) : null, zenMode ? (_jsxs("div", { className: "webssh-banner", role: "status", "data-testid": "zen-mode-banner", style: { justifyContent: 'space-between' }, children: [_jsx("span", { children: "Zen Mode Active \u2014 Press Esc to return" }), _jsx(Button, { variant: "default", testId: "exit-zen-btn", onClick: () => {
+                            setZenMode(false);
+                            setActiveScreen('welcome');
+                        }, children: "Exit Zen (Esc)" })] })) : null, connectionState !== 'connected' && connectionState !== 'disconnected' ? (_jsxs("div", { className: "webssh-banner", role: "status", "data-testid": "reconnect-banner", children: [_jsxs("span", { children: [connectionState === 'reconnecting' && 'Reconnecting (attempt 3, backoff 2.1s)…', connectionState === 'offline' && 'Offline — queuing input locally (64 KiB cap)', connectionState === 'resumed' && 'Session resumed from gateway ring buffer'] }), pendingInputBytes > 0 ? (_jsxs(Badge, { tone: "warning", testId: "pending-input-badge", children: ["Pending input: ", pendingInputBytes, " B"] })) : null, _jsx(Button, { variant: "ghost", onClick: () => {
                             setConnectionState('connected');
                             setPendingInputBytes(0);
-                        }, children: "Dismiss" })] })) : null, _jsxs("div", { className: `webssh-workspace-body ${layoutPreset === 'sidebar-right' ? 'webssh-workspace-body--right' : ''}`.trim(), children: [!isFullscreen && !zenMode ? (_jsxs("nav", { className: "webssh-rail", "aria-label": "Workspace navigation", children: [_jsxs(Button, { variant: activeScreen === 'workspace' ? 'primary' : 'ghost', onClick: () => setActiveScreen('workspace'), testId: "nav-workspace", children: [_jsx(Icon, { name: "terminal" }), " Terminal"] }), _jsx(Button, { variant: activeScreen === 'features' ? 'primary' : 'ghost', onClick: () => setActiveScreen('features'), testId: "nav-features", children: "Features (50)" }), _jsx(Button, { variant: activeScreen === 'welcome' ? 'primary' : 'ghost', onClick: () => setActiveScreen('welcome'), testId: "nav-welcome", children: "Welcome" }), _jsxs(Button, { variant: activeScreen === 'vault' ? 'primary' : 'ghost', onClick: () => setActiveScreen('vault'), testId: "nav-vault", children: [_jsx(Icon, { name: "key" }), " Key Vault"] }), _jsxs(Button, { variant: activeScreen === 'hosts' ? 'primary' : 'ghost', onClick: () => setActiveScreen('hosts'), testId: "nav-hosts", children: [_jsx(Icon, { name: "server" }), " Hosts"] }), _jsxs(Button, { variant: activeScreen === 'files' ? 'primary' : 'ghost', onClick: () => setActiveScreen('files'), testId: "nav-files", children: [_jsx(Icon, { name: "folder" }), " SFTP Files"] }), _jsx(Button, { variant: activeScreen === 'editor' ? 'primary' : 'ghost', onClick: () => setActiveScreen('editor'), testId: "nav-editor", children: "Editor" }), _jsx(Button, { variant: activeScreen === 'snippets' ? 'primary' : 'ghost', onClick: () => setActiveScreen('snippets'), testId: "nav-snippets", children: "Snippets & Replay" }), _jsxs(Button, { variant: activeScreen === 'settings' ? 'primary' : 'ghost', onClick: () => setActiveScreen('settings'), testId: "nav-settings", children: [_jsx(Icon, { name: "settings" }), " Settings"] })] })) : null, _jsxs("main", { className: "webssh-main", children: [activeScreen === 'workspace' ? (_jsxs("div", { className: "webssh-split-container", children: [_jsxs("div", { ref: terminalViewRef, tabIndex: 0, role: "region", "aria-label": "SSH Terminal Viewport", "data-testid": "terminal-viewport", className: "webssh-terminal-viewport", style: { fontSize: `${fontSize}px`, fontFamily }, onKeyDown: handleTerminalKeyDown, children: [terminalLines.map((line, i) => (_jsx("div", { children: line }, i))), _jsxs("div", { "data-testid": "terminal-prompt-line", children: [_jsx("span", { children: "webssh:~$ " }), _jsx("span", { "data-testid": "terminal-current-input", children: currentInput }), _jsx("span", { className: `webssh-terminal-cursor ${cursorShape === 'bar'
+                        }, children: "Dismiss" })] })) : null, _jsxs("div", { className: `webssh-workspace-body ${layoutPreset === 'sidebar-right' ? 'webssh-workspace-body--right' : ''}`.trim(), children: [!isFullscreen && !zenMode ? (_jsxs("nav", { className: "webssh-rail", "aria-label": "Workspace navigation", children: [_jsx(Button, { variant: activeScreen === 'welcome' ? 'primary' : 'ghost', onClick: () => setActiveScreen('welcome'), testId: "nav-welcome", children: "Welcome" }), _jsxs(Button, { variant: activeScreen === 'workspace' ? 'primary' : 'ghost', onClick: () => setActiveScreen('workspace'), testId: "nav-workspace", children: [_jsx(Icon, { name: "terminal" }), " Terminal"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', onClick: () => {
+                                    setIdeMode((prev) => {
+                                        const next = !prev;
+                                        if (next && activeScreen === 'welcome') {
+                                            setActiveScreen('features');
+                                        }
+                                        return next;
+                                    });
+                                }, testId: "enable-ide-mode-btn", children: ideMode ? 'IDE Enabled (All Features)' : 'Open IDE (All Features)' }), ideMode ? (_jsxs(_Fragment, { children: [_jsx(Button, { variant: activeScreen === 'features' ? 'primary' : 'ghost', onClick: () => setActiveScreen('features'), testId: "nav-features", children: "Features (50)" }), _jsx(Button, { variant: activeScreen === 'telemetry' ? 'primary' : 'ghost', onClick: () => setActiveScreen('telemetry'), testId: "nav-telemetry", children: "Telemetry HUD" }), _jsx(Button, { variant: activeScreen === 'tunnels' ? 'primary' : 'ghost', onClick: () => setActiveScreen('tunnels'), testId: "nav-tunnels", children: "Port Tunnels" }), _jsx(Button, { variant: activeScreen === 'playbooks' ? 'primary' : 'ghost', onClick: () => setActiveScreen('playbooks'), testId: "nav-playbooks", children: "Fleet Playbooks" }), _jsxs(Button, { variant: activeScreen === 'vault' ? 'primary' : 'ghost', onClick: () => setActiveScreen('vault'), testId: "nav-vault", children: [_jsx(Icon, { name: "key" }), " Key Vault"] }), _jsxs(Button, { variant: activeScreen === 'hosts' ? 'primary' : 'ghost', onClick: () => setActiveScreen('hosts'), testId: "nav-hosts", children: [_jsx(Icon, { name: "server" }), " Hosts"] }), _jsxs(Button, { variant: activeScreen === 'files' ? 'primary' : 'ghost', onClick: () => setActiveScreen('files'), testId: "nav-files", children: [_jsx(Icon, { name: "folder" }), " SFTP Files"] }), _jsx(Button, { variant: activeScreen === 'editor' ? 'primary' : 'ghost', onClick: () => setActiveScreen('editor'), testId: "nav-editor", children: "Editor" }), _jsx(Button, { variant: activeScreen === 'snippets' ? 'primary' : 'ghost', onClick: () => setActiveScreen('snippets'), testId: "nav-snippets", children: "Snippets & Replay" }), _jsxs(Button, { variant: activeScreen === 'settings' ? 'primary' : 'ghost', onClick: () => setActiveScreen('settings'), testId: "nav-settings", children: [_jsx(Icon, { name: "settings" }), " Settings"] })] })) : null] })) : null, _jsxs("main", { className: "webssh-main", children: [activeScreen === 'workspace' ? (_jsxs("div", { className: "webssh-split-container", children: [_jsxs("div", { ref: terminalViewRef, tabIndex: 0, role: "region", "aria-label": "SSH Terminal Viewport", "data-testid": "terminal-viewport", className: "webssh-terminal-viewport", style: { fontSize: `${fontSize}px`, fontFamily }, onKeyDown: handleTerminalKeyDown, children: [terminalLines.map((line, i) => (_jsx("div", { children: redactSecretsInText(line, redactionMode) }, i))), _jsxs("div", { "data-testid": "terminal-prompt-line", children: [_jsx("span", { children: "webssh:~$ " }), _jsx("span", { "data-testid": "terminal-current-input", children: currentInput }), ghostSuggestion ? (_jsx("span", { className: "webssh-ghost-text", "data-testid": "terminal-ghost-suggestion", children: ghostSuggestion })) : null, _jsx("span", { className: `webssh-terminal-cursor ${cursorShape === 'bar'
                                                             ? 'webssh-terminal-cursor--bar'
                                                             : cursorShape === 'underline'
                                                                 ? 'webssh-terminal-cursor--underline'
-                                                                : ''}`.trim(), "aria-hidden": "true" })] }), _jsx("div", { ref: xtermHostRef, className: "webssh-xterm-mount", "aria-hidden": "true", "data-testid": "xterm-engine-mount" })] }), splitPanes > 1 ? (_jsxs("div", { tabIndex: 0, role: "region", "aria-label": "Secondary Split Terminal Viewport", "data-testid": "terminal-split-pane-2", className: "webssh-terminal-viewport", style: {
+                                                                : ''}`.trim(), "aria-hidden": "true" })] }), _jsx("div", { className: "webssh-cmd-blocks", "data-testid": "command-blocks-list", children: commandBlocks.map((block) => (_jsxs("div", { className: "webssh-cmd-block", "data-testid": `cmd-block-${block.id}`, children: [_jsxs("div", { className: "webssh-cmd-block-header", children: [_jsxs("span", { children: [_jsxs("strong", { children: ["$ ", redactSecretsInText(block.command, redactionMode)] }), " \u00B7", ' ', block.timestamp, " (", block.durationMs, "ms)"] }), _jsxs("div", { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }, children: [_jsxs(Badge, { tone: block.exitCode === 0 ? 'success' : 'danger', children: ["exit ", block.exitCode] }), _jsx(Button, { variant: "ghost", onClick: () => setCommandBlocks((prev) => prev.map((b) => (b.id === block.id ? { ...b, collapsed: !b.collapsed } : b))), testId: `toggle-block-${block.id}`, children: block.collapsed ? 'Expand' : 'Fold' }), _jsx(Button, { variant: "ghost", onClick: () => copyToClipboard(block.outputLines.join(String.fromCharCode(10))), children: "Copy Output" }), _jsx(Button, { variant: "ghost", onClick: () => executeTerminalCommand(block.command), children: "Re-run" })] })] }), !block.collapsed ? (_jsx("div", { style: { marginTop: 'var(--space-1)' }, children: block.outputLines.map((outLine, idx) => (_jsx("div", { children: redactSecretsInText(outLine, redactionMode) }, idx))) })) : null] }, block.id))) }), _jsx("div", { ref: xtermHostRef, className: "webssh-xterm-mount", "aria-hidden": "true", "data-testid": "xterm-engine-mount" })] }), splitPanes > 1 ? (_jsxs("div", { tabIndex: 0, role: "region", "aria-label": "Secondary Split Terminal Viewport", "data-testid": "terminal-split-pane-2", className: "webssh-terminal-viewport", style: {
                                             fontSize: `${fontSize}px`,
                                             fontFamily,
                                             borderLeft: 'var(--border-hairline)'
-                                        }, children: [_jsxs("div", { children: ["Split Pane #2 (", broadcastInput ? 'Broadcast Input ON' : 'Independent Shell', ")"] }), _jsxs("div", { children: [_jsx("span", { children: "webssh:~$ " }), _jsx("span", { children: broadcastInput ? currentInput : '' }), _jsx("span", { className: "webssh-terminal-cursor", "aria-hidden": "true" })] })] })) : null] })) : null, activeScreen === 'features' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-features", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h1", { children: "All 50 Features \u2014 Interactive Selector & Workbench" }), _jsx(Badge, { tone: "success", testId: "feature-active-status", children: lastExecutedFeatureMsg })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }, children: [['All', 'Connection', 'Terminal', 'Files', 'Customization', 'Security', 'Productivity'].map((cat) => (_jsx(Button, { variant: featureCategory === cat ? 'primary' : 'default', onClick: () => setFeatureCategory(cat), testId: `feature-cat-${cat.toLowerCase()}`, children: cat }, cat))), _jsx("input", { type: "search", className: "ui-input", placeholder: "Search all 50 features by name, number, or category\u2026", "aria-label": "Search 50 features", value: featureQuery, onInput: (e) => setFeatureQuery(e.target.value), "data-testid": "feature-search-input", style: { flex: 1, minWidth: '220px' } })] }), _jsx("div", { className: "webssh-grid", children: filteredFeatures.map((feat) => (_jsxs(Card, { testId: `feature-card-${feat.id}`, className: selectedFeatureId === feat.id ? 'ui-card--selected' : '', children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("strong", { children: ["#", feat.id, " \u00B7 ", feat.title] }), _jsx(Badge, { tone: "neutral", children: feat.category })] }), _jsx("p", { children: feat.description }), _jsx("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: _jsx(Button, { variant: "primary", onClick: () => handleRunFeature(feat), testId: `run-feature-${feat.id}`, children: feat.actionLabel }) })] }, feat.id))) })] })) : null, activeScreen === 'welcome' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-welcome", children: [_jsx("h1", { children: "Welcome to WebSSH Studio" }), _jsxs("div", { className: "webssh-grid", children: [_jsxs(Card, { children: [_jsx("h2", { children: "1. Create Non-Extractable Key" }), _jsx("p", { children: "Generate an Ed25519 or ECDSA P-256 key pair inside WebCrypto + IndexedDB." }), _jsx(Button, { variant: "primary", onClick: () => void handleGenerateKey(), testId: "welcome-generate-key-btn", children: "Generate SSH key" })] }), _jsxs(Card, { children: [_jsx("h2", { children: "2. Add Target Host" }), _jsx("p", { children: "Configure your SSH destination or import ~/.ssh/config with ProxyJump chains." }), _jsx(Button, { variant: "default", onClick: () => setActiveScreen('hosts'), children: "Configure Hosts" })] }), _jsxs(Card, { children: [_jsx("h2", { children: "3. Connect via Remote Signer" }), _jsx("p", { children: "Private keys never leave your browser; challenges are signed locally." }), _jsx(Button, { variant: "default", onClick: () => setActiveScreen('workspace'), children: "Open Terminal" })] })] })] })) : null, activeScreen === 'vault' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-vault", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("h1", { children: "SSH Key Vault" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "primary", onClick: () => void handleGenerateKey(), testId: "vault-generate-btn", children: "Generate SSH key" }), _jsxs(Button, { variant: "default", onClick: () => setVaultLocked((v) => !v), testId: "vault-lock-btn", children: [_jsx(Icon, { name: "lock" }), " ", vaultLocked ? 'Unlock Vault' : 'Lock Vault'] })] })] }), vaultLocked ? (_jsx(EmptyState, { title: "Vault is Locked", description: "Protected with Argon2id + AES-GCM wrapping. Unlock to sign SSH challenges.", action: _jsx(Button, { variant: "primary", onClick: () => setVaultLocked(false), children: "Unlock Vault" }) })) : (_jsxs(Card, { children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("strong", { children: "prod-ed25519-key" }), _jsx(Badge, { tone: "success", children: "Ed25519 \u00B7 Non-Extractable" })] }), _jsxs("p", { "data-testid": "vault-fingerprint", children: ["Fingerprint: ", generatedFp] }), _jsx("label", { htmlFor: "pubkey-box", children: "OpenSSH Public Key & authorized_keys snippet" }), _jsx("textarea", { id: "pubkey-box", className: "ui-input", readOnly: true, rows: 3, value: generatedPubKey, "data-testid": "vault-pubkey-output" }), _jsx("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: _jsxs(Button, { variant: "default", onClick: () => copyToClipboard(authorizedKeysSnippet), children: [_jsx(Icon, { name: "copy" }), " Copy authorized_keys Snippet"] }) })] }))] })) : null, activeScreen === 'hosts' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-hosts", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("h1", { children: "Saved Hosts & ProxyJump Chains" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", onClick: () => setHostKeyModal('tofu'), testId: "trigger-tofu-modal-btn", children: "Verify Host Key (TOFU)" }), _jsx(Button, { variant: "danger", onClick: () => setHostKeyModal('mismatch'), testId: "trigger-mismatch-modal-btn", children: "Simulate KEY CHANGED" })] })] }), _jsx("input", { type: "search", className: "ui-input", placeholder: "Filter hosts by alias, user, hostname, or tag\u2026", value: hostSearch, onInput: (e) => setHostSearch(e.target.value), "aria-label": "Filter hosts" }), _jsx("div", { className: "webssh-grid", children: hosts
+                                        }, children: [_jsxs("div", { children: ["Split Pane #2 (", broadcastInput ? 'Broadcast Input ON' : 'Independent Shell', ")"] }), _jsxs("div", { children: [_jsx("span", { children: "webssh:~$ " }), _jsx("span", { children: broadcastInput ? currentInput : '' }), _jsx("span", { className: "webssh-terminal-cursor", "aria-hidden": "true" })] })] })) : null] })) : null, activeScreen === 'features' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-features", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h1", { children: "All 50 Features \u2014 Interactive Selector & Workbench" }), _jsx(Badge, { tone: "success", testId: "feature-active-status", children: lastExecutedFeatureMsg })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }, children: [['All', 'Connection', 'Terminal', 'Files', 'Customization', 'Security', 'Productivity'].map((cat) => (_jsx(Button, { variant: featureCategory === cat ? 'primary' : 'default', onClick: () => setFeatureCategory(cat), testId: `feature-cat-${cat.toLowerCase()}`, children: cat }, cat))), _jsx("input", { type: "search", className: "ui-input", placeholder: "Search all 50 features by name, number, or category\u2026", "aria-label": "Search 50 features", value: featureQuery, onInput: (e) => setFeatureQuery(e.target.value), "data-testid": "feature-search-input", style: { flex: 1, minWidth: '220px' } })] }), _jsx("div", { className: "webssh-grid", children: filteredFeatures.map((feat) => (_jsxs(Card, { testId: `feature-card-${feat.id}`, className: selectedFeatureId === feat.id ? 'ui-card--selected' : '', children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("strong", { children: ["#", feat.id, " \u00B7 ", feat.title] }), _jsx(Badge, { tone: "neutral", children: feat.category })] }), _jsx("p", { children: feat.description }), _jsx("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: _jsx(Button, { variant: "primary", onClick: () => handleRunFeature(feat), testId: `run-feature-${feat.id}`, children: feat.actionLabel }) })] }, feat.id))) })] })) : null, activeScreen === 'telemetry' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-telemetry", children: [_jsx("h1", { children: "Server Observability & DevOps HUD (Agentless SSH Probe)" }), _jsxs("div", { className: "webssh-hud-strip", "data-testid": "telemetry-vitals-hud", children: [_jsxs("div", { className: "webssh-hud-metric", children: [_jsx("span", { children: "CPU Load" }), _jsxs("strong", { children: [vitals.cpuPercent, "%"] }), _jsx("div", { className: "webssh-sparkbar", children: _jsx("div", { className: "webssh-sparkbar-fill", style: { width: `${vitals.cpuPercent}%` } }) })] }), _jsxs("div", { className: "webssh-hud-metric", children: [_jsx("span", { children: "RAM Usage" }), _jsxs("strong", { children: [vitals.ramUsedGiB, " / ", vitals.ramTotalGiB, " GiB"] }), _jsx("div", { className: "webssh-sparkbar", children: _jsx("div", { className: "webssh-sparkbar-fill", style: { width: `${Math.round((vitals.ramUsedGiB / vitals.ramTotalGiB) * 100)}%` } }) })] }), _jsxs("div", { className: "webssh-hud-metric", children: [_jsx("span", { children: "Disk I/O" }), _jsxs("strong", { children: [vitals.diskIoMbps, " MB/s"] })] }), _jsxs("div", { className: "webssh-hud-metric", children: [_jsx("span", { children: "Network RX / TX" }), _jsxs("strong", { children: ["\u2193 ", vitals.netRxMbps, " MB/s \u00B7 \u2191 ", vitals.netTxMbps, " MB/s"] })] }), _jsxs("div", { className: "webssh-hud-metric", children: [_jsx("span", { children: "Load Avg (1m/5m/15m)" }), _jsx("strong", { children: vitals.loadAvg.join(' / ') })] })] }), _jsxs(Card, { children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h2", { children: "Interactive Process Manager (htop-in-GUI)" }), _jsx("input", { type: "search", className: "ui-input", placeholder: "Filter processes by PID, user, or command\u2026", "aria-label": "Filter processes", value: processFilter, onInput: (e) => setProcessFilter(e.target.value), "data-testid": "process-filter-input", style: { maxWidth: '280px' } })] }), _jsxs("table", { className: "webssh-table", "data-testid": "process-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "PID" }), _jsx("th", { children: "User" }), _jsx("th", { children: "CPU %" }), _jsx("th", { children: "MEM %" }), _jsx("th", { children: "Command" }), _jsx("th", { children: "Action" })] }) }), _jsx("tbody", { children: processes
+                                                            .filter((p) => !processFilter ||
+                                                            p.command.toLowerCase().includes(processFilter.toLowerCase()) ||
+                                                            String(p.pid).includes(processFilter))
+                                                            .map((proc) => (_jsxs("tr", { "data-testid": `proc-row-${proc.pid}`, children: [_jsx("td", { children: proc.pid }), _jsx("td", { children: proc.user }), _jsxs("td", { children: [proc.cpuPercent, "%"] }), _jsxs("td", { children: [proc.memPercent, "%"] }), _jsx("td", { children: proc.command }), _jsx("td", { children: _jsx(Button, { variant: "danger", testId: `kill-proc-${proc.pid}`, onClick: () => setProcesses((prev) => prev.filter((item) => item.pid !== proc.pid)), children: "SIGTERM" }) })] }, proc.pid))) })] })] }), _jsxs("div", { className: "webssh-grid", children: [_jsxs(Card, { children: [_jsx("h2", { children: "Docker & Kubernetes Container Inspector" }), containers.map((c) => (_jsxs("div", { "data-testid": `container-row-${c.id}`, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("strong", { children: c.name }), " (", c.runtime, ")", _jsx("div", { children: _jsxs("small", { children: [c.image, " \u00B7 ", c.ports] }) })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-1)' }, children: [_jsx(Badge, { tone: "success", children: c.status }), _jsx(Button, { variant: "primary", testId: `exec-container-${c.id}`, onClick: () => {
+                                                                            handleAddTab();
+                                                                            setTerminalLines((prev) => [
+                                                                                ...prev,
+                                                                                `webssh:~$ ${c.runtime === 'docker' ? 'docker' : 'kubectl'} exec -it ${c.name} -- /bin/sh`
+                                                                            ]);
+                                                                        }, children: "Exec Shell" }), _jsx(Button, { variant: "default", onClick: () => setContainers((prev) => prev.map((item) => item.id === c.id ? { ...item, status: 'Restarting' } : item)), children: "Restart" })] })] }, c.id)))] }), _jsxs(Card, { children: [_jsx("h2", { children: "Active Listening Ports & Sockets (ss -tulnp)" }), _jsxs("table", { className: "webssh-table", "data-testid": "listening-ports-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Proto" }), _jsx("th", { children: "Bind:Port" }), _jsx("th", { children: "Process (PID)" }), _jsx("th", { children: "Preview" })] }) }), _jsx("tbody", { children: listeningPorts.map((lp) => (_jsxs("tr", { children: [_jsx("td", { children: lp.proto }), _jsxs("td", { children: [lp.bindAddress, ":", lp.port] }), _jsxs("td", { children: [lp.process, " (", lp.pid, ")"] }), _jsx("td", { children: lp.webPreviewable ? (_jsx(Button, { variant: "primary", testId: `preview-port-${lp.port}`, onClick: () => {
+                                                                                    setWebPreviewPort(lp.port);
+                                                                                    setActiveScreen('tunnels');
+                                                                                }, children: "Web Preview" })) : (_jsx(Badge, { tone: "neutral", children: "TCP Tunnel" })) })] }, lp.port))) })] })] })] })] })) : null, activeScreen === 'tunnels' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-tunnels", children: [_jsx("h1", { children: "Port Forwarding & Network Tunneling Studio (-L / -R / -D SOCKS5)" }), _jsxs(Card, { children: [_jsx("h2", { children: "Create Custom SSH Port Forward Rule" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("label", { htmlFor: "new-tunnel-local", children: "Local Port" }), _jsx("input", { id: "new-tunnel-local", type: "number", className: "ui-input", value: newTunnelLocalPort, onInput: (e) => setNewTunnelLocalPort(e.target.value), "data-testid": "new-tunnel-local-input", style: { width: '110px' } }), _jsx("label", { htmlFor: "new-tunnel-remote", children: "Remote Port" }), _jsx("input", { id: "new-tunnel-remote", type: "number", className: "ui-input", value: newTunnelRemotePort, onInput: (e) => setNewTunnelRemotePort(e.target.value), "data-testid": "new-tunnel-remote-input", style: { width: '110px' } }), _jsx(Button, { variant: "primary", testId: "add-tunnel-btn", onClick: () => {
+                                                            const lPort = Number.parseInt(newTunnelLocalPort, 10) || 8080;
+                                                            const rPort = Number.parseInt(newTunnelRemotePort, 10) || 80;
+                                                            setTunnels((prev) => [
+                                                                ...prev,
+                                                                {
+                                                                    id: `tunnel-${Date.now()}`,
+                                                                    name: `Custom Tunnel :${lPort}->:${rPort}`,
+                                                                    type: 'L',
+                                                                    bindAddress: '127.0.0.1',
+                                                                    localPort: lPort,
+                                                                    remoteHost: '127.0.0.1',
+                                                                    remotePort: rPort,
+                                                                    active: true,
+                                                                    bytesTransferred: 0
+                                                                }
+                                                            ]);
+                                                        }, children: "+ Add Tunnel" })] })] }), _jsx("div", { className: "webssh-grid", children: tunnels.map((t) => (_jsxs(Card, { testId: `tunnel-card-${t.id}`, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("strong", { children: ["[-", t.type, "] ", t.name] }), _jsx(Badge, { tone: t.active ? 'success' : 'neutral', children: t.active ? 'Active' : 'Stopped' })] }), _jsxs("p", { children: [t.bindAddress, ":", t.localPort, " \u2192 ", t.remoteHost, ":", t.remotePort, " \u00B7", ' ', Math.round(t.bytesTransferred / 1024), " KiB transferred"] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", testId: `toggle-tunnel-${t.id}`, onClick: () => setTunnels((prev) => prev.map((item) => (item.id === t.id ? { ...item, active: !item.active } : item))), children: t.active ? 'Pause Tunnel' : 'Start Tunnel' }), _jsxs(Button, { variant: "primary", onClick: () => setWebPreviewPort(t.localPort), children: ["Preview :", t.localPort] })] })] }, t.id))) }), _jsxs(Card, { testId: "remote-web-preview-card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("h2", { children: ["One-Click Web Preview \u2014 Remote localhost:", webPreviewPort] }), _jsx(Badge, { tone: "success", children: "SSH HTTP Proxy Tunnel Active" })] }), _jsxs("p", { children: ["Proxying remote ", _jsxs("code", { children: ["http://127.0.0.1:", webPreviewPort] }), " over multiplexed SSH channel #4:"] }), _jsxs("pre", { children: ["HTTP/1.1 200 OK \u00B7 Service on 127.0.0.1:", webPreviewPort, " (Grafana / Prometheus / Dev Server Ready)"] })] })] })) : null, activeScreen === 'playbooks' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-playbooks", children: [_jsx("h1", { children: "Multi-Host Playbook & Fleet Runner" }), _jsxs(Card, { children: [_jsx("label", { htmlFor: "playbook-script-input", children: "Fleet Playbook Command / Script" }), _jsx("input", { id: "playbook-script-input", type: "text", className: "ui-input", value: playbookScript, onInput: (e) => setPlaybookScript(e.target.value), "data-testid": "playbook-script-input" }), _jsx("div", { style: { marginTop: 'var(--space-2)' }, children: _jsxs(Button, { variant: "primary", testId: "run-playbook-btn", onClick: () => setPlaybookResults((prev) => prev.map((r) => ({
+                                                        ...r,
+                                                        output: `[Executed "${playbookScript}"] -> ${r.output}`
+                                                    }))), children: ["Run Playbook Across Fleet (", playbookResults.length, " Hosts)"] }) })] }), _jsx("div", { className: "webssh-grid", "data-testid": "playbook-results-grid", children: playbookResults.map((res) => (_jsxs(Card, { testId: `playbook-host-${res.hostAlias}`, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("strong", { children: [res.hostAlias, " (", res.hostAddress, ")"] }), _jsxs(Badge, { tone: res.exitCode === 0 ? 'success' : 'danger', children: ["exit ", res.exitCode, " \u00B7 ", res.durationMs, "ms"] })] }), _jsx("pre", { children: res.output })] }, res.hostAlias))) })] })) : null, activeScreen === 'welcome' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-welcome", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("h1", { children: "Welcome to WebSSH Studio" }), _jsxs("p", { style: { color: 'var(--color-fg-secondary)' }, children: ["Clean, minimal SSH workspace \u2014 connect with Username & Password or upload a Private Key (", _jsx("code", { children: "chmod 0400" }), ")."] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "default", testId: "welcome-open-terminal-btn", onClick: () => setActiveScreen('workspace'), children: [_jsx(Icon, { name: "terminal" }), " Open Terminal"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', testId: "welcome-open-ide-btn", onClick: () => {
+                                                            setIdeMode(true);
+                                                            setActiveScreen('features');
+                                                        }, children: "Open IDE (All 50 Features)" })] })] }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '180px' }, children: [_jsx("label", { htmlFor: "welcome-host-input", children: "Host / IP" }), _jsx("input", { id: "welcome-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or server.example.com", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "welcome-host-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '130px' }, children: [_jsx("label", { htmlFor: "welcome-user-input", children: "Username" }), _jsx("input", { id: "welcome-user-input", type: "text", className: "ui-input", placeholder: "ubuntu / root", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "welcome-user-input" })] }), _jsxs("div", { style: { width: '100px' }, children: [_jsx("label", { htmlFor: "welcome-port-input", children: "Port" }), _jsx("input", { id: "welcome-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "welcome-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Authentication Method" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
+                                                                            setAuthMethod('Password');
+                                                                            setConnectErrorMsg('');
+                                                                        }, testId: "welcome-auth-password-btn", children: "Username & Password" }), _jsx(Button, { variant: authMethod === 'Private Key (.pem / id_rsa)' ? 'primary' : 'default', onClick: () => {
+                                                                            setAuthMethod('Private Key (.pem / id_rsa)');
+                                                                            setConnectErrorMsg('');
+                                                                        }, testId: "welcome-auth-keyfile-btn", children: "Upload Private Key (.pem / chmod 400)" }), _jsx(Button, { variant: authMethod === 'Argon2id Ed25519 Key' ? 'primary' : 'default', onClick: () => {
+                                                                            setAuthMethod('Argon2id Ed25519 Key');
+                                                                            setConnectErrorMsg('');
+                                                                        }, testId: "welcome-auth-argon-btn", children: "Browser Ed25519 Key" })] })] }), authMethod === 'Password' ? (_jsxs("div", { children: [_jsx("label", { htmlFor: "welcome-password-input", children: "Password" }), _jsx("input", { id: "welcome-password-input", type: "password", className: "ui-input", placeholder: "Enter SSH password\u2026", value: connectPassword, onInput: (e) => setConnectPassword(e.target.value), "data-testid": "welcome-password-input" })] })) : null, authMethod === 'Private Key (.pem / id_rsa)' ? (_jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("label", { htmlFor: "welcome-key-file-input", children: ["Upload Private Key (", _jsx("code", { children: ".pem" }), ", ", _jsx("code", { children: ".key" }), ", ", _jsx("code", { children: "id_ed25519" }), ", ", _jsx("code", { children: "id_rsa" }), ")"] }), _jsx(Badge, { tone: keyPermissionMode === '0644' ? 'danger' : 'success', testId: "private-key-chmod-badge", children: keyPermissionMode === '0400'
+                                                                            ? 'chmod 0400 (-r--------) Enforced'
+                                                                            : keyPermissionMode === '0600'
+                                                                                ? 'chmod 0600 (-rw-------) Enforced'
+                                                                                : 'UNPROTECTED KEY (0644) — Set chmod 400' })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("input", { id: "welcome-key-file-input", type: "file", className: "ui-input", accept: ".pem,.key,.pub,*", onChange: (e) => void handlePrivateKeyFileUpload(e), "data-testid": "private-key-file-input", style: { flex: 1 } }), _jsxs("select", { "aria-label": "Private key chmod permission", className: "ui-select", value: keyPermissionMode, onChange: (e) => {
+                                                                            setKeyPermissionMode(e.currentTarget.value);
+                                                                            setConnectErrorMsg('');
+                                                                        }, "data-testid": "private-key-chmod-select", style: { width: 'auto' }, children: [_jsx("option", { value: "0400", children: "chmod 0400 (-r--------) Read-Only" }), _jsx("option", { value: "0600", children: "chmod 0600 (-rw-------) Owner R/W" }), _jsx("option", { value: "0644", children: "chmod 0644 (-rw-r--r--) Too Open" })] }), _jsx(Button, { variant: "default", testId: "apply-key-chmod-400-btn", onClick: () => {
+                                                                            setKeyPermissionMode('0400');
+                                                                            setConnectErrorMsg('');
+                                                                        }, children: "Set chmod 400" })] }), _jsx("textarea", { className: "ui-input", rows: 3, placeholder: "Or paste -----BEGIN OPENSSH PRIVATE KEY----- / .pem content here\u2026", "aria-label": "Private key content", value: uploadedKeyContent, onInput: (e) => setUploadedKeyContent(e.target.value), "data-testid": "private-key-textarea" })] })) : null, connectErrorMsg ? (_jsx(Badge, { tone: "danger", testId: "connect-error-badge", children: connectErrorMsg })) : null, _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }, children: [_jsx(Button, { variant: "primary", type: "submit", testId: "welcome-connect-submit-btn", children: "Connect to Server" }), _jsx(Button, { variant: "default", onClick: () => void handleGenerateKey(), testId: "welcome-generate-key-btn", children: "Generate SSH key" })] })] })] })] })) : null, activeScreen === 'vault' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-vault", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("h1", { children: "SSH Key Vault" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "primary", onClick: () => void handleGenerateKey(), testId: "vault-generate-btn", children: "Generate SSH key" }), _jsxs(Button, { variant: "default", onClick: () => setVaultLocked((v) => !v), testId: "vault-lock-btn", children: [_jsx(Icon, { name: "lock" }), " ", vaultLocked ? 'Unlock Vault' : 'Lock Vault'] })] })] }), vaultLocked ? (_jsx(EmptyState, { title: "Vault is Locked", description: "Protected with Argon2id + AES-GCM wrapping. Unlock to sign SSH challenges.", action: _jsx(Button, { variant: "primary", onClick: () => setVaultLocked(false), children: "Unlock Vault" }) })) : (_jsxs("div", { className: "webssh-grid", children: [_jsxs(Card, { children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("strong", { children: "prod-ed25519-key" }), _jsx(Badge, { tone: "success", children: "Ed25519 \u00B7 Non-Extractable" })] }), _jsxs("p", { "data-testid": "vault-fingerprint", children: ["Fingerprint: ", generatedFp] }), _jsx("label", { htmlFor: "pubkey-box", children: "OpenSSH Public Key & authorized_keys snippet" }), _jsx("textarea", { id: "pubkey-box", className: "ui-input", readOnly: true, rows: 3, value: generatedPubKey, "data-testid": "vault-pubkey-output" }), _jsx("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: _jsxs(Button, { variant: "default", onClick: () => copyToClipboard(authorizedKeysSnippet), children: [_jsx(Icon, { name: "copy" }), " Copy authorized_keys Snippet"] }) })] }), _jsxs(Card, { testId: "fido2-hardware-card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("strong", { children: "WebAuthn / FIDO2 Hardware Key (YubiKey / TouchID)" }), _jsx(Badge, { tone: fido2Enrolled ? 'success' : 'neutral', children: fido2Enrolled ? 'Hardware Bound' : 'Ready to Enroll' })] }), _jsxs("p", { children: ["OpenSSH Hardware Resident Key: ", _jsx("code", { children: "sk-ssh-ed25519@openssh.com" })] }), _jsx("input", { type: "text", className: "ui-input", readOnly: true, "aria-label": "FIDO2 public key", value: fido2KeyLine, "data-testid": "fido2-pubkey-output" }), _jsx(Button, { variant: "primary", testId: "enroll-fido2-btn", onClick: () => {
+                                                            setFido2Enrolled(true);
+                                                            setFido2KeyLine('sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAA EnrolledHardwarePasskey yubikey@webssh');
+                                                        }, children: "Enroll FIDO2 Passkey" })] }), _jsxs(Card, { testId: "ssh-ca-cert-card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("strong", { children: "SSH Certificate Authority (CA) Short-Lived Cert" }), _jsxs(Badge, { tone: "success", children: [sshCertInfo.certType, " cert"] })] }), _jsxs("p", { children: ["Key ID: ", _jsx("code", { children: sshCertInfo.keyId })] }), _jsxs("p", { children: ["Principals: ", _jsx("code", { children: sshCertInfo.principals.join(', ') })] }), _jsxs("p", { children: ["Validity: ", sshCertInfo.validAfter, " \u2192 ", sshCertInfo.validBefore] }), _jsxs("p", { children: ["CA Fingerprint: ", _jsx("code", { children: sshCertInfo.caFingerprint })] })] })] }))] })) : null, activeScreen === 'hosts' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-hosts", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("h1", { children: "Saved Hosts & ProxyJump Chains" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", onClick: () => setHostKeyModal('tofu'), testId: "trigger-tofu-modal-btn", children: "Verify Host Key (TOFU)" }), _jsx(Button, { variant: "danger", onClick: () => setHostKeyModal('mismatch'), testId: "trigger-mismatch-modal-btn", children: "Simulate KEY CHANGED" })] })] }), _jsx("input", { type: "search", className: "ui-input", placeholder: "Filter hosts by alias, user, hostname, or tag\u2026", value: hostSearch, onInput: (e) => setHostSearch(e.target.value), "aria-label": "Filter hosts" }), _jsx("div", { className: "webssh-grid", children: hosts
                                             .filter((h) => !hostSearch || h.alias.toLowerCase().includes(hostSearch.toLowerCase()))
                                             .map((h) => (_jsxs(Card, { testId: `host-card-${h.alias}`, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between' }, children: [_jsx("strong", { children: h.alias }), _jsx(Badge, { tone: "success", children: h.folder ?? 'Default' })] }), _jsxs("p", { children: [h.user, "@", h.host, ":", h.port] }), h.jumpHops.length > 0 ? (_jsxs("p", { children: ["ProxyJump: ", h.jumpHops.map((j) => `${j.user}@${j.host}:${j.port}`).join(' -> ')] })) : null, _jsx(Button, { variant: "primary", onClick: () => {
                                                         setConnectUser(h.user);
@@ -872,10 +1075,31 @@ webssh:~$ `);
                                                     }, children: "Connect" })] }, h.id))) }), _jsxs(Card, { children: [_jsx("h2", { children: "Import ~/.ssh/config" }), _jsx("textarea", { className: "ui-input", rows: 4, "aria-label": "SSH config content", value: sshConfigInput, onInput: (e) => setSshConfigInput(e.target.value) }), _jsx("div", { style: { marginTop: 'var(--space-2)' }, children: _jsx(Button, { variant: "primary", testId: "import-ssh-config-btn", onClick: () => {
                                                         hostRegistry.importSshConfig(sshConfigInput);
                                                         setHosts(hostRegistry.list());
-                                                    }, children: "Import ~/.ssh/config" }) })] })] })) : null, activeScreen === 'files' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-files", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h1", { children: "Dual-Pane SFTP File Manager" }), _jsxs(Badge, { tone: "neutral", testId: "storage-quota-badge", children: ["Storage Guard: ", quotaSnap.percentUsed, "% of 256 MiB cap (256 KiB chunks, SHA-256 verified)"] })] }), _jsx("p", { children: transferStatus }), _jsx("input", { type: "search", className: "ui-input", placeholder: "Filter remote directory entries\u2026", value: fileFilter, onInput: (e) => setFileFilter(e.target.value), "aria-label": "Filter remote directory entries" }), _jsxs(Card, { children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("p", { children: "Drop files or folders to upload to /srv/app (resumable .part atomic rename)" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "primary", onClick: () => setTransferStatus('Uploaded release.tar.zst (20/20 chunks · 256 KiB · SHA-256 verified)'), children: [_jsx(Icon, { name: "upload" }), " Simulate 256 KiB Upload"] }), _jsxs(Button, { variant: "default", onClick: () => setTransferStatus('Streaming /etc/app/config.zip via ZIP64 writer…'), children: [_jsx(Icon, { name: "download" }), " Download Folder ZIP"] })] })] }), _jsx("ul", { children: sftpEntries.map((entry) => (_jsxs("li", { children: [_jsx("strong", { children: entry.isDir ? `[DIR] ${entry.name}` : entry.name }), " \u2014 ", entry.size, " bytes (", entry.mode, ")"] }, entry.path))) })] })] })) : null, activeScreen === 'editor' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-editor", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("h1", { children: "Remote File Editor \u2014 /etc/nginx/nginx.conf" }), _jsxs(Button, { variant: "primary", onClick: () => setEditorSaved(true), testId: "save-remote-file-btn", children: ["Save to host ", editorSaved ? '(Saved)' : '(Unsaved*)'] })] }), _jsx("textarea", { className: "ui-input", rows: 10, "aria-label": "Remote file content", value: editorContent, onInput: (e) => {
+                                                    }, children: "Import ~/.ssh/config" }) })] })] })) : null, activeScreen === 'files' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-files", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h1", { children: "Dual-Pane SFTP File Manager" }), _jsxs(Badge, { tone: "neutral", testId: "storage-quota-badge", children: ["Storage Guard: ", quotaSnap.percentUsed, "% of 256 MiB cap (256 KiB chunks, SHA-256 verified)"] })] }), _jsx("p", { children: transferStatus }), _jsx("input", { type: "search", className: "ui-input", placeholder: "Filter remote directory entries\u2026", value: fileFilter, onInput: (e) => setFileFilter(e.target.value), "aria-label": "Filter remote directory entries" }), _jsxs(Card, { children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("p", { children: "Drop files or folders to upload to /srv/app (resumable .part atomic rename)" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "primary", onClick: () => setTransferStatus('Uploaded release.tar.zst (20/20 chunks · 256 KiB · SHA-256 verified)'), children: [_jsx(Icon, { name: "upload" }), " Simulate 256 KiB Upload"] }), _jsxs(Button, { variant: "default", onClick: () => setTransferStatus('Streaming /etc/app/config.zip via ZIP64 writer…'), children: [_jsx(Icon, { name: "download" }), " Download Folder ZIP"] })] })] }), _jsx("ul", { children: sftpEntries.map((entry) => (_jsxs("li", { children: [_jsx("strong", { children: entry.isDir ? `[DIR] ${entry.name}` : entry.name }), " \u2014 ", entry.size, " bytes (", entry.mode, ")"] }, entry.path))) })] }), _jsxs("div", { className: "webssh-grid", children: [_jsxs(Card, { testId: "chmod-matrix-card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("h2", { children: "Interactive chmod Permissions Matrix" }), _jsxs(Badge, { tone: "success", testId: "chmod-octal-badge", children: [chmodFormatted.octal, " (", chmodFormatted.symbolic, ")"] })] }), _jsxs("p", { children: ["Target: ", _jsx("code", { children: chmodTargetFile })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap' }, children: [_jsxs("label", { children: [_jsx("input", { type: "checkbox", checked: chmodPerms.ownerWrite, onChange: (e) => setChmodPerms((prev) => ({
+                                                                            ...prev,
+                                                                            ownerWrite: e.currentTarget.checked
+                                                                        })), "data-testid": "chmod-owner-write" }), ' ', "Owner Write"] }), _jsxs("label", { children: [_jsx("input", { type: "checkbox", checked: chmodPerms.groupWrite, onChange: (e) => setChmodPerms((prev) => ({
+                                                                            ...prev,
+                                                                            groupWrite: e.currentTarget.checked
+                                                                        })), "data-testid": "chmod-group-write" }), ' ', "Group Write"] }), _jsxs("label", { children: [_jsx("input", { type: "checkbox", checked: chmodPerms.publicExec, onChange: (e) => setChmodPerms((prev) => ({
+                                                                            ...prev,
+                                                                            publicExec: e.currentTarget.checked
+                                                                        })), "data-testid": "chmod-public-exec" }), ' ', "Public Exec"] })] }), _jsxs(Button, { variant: "primary", testId: "apply-chmod-btn", onClick: () => {
+                                                            setChmodTargetFile('/etc/nginx/nginx.conf');
+                                                            setTransferStatus(`Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`);
+                                                        }, children: ["Apply chmod ", chmodFormatted.octal] })] }), _jsxs(Card, { testId: "server-relay-card", children: [_jsx("h2", { children: "Server-to-Server Direct SFTP Relay" }), _jsx("p", { "data-testid": "relay-status-text", children: relayStatus }), _jsx(Button, { variant: "primary", testId: "trigger-sftp-relay-btn", onClick: () => setRelayStatus('Transferred 5.0 MiB directly: prod-edge-01 → staging-web (SHA-256 verified, 0 local disk usage)'), children: "Relay File Between Hosts" })] })] }), _jsxs(Card, { testId: "live-log-tailer-card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h2", { children: "Live Log Tailer (tail -f /var/log/nginx/error.log)" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx("input", { type: "search", className: "ui-input", placeholder: "Filter log stream (e.g. error, warn)\u2026", "aria-label": "Filter log stream", value: tailFilter, onInput: (e) => setTailFilter(e.target.value), "data-testid": "tail-filter-input" }), _jsx(Button, { variant: "default", testId: "tail-pause-btn", onClick: () => setTailPaused((p) => !p), children: tailPaused ? 'Resume Stream' : 'Pause Stream' }), _jsx(Button, { variant: "primary", testId: "tail-append-btn", onClick: () => {
+                                                                    if (!tailPaused) {
+                                                                        setTailLogLines((prev) => [
+                                                                            ...prev,
+                                                                            '2026-11-01T08:15:30Z [info] healthcheck 200 OK in 4ms'
+                                                                        ]);
+                                                                    }
+                                                                }, children: "Simulate Log Event" })] })] }), _jsx("pre", { "data-testid": "tail-log-output", children: tailLogLines
+                                                    .filter((l) => !tailFilter || l.toLowerCase().includes(tailFilter.toLowerCase()))
+                                                    .join(String.fromCharCode(10)) })] })] })) : null, activeScreen === 'editor' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-editor", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h1", { children: "Remote File Editor \u2014 /etc/nginx/nginx.conf" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", testId: "toggle-diff-viewer-btn", onClick: () => setShowDiffViewer((d) => !d), children: showDiffViewer ? 'Hide Side-by-Side Diff' : 'Compare Side-by-Side Diff' }), _jsxs(Button, { variant: "primary", onClick: () => setEditorSaved(true), testId: "save-remote-file-btn", children: ["Save to host ", editorSaved ? '(Saved)' : '(Unsaved*)'] })] })] }), _jsx("textarea", { className: "ui-input", rows: 10, "aria-label": "Remote file content", value: editorContent, onInput: (e) => {
                                             setEditorContent(e.target.value);
                                             setEditorSaved(false);
-                                        } })] })) : null, activeScreen === 'snippets' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-snippets", children: [_jsx("h1", { children: "Snippets & Asciicast v2 Session Replay" }), _jsxs(Card, { children: [_jsx("h2", { children: "Variable Interpolation Parameters" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "snip-var-service", children: "service" }), _jsx("input", { id: "snip-var-service", className: "ui-input", value: snippetVarService, onInput: (e) => setSnippetVarService(e.target.value) })] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "snip-var-lines", children: "lines" }), _jsx("input", { id: "snip-var-lines", className: "ui-input", value: snippetVarLines, onInput: (e) => setSnippetVarLines(e.target.value) })] })] })] }), _jsx("div", { className: "webssh-grid", children: snippetLib.list().map((snip) => {
+                                        } }), showDiffViewer ? (_jsxs(Card, { testId: "side-by-side-diff-card", children: [_jsx("h2", { children: "Side-by-Side Diff vs Remote /etc/nginx/nginx.conf" }), _jsxs("div", { className: "webssh-diff-grid", children: [_jsxs("div", { children: [_jsx("strong", { children: "Original Remote File" }), diffEntries.map((d) => (_jsxs("div", { className: `webssh-diff-line--${d.status}`, children: [d.lineNumber, ": ", d.before] }, `orig-${d.lineNumber}`)))] }), _jsxs("div", { children: [_jsx("strong", { children: "Modified Buffer" }), diffEntries.map((d) => (_jsxs("div", { className: `webssh-diff-line--${d.status}`, children: [d.lineNumber, ": ", d.after] }, `mod-${d.lineNumber}`)))] })] })] })) : null] })) : null, activeScreen === 'snippets' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-snippets", children: [_jsx("h1", { children: "Snippets & Asciicast v2 Session Replay" }), _jsxs(Card, { children: [_jsx("h2", { children: "Variable Interpolation Parameters" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "snip-var-service", children: "service" }), _jsx("input", { id: "snip-var-service", className: "ui-input", value: snippetVarService, onInput: (e) => setSnippetVarService(e.target.value) })] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "snip-var-lines", children: "lines" }), _jsx("input", { id: "snip-var-lines", className: "ui-input", value: snippetVarLines, onInput: (e) => setSnippetVarLines(e.target.value) })] })] })] }), _jsx("div", { className: "webssh-grid", children: snippetLib.list().map((snip) => {
                                             const interpolated = interpolateSnippet(snip.command, {
                                                 service: snippetVarService,
                                                 lines: snippetVarLines
@@ -892,6 +1116,24 @@ webssh:~$ `);
                                                             setPendingInputBytes(0);
                                                         }, children: "Simulate Resumed" })] })] })] })) : null, !isFullscreen && !zenMode ? (_jsx("div", { className: "webssh-special-keys", role: "toolbar", "aria-label": "Mobile and Tablet Special Keys", children: SPECIAL_KEYS_ROW.map((keyLabel) => (_jsx(Button, { variant: "ghost", testId: `special-key-${keyLabel}`, children: keyLabel }, keyLabel))) })) : null] })] }), !isFullscreen && !zenMode ? (_jsxs("footer", { className: "webssh-statusbar", role: "contentinfo", "data-testid": "status-bar", children: [_jsx("span", { children: connectionState === 'connected'
                             ? `Connected: ${sessionTabLabel} · Cipher: chacha20-poly1305@openssh.com`
-                            : 'Status: Disconnected · Ready for SSH connection' }), _jsxs("span", { children: ["Remote Signer: Argon2id Ed25519 \u00B7 ", cols, "x", rows, " \u00B7 Font: ", fontSize, "px"] })] })) : null, _jsx(Modal, { open: connectModalOpen, title: "New SSH Connection & Argon2id Credentials", onClose: () => setConnectModalOpen(false), testId: "connect-modal", children: _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-host-input", children: "Host (IP or domain)" }), _jsx("input", { id: "connect-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or edge-01.prod.internal", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "connect-host-input" })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { flex: 2 }, children: [_jsx("label", { htmlFor: "connect-user-input", children: "Username" }), _jsx("input", { id: "connect-user-input", type: "text", className: "ui-input", placeholder: "root / ubuntu", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "connect-user-input" })] }), _jsxs("div", { style: { flex: 1 }, children: [_jsx("label", { htmlFor: "connect-port-input", children: "Port" }), _jsx("input", { id: "connect-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "connect-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Auth Mode" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Argon2id Ed25519 Key' ? 'primary' : 'default', onClick: () => setAuthMethod('Argon2id Ed25519 Key'), testId: "auth-method-pubkey-btn", children: "Argon2id Ed25519 Key" }), _jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => setAuthMethod('Password'), testId: "auth-method-password-btn", children: "Password" })] })] }), authMethod === 'Password' ? (_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-password-input", children: "Password" }), _jsx("input", { id: "connect-password-input", type: "password", className: "ui-input", placeholder: "Enter SSH password\u2026", value: connectPassword, onInput: (e) => setConnectPassword(e.target.value), "data-testid": "connect-password-input" })] })) : null, _jsxs("div", { children: [_jsx("label", { htmlFor: "connect-pubkey-snippet", children: "Public Key Snippet (authorized_keys)" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-1)' }, children: [_jsx("input", { id: "connect-pubkey-snippet", type: "text", className: "ui-input", readOnly: true, value: authorizedKeysSnippet, "data-testid": "connect-pubkey-snippet" }), _jsxs(Button, { variant: "default", onClick: () => copyToClipboard(authorizedKeysSnippet), testId: "copy-pubkey-snippet-btn", children: [_jsx(Icon, { name: "copy" }), " ", copiedSnippet ? 'Copied' : 'Copy'] })] })] }), _jsxs("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", onClick: () => setConnectModalOpen(false), children: "Cancel" }), _jsx(Button, { variant: "primary", type: "submit", testId: "connect-modal-submit-btn", children: "Connect" })] })] }) }), _jsxs(Modal, { open: paletteOpen, title: "Command Palette", onClose: () => setPaletteOpen(false), testId: "command-palette-modal", children: [_jsx("input", { type: "search", className: "ui-input", placeholder: "Type a command or search actions\u2026", value: paletteQuery, onInput: (e) => setPaletteQuery(e.target.value), "aria-label": "Command palette search", "data-testid": "command-palette-input" }), _jsx("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', marginTop: 'var(--space-3)' }, children: paletteRegistry.search(paletteQuery).map((cmd) => (_jsxs(Button, { variant: "ghost", onClick: () => void cmd.run(), testId: `palette-cmd-${cmd.id}`, children: [_jsx("span", { children: cmd.title }), cmd.shortcut ? _jsx(Badge, { tone: "neutral", children: cmd.shortcut }) : null] }, cmd.id))) })] }), _jsxs(Modal, { open: hostKeyModal !== 'none', danger: hostKeyModal === 'mismatch', title: hostKeyModal === 'mismatch' ? 'WARNING: REMOTE HOST KEY CHANGED' : 'Verify Unknown Host Key (TOFU)', onClose: () => setHostKeyModal('none'), testId: "hostkey-modal", children: [_jsxs("p", { children: ["Host: ", _jsx("strong", { children: "edge-01.prod.internal:22" })] }), _jsxs("p", { children: ["SHA-256 Fingerprint: ", _jsx("code", { children: generatedFp })] }), hostKeyModal === 'mismatch' ? (_jsx("p", { children: "The host key does not match your pinned fingerprint. This could indicate a man-in-the-middle attack. Connection is blocked unless you explicitly override." })) : (_jsx("p", { children: "Trust on first use (TOFU) will pin this SHA-256 fingerprint in your browser store." })), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }, children: [_jsx(Button, { variant: hostKeyModal === 'mismatch' ? 'danger' : 'primary', onClick: () => setHostKeyModal('none'), testId: "hostkey-confirm-btn", children: hostKeyModal === 'mismatch' ? 'Explicit Override & Pin New Key' : 'Trust & Pin Host Key' }), _jsx(Button, { variant: "default", onClick: () => setHostKeyModal('none'), children: "Disconnect" })] })] })] }));
+                            : 'Status: Disconnected · Ready for SSH connection' }), _jsxs("span", { children: ["Remote Signer: Argon2id Ed25519 \u00B7 ", cols, "x", rows, " \u00B7 Font: ", fontSize, "px"] })] })) : null, _jsx(Modal, { open: connectModalOpen, title: "New SSH Connection & Argon2id Credentials", onClose: () => setConnectModalOpen(false), testId: "connect-modal", children: _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-host-input", children: "Host (IP or domain)" }), _jsx("input", { id: "connect-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or edge-01.prod.internal", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "connect-host-input" })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { flex: 2 }, children: [_jsx("label", { htmlFor: "connect-user-input", children: "Username" }), _jsx("input", { id: "connect-user-input", type: "text", className: "ui-input", placeholder: "root / ubuntu", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "connect-user-input" })] }), _jsxs("div", { style: { flex: 1 }, children: [_jsx("label", { htmlFor: "connect-port-input", children: "Port" }), _jsx("input", { id: "connect-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "connect-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Auth Mode" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
+                                                setAuthMethod('Password');
+                                                setConnectErrorMsg('');
+                                            }, testId: "auth-method-password-btn", children: "Username & Password" }), _jsx(Button, { variant: authMethod === 'Private Key (.pem / id_rsa)' ? 'primary' : 'default', onClick: () => {
+                                                setAuthMethod('Private Key (.pem / id_rsa)');
+                                                setConnectErrorMsg('');
+                                            }, testId: "auth-method-keyfile-btn", children: "Private Key (.pem / chmod 400)" }), _jsx(Button, { variant: authMethod === 'Argon2id Ed25519 Key' ? 'primary' : 'default', onClick: () => {
+                                                setAuthMethod('Argon2id Ed25519 Key');
+                                                setConnectErrorMsg('');
+                                            }, testId: "auth-method-pubkey-btn", children: "Argon2id Ed25519 Key" })] })] }), authMethod === 'Password' ? (_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-password-input", children: "Password" }), _jsx("input", { id: "connect-password-input", type: "password", className: "ui-input", placeholder: "Enter SSH password\u2026", value: connectPassword, onInput: (e) => setConnectPassword(e.target.value), "data-testid": "connect-password-input" })] })) : null, authMethod === 'Private Key (.pem / id_rsa)' ? (_jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("label", { htmlFor: "modal-key-file-input", children: "Upload Private Key (.pem / id_ed25519 / id_rsa)" }), _jsxs(Badge, { tone: keyPermissionMode === '0644' ? 'danger' : 'success', testId: "modal-key-chmod-badge", children: ["chmod ", keyPermissionMode, " ", keyPermissionMode === '0400' ? '(-r--------)' : keyPermissionMode === '0600' ? '(-rw-------)' : '(UNSAFE)'] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }, children: [_jsx("input", { id: "modal-key-file-input", type: "file", className: "ui-input", accept: ".pem,.key,.pub,*", onChange: (e) => void handlePrivateKeyFileUpload(e), "data-testid": "modal-private-key-file-input" }), _jsx(Button, { variant: "default", testId: "modal-set-chmod-400-btn", onClick: () => {
+                                                setKeyPermissionMode('0400');
+                                                setConnectErrorMsg('');
+                                            }, children: "chmod 400" })] })] })) : null, _jsxs("div", { children: [_jsx("label", { htmlFor: "connect-pubkey-snippet", children: "Public Key Snippet (authorized_keys)" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-1)' }, children: [_jsx("input", { id: "connect-pubkey-snippet", type: "text", className: "ui-input", readOnly: true, value: authorizedKeysSnippet, "data-testid": "connect-pubkey-snippet" }), _jsxs(Button, { variant: "default", onClick: () => copyToClipboard(authorizedKeysSnippet), testId: "copy-pubkey-snippet-btn", children: [_jsx(Icon, { name: "copy" }), " ", copiedSnippet ? 'Copied' : 'Copy'] })] })] }), connectErrorMsg ? (_jsx(Badge, { tone: "danger", testId: "modal-connect-error-badge", children: connectErrorMsg })) : null, _jsxs("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", onClick: () => setConnectModalOpen(false), children: "Cancel" }), _jsx(Button, { variant: "primary", type: "submit", testId: "connect-modal-submit-btn", children: "Connect" })] })] }) }), _jsxs(Modal, { open: paletteOpen, title: "Command Palette", onClose: () => setPaletteOpen(false), testId: "command-palette-modal", children: [_jsx("input", { type: "search", className: "ui-input", placeholder: "Type a command or search actions\u2026", value: paletteQuery, onInput: (e) => setPaletteQuery(e.target.value), "aria-label": "Command palette search", "data-testid": "command-palette-input" }), _jsx("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', marginTop: 'var(--space-3)' }, children: paletteRegistry.search(paletteQuery).map((cmd) => (_jsxs(Button, { variant: "ghost", onClick: () => void cmd.run(), testId: `palette-cmd-${cmd.id}`, children: [_jsx("span", { children: cmd.title }), cmd.shortcut ? _jsx(Badge, { tone: "neutral", children: cmd.shortcut }) : null] }, cmd.id))) })] }), _jsxs(Modal, { open: hostKeyModal !== 'none', danger: hostKeyModal === 'mismatch', title: hostKeyModal === 'mismatch' ? 'WARNING: REMOTE HOST KEY CHANGED' : 'Verify Unknown Host Key (TOFU)', onClose: () => setHostKeyModal('none'), testId: "hostkey-modal", children: [_jsxs("p", { children: ["Host: ", _jsxs("strong", { children: [connectHost || 'localhost', ":", connectPort || '22'] })] }), _jsxs("p", { children: ["SHA-256 Fingerprint: ", _jsx("code", { children: generatedFp })] }), hostKeyModal === 'mismatch' ? (_jsx("p", { children: "The host key does not match your pinned fingerprint. This could indicate a man-in-the-middle attack. Connection is blocked unless you explicitly override." })) : (_jsx("p", { children: "Trust on first use (TOFU) will pin this SHA-256 fingerprint in your browser store." })), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }, children: [_jsx(Button, { variant: hostKeyModal === 'mismatch' ? 'danger' : 'primary', onClick: () => setHostKeyModal('none'), testId: "hostkey-confirm-btn", children: hostKeyModal === 'mismatch' ? 'Explicit Override & Pin New Key' : 'Trust & Pin Host Key' }), _jsx(Button, { variant: "default", onClick: () => setHostKeyModal('none'), children: "Disconnect" })] })] }), _jsxs(Modal, { open: dangerousCommandPending !== null, danger: true, title: "DANGEROUS COMMAND SAFETY GUARD", onClose: () => setDangerousCommandPending(null), testId: "dangerous-command-modal", children: [_jsxs("p", { children: ["Intercepted potentially destructive command:", ' ', _jsx("code", { "data-testid": "dangerous-command-text", children: dangerousCommandPending?.command })] }), _jsx("p", { "data-testid": "dangerous-command-reason", children: dangerousCommandPending?.reason }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }, children: [_jsx(Button, { variant: "danger", testId: "confirm-dangerous-cmd-btn", onClick: () => {
+                                    const cmdToRun = dangerousCommandPending?.command;
+                                    setDangerousCommandPending(null);
+                                    if (cmdToRun) {
+                                        executeTerminalCommand(cmdToRun, true);
+                                    }
+                                }, children: "Execute Anyway" }), _jsx(Button, { variant: "default", testId: "cancel-dangerous-cmd-btn", onClick: () => setDangerousCommandPending(null), children: "Cancel Command" })] })] })] }));
 }
 //# sourceMappingURL=App.js.map

@@ -1,7 +1,8 @@
 import type { JSX } from 'preact';
-export type ScreenId = 'workspace' | 'features' | 'welcome' | 'vault' | 'hosts' | 'files' | 'editor' | 'snippets' | 'settings';
+export type ScreenId = 'workspace' | 'features' | 'telemetry' | 'tunnels' | 'playbooks' | 'welcome' | 'vault' | 'hosts' | 'files' | 'editor' | 'snippets' | 'settings';
 export type ConnectionState = 'disconnected' | 'connected' | 'reconnecting' | 'offline' | 'resumed';
-export type AuthMethod = 'Argon2id Ed25519 Key' | 'Password';
+export type AuthMethod = 'Password' | 'Private Key (.pem / id_rsa)' | 'Argon2id Ed25519 Key';
+export type KeyPermissionMode = '0400' | '0600' | '0644';
 export type MenuId = 'terminal' | 'edit' | 'view' | 'security' | 'features' | null;
 export interface SessionTabItem {
     id: string;

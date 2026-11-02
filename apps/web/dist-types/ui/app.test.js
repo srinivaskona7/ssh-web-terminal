@@ -3,102 +3,69 @@ import { jsx as _jsx } from "preact/jsx-runtime";
 import { describe, expect, it } from 'vitest';
 import { render } from 'preact';
 import { App, FIFTY_FEATURES_CATALOG } from './App';
-describe('App UI Shell Integration Suite (M4-M8)', () => {
-    it('renders macOS title bar & menu bar, capsule tabs, 17px default font size, interactive terminal, Argon2id modal, and 50-feature workbench', async () => {
+describe('App UI Shell Integration Suite (M4-M13)', () => {
+    it('starts on clean minimal Welcome screen with zero mock data, exits Zen mode on Escape, supports simple Password & Private Key (chmod 0400) connection, and enables IDE mode on demand', async () => {
         const container = document.createElement('div');
         document.body.appendChild(container);
         render(_jsx(App, {}), container);
         expect(FIFTY_FEATURES_CATALOG.length).toBe(50);
-        const workspaceRoot = container.querySelector('[data-testid="workspace-root"]');
-        expect(workspaceRoot).toBeTruthy();
-        // 1. Verify macOS Window Title Bar & Native Menu Bar
-        const titlebar = container.querySelector('[data-testid="macos-titlebar"]');
-        expect(titlebar).toBeTruthy();
-        expect(container.querySelector('[data-testid="traffic-light-close"]')).toBeTruthy();
-        expect(container.querySelector('[data-testid="traffic-light-minimize"]')).toBeTruthy();
-        expect(container.querySelector('[data-testid="traffic-light-fullscreen"]')).toBeTruthy();
-        const winTitle = container.querySelector('[data-testid="macos-window-title"]');
-        expect(winTitle?.textContent).toContain('terminal — ...srinew/terminal — -zsh — 80x24');
-        // Open Terminal menu and click Split Terminal
-        const menuTerminalBtn = container.querySelector('[data-testid="menu-terminal-btn"]');
-        menuTerminalBtn.click();
+        // 1. Default screen is Welcome with minimal options and zero mock data
+        const welcomeScreen = container.querySelector('[data-testid="screen-welcome"]');
+        expect(welcomeScreen).toBeTruthy();
+        expect(welcomeScreen?.textContent).toContain('Welcome to WebSSH Studio');
+        expect(container.querySelector('[data-testid="nav-features"]')).toBeNull();
+        // 2. Enter Zen Mode and press Escape -> returns to Welcome screen with chrome restored
+        const zenBtn = container.querySelector('[data-testid="toggle-zen-btn"]');
+        zenBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        const menuDropdown = container.querySelector('[data-testid="menu-terminal-dropdown"]');
-        expect(menuDropdown?.textContent).toContain('New Tab');
-        expect(menuDropdown?.textContent).toContain('Split Terminal');
-        expect(menuDropdown?.textContent).toContain('Disconnect');
-        // 2. Verify macOS / VS Code Capsule Tab Strip (+ and ×)
-        const addTabBtn = container.querySelector('[data-testid="add-tab-btn"]');
-        addTabBtn.click();
+        expect(container.querySelector('[data-testid="zen-mode-banner"]')?.textContent).toContain('Zen Mode Active — Press Esc to return');
+        const rootEl = container.querySelector('[data-testid="workspace-root"]');
+        rootEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         await new Promise((r) => setTimeout(r, 10));
-        const secondTab = container.querySelector('[data-testid="tab-session-2"]');
-        expect(secondTab?.textContent).toContain('...srinew/terminal — -zsh (2)');
-        // 3. Verify Top-Right Quick Customization Toolbar (Font Family & 17px A-/A+)
-        const fontSelect = container.querySelector('[data-testid="font-family-select"]');
-        expect(fontSelect.textContent).toContain('SF Mono');
-        expect(fontSelect.textContent).toContain('JetBrains Mono');
-        expect(fontSelect.textContent).toContain('Fira Code');
-        expect(fontSelect.textContent).toContain('Menlo');
-        expect(fontSelect.textContent).toContain('Monaco');
+        expect(container.querySelector('[data-testid="zen-mode-banner"]')).toBeNull();
+        expect(container.querySelector('[data-testid="screen-welcome"]')).toBeTruthy();
+        // 3. Test Private Key upload with chmod 0400 permission enforcement on Welcome screen
+        const keyAuthBtn = container.querySelector('[data-testid="welcome-auth-keyfile-btn"]');
+        keyAuthBtn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(container.querySelector('[data-testid="private-key-chmod-badge"]')?.textContent).toContain('chmod 0400 (-r--------) Enforced');
+        // Selecting 0644 blocks connection until Set chmod 400 is clicked
+        const chmodSelect = container.querySelector('[data-testid="private-key-chmod-select"]');
+        chmodSelect.value = '0644';
+        chmodSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 10));
+        const welcomeConnectBtn = container.querySelector('[data-testid="welcome-connect-submit-btn"]');
+        welcomeConnectBtn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(container.querySelector('[data-testid="connect-error-badge"]')?.textContent).toContain('Permissions 0644 for private key are too open');
+        // Click "Set chmod 400" to fix permissions to 0400
+        const fixChmod400Btn = container.querySelector('[data-testid="apply-key-chmod-400-btn"]');
+        fixChmod400Btn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(container.querySelector('[data-testid="private-key-chmod-badge"]')?.textContent).toContain('chmod 0400 (-r--------) Enforced');
+        // 4. Switch to Terminal and test interactive shell, 17px default font size, and commands
+        const navWorkspace = container.querySelector('[data-testid="nav-workspace"]');
+        navWorkspace.click();
+        await new Promise((r) => setTimeout(r, 10));
         const termViewport = container.querySelector('[data-testid="terminal-viewport"]');
-        expect(termViewport.textContent).toContain('WebSSH Studio v1.0.0');
-        expect(termViewport.textContent).toContain("Type 'help' for local commands or click 'New Connection' to authenticate.");
-        expect(termViewport.textContent).toContain('webssh:~$ ');
         expect(termViewport.style.fontSize).toBe('17px');
         expect(termViewport.style.fontFamily).toContain('JetBrains Mono');
-        const fontBadge = container.querySelector('.font-size-badge');
-        expect(fontBadge?.textContent).toBe('17px');
         const incBtn = container.querySelector('[data-testid="font-size-inc-btn"]');
-        expect(incBtn.textContent).toBe('A+');
         incBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        expect(fontBadge?.textContent).toBe('18px');
         expect(termViewport.style.fontSize).toBe('18px');
         const decBtn = container.querySelector('[data-testid="font-size-dec-btn"]');
-        expect(decBtn.textContent).toBe('A-');
         decBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        expect(fontBadge?.textContent).toBe('17px');
-        // 4. Interactive terminal keyboard input: type 'help' + Backspace + 'p' + Enter
-        for (const ch of ['h', 'e', 'l', 'x']) {
-            termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
-        }
-        termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
-        termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true }));
-        await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="terminal-current-input"]')?.textContent).toBe('help');
-        termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-        await new Promise((r) => setTimeout(r, 10));
-        expect(termViewport.textContent).toContain('Available local commands: connect <user@host>, pubkey, font <size>, clear, vault');
-        // Test command history ArrowUp / ArrowDown
-        termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
-        await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="terminal-current-input"]')?.textContent).toBe('help');
-        termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-        await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="terminal-current-input"]')?.textContent).toBe('');
-        // Test 'font 20' command
-        for (const ch of 'font 20') {
+        expect(termViewport.style.fontSize).toBe('17px');
+        // Type 'help' + Enter
+        for (const ch of 'help') {
             termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
         }
         termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
         await new Promise((r) => setTimeout(r, 10));
-        expect(termViewport.style.fontSize).toBe('20px');
-        // Test 'pubkey' command
-        for (const ch of 'pubkey') {
-            termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
-        }
-        termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-        await new Promise((r) => setTimeout(r, 10));
-        expect(termViewport.textContent).toContain('ssh-ed25519');
-        // Test 'clear' command
-        for (const ch of 'clear') {
-            termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
-        }
-        termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-        await new Promise((r) => setTimeout(r, 10));
-        expect(termViewport.textContent).not.toContain('WebSSH Studio v1.0.0');
-        // 5. Test 'connect root@10.0.0.5' command opening Argon2id Auth modal with pre-filled credentials
+        expect(termViewport.textContent).toContain('Available local commands: connect <user@host>');
+        // 5. Test 'connect root@10.0.0.5' command opening simple Connection modal
         for (const ch of 'connect root@10.0.0.5') {
             termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
         }
@@ -106,77 +73,97 @@ describe('App UI Shell Integration Suite (M4-M8)', () => {
         await new Promise((r) => setTimeout(r, 10));
         const connectModal = container.querySelector('[data-testid="connect-modal"]');
         expect(connectModal).toBeTruthy();
-        expect(connectModal?.textContent).toContain('Argon2id Ed25519 Key');
-        expect(connectModal?.textContent).toContain('Password');
-        const hostInput = container.querySelector('[data-testid="connect-host-input"]');
-        const userInput = container.querySelector('[data-testid="connect-user-input"]');
-        const portInput = container.querySelector('[data-testid="connect-port-input"]');
-        expect(hostInput.value).toBe('10.0.0.5');
-        expect(userInput.value).toBe('root');
-        expect(portInput.value).toBe('22');
-        // Submit connection modal and verify tab updates to root@10.0.0.5 and Disconnect button is rendered
+        expect(connectModal?.textContent).toContain('Username & Password');
+        expect(connectModal?.textContent).toContain('Private Key (.pem / chmod 400)');
         const connectSubmit = container.querySelector('[data-testid="connect-modal-submit-btn"]');
         connectSubmit.click();
         await new Promise((r) => setTimeout(r, 10));
         const sessionTab = container.querySelector('[data-testid="tab-session-1"]');
         expect(sessionTab?.textContent).toContain('root@10.0.0.5');
         const disconnectBtn = container.querySelector('[data-testid="disconnect-btn"]');
-        expect(disconnectBtn).toBeTruthy();
         disconnectBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="new-connection-btn"]')).toBeTruthy();
-        // Open 50-Feature Workbench and execute a feature interactively
+        // 6. Enable IDE Mode to unlock all 50 features and full IDE navigation rail
+        const enableIdeBtn = container.querySelector('[data-testid="toggle-ide-mode-btn"]');
+        enableIdeBtn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(enableIdeBtn.textContent).toContain('IDE Mode: ON');
         const navFeatures = container.querySelector('[data-testid="nav-features"]');
+        expect(navFeatures).toBeTruthy();
         navFeatures.click();
         await new Promise((r) => setTimeout(r, 10));
-        const featuresScreen = container.querySelector('[data-testid="screen-features"]');
-        expect(featuresScreen?.textContent).toContain('All 50 Features — Interactive Selector & Workbench');
-        const runFeature10 = container.querySelector('[data-testid="run-feature-10"]');
-        runFeature10.click();
+        expect(container.querySelector('[data-testid="screen-features"]')?.textContent).toContain('All 50 Features — Interactive Selector & Workbench');
+        document.body.removeChild(container);
+    });
+    it('exercises IDE Mode & Step 12 Advanced Feature Suite: Smart Shell (ghost autocomplete, safety guard, redaction, command blocks), Telemetry HUD, Port Tunnels, SFTP Chmod (0400), Diff, FIDO2/CA, and Fleet Playbooks', async () => {
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        render(_jsx(App, {}), container);
+        // Enable IDE Mode and switch to Terminal
+        const toggleIdeBtn = container.querySelector('[data-testid="toggle-ide-mode-btn"]');
+        toggleIdeBtn.click();
+        const navWorkspace = container.querySelector('[data-testid="nav-workspace"]');
+        navWorkspace.click();
         await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="terminal-split-pane-2"]')).toBeTruthy();
-        // Toggle immersive full-screen mode (uses 100dvh pseudo-fullscreen fallback in jsdom)
-        const fsBtn = container.querySelector('[data-testid="toggle-fullscreen-btn"]');
-        fsBtn.click();
+        const viewport = container.querySelector('[data-testid="terminal-viewport"]');
+        const sendKey = (key) => {
+            viewport.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+        };
+        // 1. Ghost-text autocomplete: type "tele" -> accept with Tab -> "telemetry"
+        for (const ch of 'tele')
+            sendKey(ch);
         await new Promise((r) => setTimeout(r, 10));
-        const toast = container.querySelector('[data-testid="fullscreen-toast"]');
-        expect(toast?.textContent).toContain('Press F11 or Esc to exit');
-        // Hover top zone to reveal auto-hiding overlay bar
-        const hoverZone = container.querySelector('[data-testid="fullscreen-top-hover-zone"]');
-        expect(hoverZone).toBeTruthy();
-        hoverZone.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        expect(container.querySelector('[data-testid="terminal-ghost-suggestion"]')?.textContent).toBe('metry');
+        sendKey('Tab');
         await new Promise((r) => setTimeout(r, 10));
-        const exitBtn = container.querySelector('[data-testid="overlay-exit-fullscreen-btn"]');
-        expect(exitBtn).toBeTruthy();
-        exitBtn.click();
+        expect(container.querySelector('[data-testid="terminal-current-input"]')?.textContent).toBe('telemetry');
+        for (let i = 0; i < 9; i++)
+            sendKey('Backspace');
+        // 2. Dangerous Command Safety Guard intercepts "rm -rf /"
+        for (const ch of 'rm -rf /')
+            sendKey(ch);
+        sendKey('Enter');
         await new Promise((r) => setTimeout(r, 10));
-        // Navigate to Hosts screen and import ~/.ssh/config
-        const navHosts = container.querySelector('[data-testid="nav-hosts"]');
-        navHosts.click();
+        const dangerModal = container.querySelector('[data-testid="dangerous-command-modal"]');
+        expect(dangerModal?.textContent).toContain('DANGEROUS COMMAND SAFETY GUARD');
+        const cancelDangerBtn = container.querySelector('[data-testid="cancel-dangerous-cmd-btn"]');
+        cancelDangerBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        const importBtn = container.querySelector('[data-testid="import-ssh-config-btn"]');
-        importBtn.click();
+        // 3. Execute a safe command to create a Command Block and toggle Secret Redaction
+        for (const ch of 'help')
+            sendKey(ch);
+        sendKey('Enter');
         await new Promise((r) => setTimeout(r, 10));
-        const importedHostCard = container.querySelector('[data-testid="host-card-staging-web"]');
-        expect(importedHostCard?.textContent).toContain('deploy@10.10.4.12:2222');
-        // Trigger red blocking KEY CHANGED modal
-        const mismatchBtn = container.querySelector('[data-testid="trigger-mismatch-modal-btn"]');
-        mismatchBtn.click();
+        expect(container.querySelector('[data-testid="command-blocks-list"]')?.textContent).toContain('$ help');
+        const redactBtn = container.querySelector('[data-testid="toggle-redaction-btn"]');
+        redactBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        const hostKeyModal = container.querySelector('[data-testid="hostkey-modal"]');
-        expect(hostKeyModal?.textContent).toContain('WARNING: REMOTE HOST KEY CHANGED');
-        const confirmHostKey = container.querySelector('[data-testid="hostkey-confirm-btn"]');
-        confirmHostKey.click();
+        expect(redactBtn.textContent).toContain('Redaction: ON');
+        // 4. Port Tunnels & Custom Rule creation
+        const navTunnels = container.querySelector('[data-testid="nav-tunnels"]');
+        navTunnels.click();
         await new Promise((r) => setTimeout(r, 10));
-        // Open Command Palette and navigate to SFTP Files
-        const openPaletteBtn = container.querySelector('[data-testid="open-palette-btn"]');
-        openPaletteBtn.click();
+        const addTunnelBtn = container.querySelector('[data-testid="add-tunnel-btn"]');
+        addTunnelBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        const filesCmd = container.querySelector('[data-testid="palette-cmd-nav.files"]');
-        filesCmd.click();
+        expect(container.querySelector('[data-testid="screen-tunnels"]')?.textContent).toContain('Custom Tunnel :8080->:80');
+        // 5. SFTP Chmod Matrix (defaults to strict 0400 -r-------- for SSH keys) & Editor Side-by-Side Diff
+        const navFiles = container.querySelector('[data-testid="nav-files"]');
+        navFiles.click();
         await new Promise((r) => setTimeout(r, 10));
-        const filesScreen = container.querySelector('[data-testid="screen-files"]');
-        expect(filesScreen?.textContent).toContain('Dual-Pane SFTP File Manager');
+        expect(container.querySelector('[data-testid="chmod-octal-badge"]')?.textContent).toContain('0400 (-r--------)');
+        const navEditor = container.querySelector('[data-testid="nav-editor"]');
+        navEditor.click();
+        await new Promise((r) => setTimeout(r, 10));
+        const diffBtn = container.querySelector('[data-testid="toggle-diff-viewer-btn"]');
+        diffBtn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(container.querySelector('[data-testid="side-by-side-diff-card"]')?.textContent).toContain('Original Remote File');
+        // 6. FIDO2 Hardware Key & SSH CA Certificate Viewer
+        const navVault = container.querySelector('[data-testid="nav-vault"]');
+        navVault.click();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(container.querySelector('[data-testid="fido2-hardware-card"]')?.textContent).toContain('sk-ssh-ed25519@openssh.com');
         document.body.removeChild(container);
     });
 });

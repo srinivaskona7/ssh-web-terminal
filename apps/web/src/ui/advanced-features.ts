@@ -141,7 +141,7 @@ export function computeGhostAutocomplete(currentInput: string, history: readonly
 }
 
 const DANGEROUS_PATTERNS: readonly { pattern: RegExp; reason: string }[] = [
-  { pattern: /\brm\s+(-[rRfF]+\s+)*(\/|\/\*|~)\b/i, reason: 'Recursive root or home directory deletion (rm -rf /)' },
+  { pattern: /\brm\s+(-[rRfF]+\s+)+(\/|\/\*|~)(\s|$)/i, reason: 'Recursive root or home directory deletion (rm -rf /)' },
   { pattern: /\bmkfs(\.[a-z0-9]+)?\b/i, reason: 'Filesystem formatting command (mkfs)' },
   { pattern: /\bdd\s+.*of=\/dev\//i, reason: 'Raw block device overwrite (dd of=/dev/...)' },
   { pattern: /\bdrop\s+(database|table)\b/i, reason: 'Destructive SQL schema drop (DROP DATABASE/TABLE)' },
