@@ -32,6 +32,13 @@ test.describe('WebSSH Studio E2E & Accessibility Suite (M0-M13)', () => {
     await page.getByTestId('nav-workspace').click();
     const viewport = page.getByTestId('terminal-viewport');
     await expect(viewport).toBeVisible();
+    await expect(page.getByTestId('terminal-studio-container')).toBeVisible();
+    await expect(page.getByTestId('tab-session-1')).toContainText('Terminal 1');
+    await expect(page.getByTestId('stop-red-square')).toBeVisible();
+    await expect(page.getByTestId('terminal-ascii-banner')).toContainText(
+      'Welcome to the WebSSH Studio Interactive Terminal.'
+    );
+    await expect(page.getByTestId('prompt-arrow')).toContainText('➜');
 
     // Accessibility check on Terminal Workspace
     const terminalAccessibility = await new AxeBuilder({ page })

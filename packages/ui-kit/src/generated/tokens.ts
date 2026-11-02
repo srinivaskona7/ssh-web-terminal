@@ -58,14 +58,37 @@ export const TOKENS = {
     "6": "32px",
     "7": "40px",
     "8": "48px",
-    "terminalInset": "8px"
+    "terminalInset": "8px",
+    "stopIcon": "11px",
+    "separatorHeight": "18px"
   },
   "radius": {
     "none": "0px",
+    "stopSquare": "3px",
     "sm": "6px",
     "md": "8px",
     "panel": "12px",
+    "xl": "16px",
     "pill": "9999px"
+  },
+  "studio": {
+    "outerBg": "#000000",
+    "containerBg": "#131313",
+    "containerBorder": "#262629",
+    "terminalBg": "#282A36",
+    "terminalFg": "#F0F0EC",
+    "promptUser": "#F1FA8C",
+    "promptHost": "#72C7F5",
+    "promptDir": "#70DFE3",
+    "promptArrow": "#80F29A",
+    "cursorBg": "#AAAAAA",
+    "toolbarMuted": "#88888D",
+    "stopSquare": "#DC514E",
+    "logoLime": "#A6E22E",
+    "logoYellow": "#F1FA8C",
+    "logoOrange": "#FFB86C",
+    "logoCoral": "#FF6E67",
+    "logoPink": "#FF79C6"
   },
   "border": {
     "hairline": "1px solid var(--color-border-subtle)",

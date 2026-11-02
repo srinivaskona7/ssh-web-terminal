@@ -71,7 +71,7 @@ export type AuthMethod = 'Password' | 'Private Key (.pem / id_rsa)' | 'Argon2id 
 
 export type KeyPermissionMode = '0400' | '0600' | '0644';
 
-export type MenuId = 'terminal' | 'edit' | 'view' | 'security' | 'features' | null;
+export type MenuId = 'terminal' | 'edit' | 'view' | 'security' | 'features' | 'more' | null;
 
 export interface SessionTabItem {
   id: string;
@@ -189,9 +189,9 @@ export function App(): JSX.Element {
   // 1. Native Menu Bar state
   const [openMenu, setOpenMenu] = useState<MenuId>(null);
 
-  // 2. macOS / VS Code Capsule Tabs state
+  // 2. macOS / VS Code / Studio Tabs state
   const [tabs, setTabs] = useState<SessionTabItem[]>([
-    { id: 'tab-1', title: '...srinew/terminal — -zsh', connected: false }
+    { id: 'tab-1', title: 'Terminal 1', connected: false }
   ]);
   const [activeTabId, setActiveTabId] = useState<string>('tab-1');
   const [splitPanes, setSplitPanes] = useState<number>(1);
@@ -213,7 +213,9 @@ export function App(): JSX.Element {
 
   // 3. Fresh Default State (Zero Pre-Populated Mock Data)
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
-  const [sessionTabLabel, setSessionTabLabel] = useState<string>('...srinew/terminal — -zsh');
+  const [sessionTabLabel, setSessionTabLabel] = useState<string>('Terminal 1');
+  const [connectedUser, setConnectedUser] = useState<string>('bob');
+  const [connectedHost, setConnectedHost] = useState<string>('caleston-lp10');
   const [pendingInputBytes, setPendingInputBytes] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState('');
@@ -379,7 +381,7 @@ export function App(): JSX.Element {
   const handleAddTab = (): void => {
     const nextNum = tabs.length + 1;
     const newId = `tab-${Date.now()}-${nextNum}`;
-    const newTitle = `...srinew/terminal — -zsh (${nextNum})`;
+    const newTitle = `Terminal ${nextNum}`;
     setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: false }]);
     setActiveTabId(newId);
     setSessionTabLabel(newTitle);
@@ -390,8 +392,10 @@ export function App(): JSX.Element {
     if (e) e.stopPropagation();
     if (tabs.length <= 1) {
       setConnectionState('disconnected');
-      setSessionTabLabel('...srinew/terminal — -zsh');
-      setTabs([{ id: 'tab-1', title: '...srinew/terminal — -zsh', connected: false }]);
+      setSessionTabLabel('Terminal 1');
+      setConnectedUser('bob');
+      setConnectedHost('caleston-lp10');
+      setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false }]);
       setActiveTabId('tab-1');
       setTerminalLines([
         'WebSSH Studio v1.0.0',
@@ -414,8 +418,10 @@ export function App(): JSX.Element {
     writeToXterm(`
 Disconnected from ${sessionTabLabel}.
 webssh:~$ `);
-    const resetTitle = '...srinew/terminal — -zsh';
+    const resetTitle = 'Terminal 1';
     setSessionTabLabel(resetTitle);
+    setConnectedUser('bob');
+    setConnectedHost('caleston-lp10');
     setTabs((prev) =>
       prev.map((t) => (t.id === activeTabId ? { ...t, title: resetTitle, connected: false } : t))
     );
@@ -445,10 +451,11 @@ webssh:~$ `);
       return;
     }
     setConnectErrorMsg('');
-    const hostVal = connectHost.trim() || 'localhost';
-    const userVal = connectUser.trim() || 'ubuntu';
+    const hostVal = connectHost.trim() || 'caleston-lp10';
+    const userVal = connectUser.trim() || 'bob';
     const portVal = connectPort.trim() || '22';
     const label = `${userVal}@${hostVal}`;
+    const tabTitle = `Terminal 1 (${label})`;
 
     // Save connected host cleanly into HostRegistry
     hostRegistry.upsert({
@@ -464,9 +471,11 @@ webssh:~$ `);
     });
     setHosts(hostRegistry.list());
 
-    setSessionTabLabel(label);
+    setConnectedUser(userVal);
+    setConnectedHost(hostVal);
+    setSessionTabLabel(tabTitle);
     setTabs((prev) =>
-      prev.map((t) => (t.id === activeTabId ? { ...t, title: `${label} — -zsh`, connected: true } : t))
+      prev.map((t) => (t.id === activeTabId ? { ...t, title: tabTitle, connected: true } : t))
     );
     setConnectionState('connected');
     setConnectModalOpen(false);
@@ -1405,10 +1414,10 @@ webssh:~$ `);
         </div>
       ) : null}
 
-      {/* 2 & 3. macOS / VS Code Capsule Tab Strip & Top-Right Quick Customization Toolbar */}
+      {/* 2 & 3. Studio Session Tab Bar & Right-Side Controls (Stop Square, Fullscreen, Pop-out, More Menu & Custom Options) */}
       {!isFullscreen && !zenMode ? (
-        <header className="webssh-topbar" role="banner">
-          <div className="webssh-tabs" role="tablist" aria-label="Active SSH sessions">
+        <header className="webssh-topbar webssh-studio-toolbar" role="banner">
+          <div className="webssh-studio-tabs" role="tablist" aria-label="Active SSH sessions">
             {tabs.map((tab, idx) => {
               const isActive = tab.id === activeTabId;
               return (
@@ -1417,7 +1426,7 @@ webssh:~$ `);
                   type="button"
                   role="tab"
                   aria-selected={isActive && activeScreen === 'workspace'}
-                  className={`webssh-tab ${isActive && activeScreen === 'workspace' ? 'webssh-tab--active' : ''}`.trim()}
+                  className={`webssh-studio-tab ${isActive && activeScreen === 'workspace' ? 'webssh-studio-tab--active' : ''}`.trim()}
                   onClick={() => {
                     setActiveTabId(tab.id);
                     setSessionTabLabel(tab.title);
@@ -1446,11 +1455,12 @@ webssh:~$ `);
                 </button>
               );
             })}
+            <span className="webssh-studio-tab-separator" data-testid="tab-separator" aria-hidden="true" />
             <button
               type="button"
-              className="webssh-tab-add"
+              className="webssh-studio-add-btn"
               aria-label="New terminal tab"
-              title="New Tab"
+              title="Add Terminal Session"
               data-testid="add-tab-btn"
               onClick={handleAddTab}
             >
@@ -1460,7 +1470,7 @@ webssh:~$ `);
 
           <div
             data-testid="topbar-quick-controls"
-            style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}
+            className="webssh-studio-controls"
           >
             <select
               className="ui-select"
@@ -1470,6 +1480,7 @@ webssh:~$ `);
               onChange={(e) => setFontFamily((e.currentTarget as HTMLSelectElement).value)}
               style={{ width: 'auto' }}
             >
+              <option value="'DejaVu Sans Mono', Menlo, monospace">DejaVu Sans Mono</option>
               <option value="SF Mono">SF Mono</option>
               <option value="'JetBrains Mono', 'Fira Code', monospace">JetBrains Mono</option>
               <option value="Fira Code">Fira Code</option>
@@ -1494,7 +1505,7 @@ webssh:~$ `);
                 variant="ghost"
                 ariaLabel="Increase font size"
                 testId="font-size-inc-btn"
-                onClick={() => setFontSize((s) => Math.min(32, s + 1))}
+                onClick={() => setFontSize((s) => Math.min(36, s + 1))}
               >
                 A+
               </Button>
@@ -1510,11 +1521,19 @@ webssh:~$ `);
               <Button variant="primary" onClick={() => setConnectModalOpen(true)} testId="new-connection-btn">
                 New Connection
               </Button>
-            ) : (
-              <Button variant="destructive" onClick={handleDisconnect} testId="disconnect-btn">
-                Disconnect
-              </Button>
-            )}
+            ) : null}
+
+            {/* Stop Session / Disconnect Control with Coral-Red Square */}
+            <button
+              type="button"
+              className="webssh-studio-stop-btn"
+              onClick={handleDisconnect}
+              data-testid={connectionState === 'connected' ? 'disconnect-btn' : 'stop-session-btn'}
+              title="Stop Session / Disconnect"
+            >
+              <span className="webssh-studio-stop-square" data-testid="stop-red-square" aria-hidden="true" />
+              <span>{connectionState === 'connected' ? 'Stop Session (Disconnect)' : 'Stop Session'}</span>
+            </button>
 
             <Button
               variant={ideMode ? 'primary' : 'default'}
@@ -1538,9 +1557,114 @@ webssh:~$ `);
             <Button variant="ghost" onClick={() => setZenMode((z) => !z)} testId="toggle-zen-btn">
               Zen
             </Button>
-            <Button variant="primary" onClick={toggleFullscreen} testId="toggle-fullscreen-btn">
-              <Icon name="maximize" /> Full Screen
-            </Button>
+
+            {/* Fullscreen Corner-Shaped Control */}
+            <button
+              type="button"
+              className="webssh-studio-icon-btn"
+              onClick={toggleFullscreen}
+              aria-label="Expand terminal fullscreen"
+              title="Full Screen (F11)"
+              data-testid="toggle-fullscreen-btn"
+            >
+              <Icon name="maximize" />
+              <span>Full Screen</span>
+            </button>
+
+            {/* Pop-Out Terminal Control (Square with upper-right arrow) */}
+            <button
+              type="button"
+              className="webssh-studio-icon-btn"
+              aria-label="Pop out terminal view"
+              title="Open Terminal Workspace View"
+              data-testid="popout-terminal-btn"
+              onClick={() => {
+                setActiveScreen('workspace');
+                terminalViewRef.current?.focus();
+              }}
+            >
+              <span aria-hidden="true">↗</span>
+              <span>Pop-out</span>
+            </button>
+
+            {/* More Menu (Three Horizontal Gray Dots ⋯) */}
+            <div className="webssh-menu-group" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className="webssh-studio-icon-btn"
+                aria-label="More terminal options"
+                title="More Custom Options"
+                data-testid="more-options-menu-btn"
+                onClick={() => setOpenMenu((m) => (m === 'more' ? null : 'more'))}
+              >
+                <span aria-hidden="true">•••</span>
+              </button>
+              {openMenu === 'more' ? (
+                <div
+                  className="webssh-menu-dropdown"
+                  role="menu"
+                  data-testid="more-options-dropdown"
+                  style={{ right: 0, left: 'auto' }}
+                >
+                  <button
+                    type="button"
+                    className="webssh-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setIdeMode((m) => !m);
+                      setOpenMenu(null);
+                    }}
+                  >
+                    <span>{ideMode ? 'Disable IDE Mode' : 'Enable IDE Mode (50 Features)'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="webssh-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setSplitPanes((n) => (n === 1 ? 2 : 1));
+                      setActiveScreen('workspace');
+                      setOpenMenu(null);
+                    }}
+                  >
+                    <span>Toggle Split Pane</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="webssh-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setRedactionMode((r) => !r);
+                      setOpenMenu(null);
+                    }}
+                  >
+                    <span>{redactionMode ? 'Disable Secret Redaction' : 'Enable Secret Redaction'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="webssh-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setActiveScreen('settings');
+                      setOpenMenu(null);
+                    }}
+                  >
+                    <span>Themes & Typography Settings</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="webssh-menu-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setActiveScreen('welcome');
+                      setOpenMenu(null);
+                    }}
+                  >
+                    <span>Quick Connect Welcome Screen</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
         </header>
       ) : null}
@@ -1706,116 +1830,178 @@ webssh:~$ `);
 
         <main className="webssh-main">
           {activeScreen === 'workspace' ? (
-            <div className="webssh-split-container">
-              <div
-                ref={terminalViewRef}
-                tabIndex={0}
-                role="region"
-                aria-label="SSH Terminal Viewport"
-                data-testid="terminal-viewport"
-                className="webssh-terminal-viewport"
-                style={{ fontSize: `${fontSize}px`, fontFamily }}
-                onKeyDown={handleTerminalKeyDown}
-              >
-                {terminalLines.map((line, i) => (
-                  <div key={i}>{redactSecretsInText(line, redactionMode)}</div>
-                ))}
-                <div data-testid="terminal-prompt-line">
-                  <span>webssh:~$ </span>
-                  <span data-testid="terminal-current-input">{currentInput}</span>
-                  {ghostSuggestion ? (
-                    <span className="webssh-ghost-text" data-testid="terminal-ghost-suggestion">
-                      {ghostSuggestion}
-                    </span>
-                  ) : null}
-                  <span
-                    className={`webssh-terminal-cursor ${
-                      cursorShape === 'bar'
-                        ? 'webssh-terminal-cursor--bar'
-                        : cursorShape === 'underline'
-                          ? 'webssh-terminal-cursor--underline'
-                          : ''
-                    }`.trim()}
-                    aria-hidden="true"
-                  />
-                </div>
-
-                {/* Warp-Style Smart Shell Command Blocks */}
-                <div className="webssh-cmd-blocks" data-testid="command-blocks-list">
-                  {commandBlocks.map((block) => (
-                    <div key={block.id} className="webssh-cmd-block" data-testid={`cmd-block-${block.id}`}>
-                      <div className="webssh-cmd-block-header">
-                        <span>
-                          <strong>$ {redactSecretsInText(block.command, redactionMode)}</strong> ·{' '}
-                          {block.timestamp} ({block.durationMs}ms)
-                        </span>
-                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-                          <Badge tone={block.exitCode === 0 ? 'success' : 'danger'}>exit {block.exitCode}</Badge>
-                          <Button
-                            variant="ghost"
-                            onClick={() =>
-                              setCommandBlocks((prev) =>
-                                prev.map((b) => (b.id === block.id ? { ...b, collapsed: !b.collapsed } : b))
-                              )
-                            }
-                            testId={`toggle-block-${block.id}`}
-                          >
-                            {block.collapsed ? 'Expand' : 'Fold'}
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            onClick={() => copyToClipboard(block.outputLines.join(String.fromCharCode(10)))}
-                          >
-                            Copy Output
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            onClick={() => executeTerminalCommand(block.command)}
-                          >
-                            Re-run
-                          </Button>
-                        </div>
+            <div className="webssh-studio-outer" data-testid="terminal-studio-outer">
+              <div className="webssh-studio-container" data-testid="terminal-studio-container">
+                <div className="webssh-split-container">
+                  <div
+                    ref={terminalViewRef}
+                    tabIndex={0}
+                    role="region"
+                    aria-label="SSH Terminal Viewport"
+                    data-testid="terminal-viewport"
+                    className="webssh-terminal-viewport"
+                    style={{ fontSize: `${fontSize}px`, fontFamily }}
+                    onKeyDown={handleTerminalKeyDown}
+                  >
+                    {/* Progressive 5-Color ASCII Banner (Lime -> Yellow -> Orange -> Coral -> Pink, Zero Copyrights) */}
+                    <div className="webssh-ascii-banner" data-testid="terminal-ascii-banner">
+                      <div className="webssh-ascii-welcome-line" data-testid="terminal-welcome-banner-text">
+                        Welcome to the WebSSH Studio Interactive Terminal.
                       </div>
-                      {!block.collapsed ? (
-                        <div style={{ marginTop: 'var(--space-1)' }}>
-                          {block.outputLines.map((outLine, idx) => (
-                            <div key={idx}>{redactSecretsInText(outLine, redactionMode)}</div>
-                          ))}
-                        </div>
-                      ) : null}
+                      <pre className="webssh-ascii-art" aria-label="WEBSSH STUDIO ASCII Art">
+                        <span className="webssh-logo-col-1">{'██╗    ██╗███████╗'}</span>
+                        <span className="webssh-logo-col-2">{'██████╗ ███████╗'}</span>
+                        <span className="webssh-logo-col-3">{'███████╗██╗  ██╗'}</span>
+                        <span className="webssh-logo-col-4">{' ███████╗████████╗'}</span>
+                        <span className="webssh-logo-col-5">{'██╗   ██╗██████╗ '}</span>
+                        {String.fromCharCode(10)}
+                        <span className="webssh-logo-col-1">{'██║    ██║██╔════╝'}</span>
+                        <span className="webssh-logo-col-2">{'██╔══██╗██╔════╝'}</span>
+                        <span className="webssh-logo-col-3">{'██╔════╝██║  ██║'}</span>
+                        <span className="webssh-logo-col-4">{' ██╔════╝╚══██╔══╝'}</span>
+                        <span className="webssh-logo-col-5">{'██║   ██║██╔══██╗'}</span>
+                        {String.fromCharCode(10)}
+                        <span className="webssh-logo-col-1">{'██║ █╗ ██║█████╗  '}</span>
+                        <span className="webssh-logo-col-2">{'██████╔╝███████╗'}</span>
+                        <span className="webssh-logo-col-3">{'███████╗███████║'}</span>
+                        <span className="webssh-logo-col-4">{' ███████╗   ██║   '}</span>
+                        <span className="webssh-logo-col-5">{'██║   ██║██║  ██║'}</span>
+                        {String.fromCharCode(10)}
+                        <span className="webssh-logo-col-1">{'██║███╗██║██╔══╝  '}</span>
+                        <span className="webssh-logo-col-2">{'██╔══██╗╚════██║'}</span>
+                        <span className="webssh-logo-col-3">{'╚════██║██╔══██║'}</span>
+                        <span className="webssh-logo-col-4">{' ╚════██║   ██║   '}</span>
+                        <span className="webssh-logo-col-5">{'██║   ██║██║  ██║'}</span>
+                        {String.fromCharCode(10)}
+                        <span className="webssh-logo-col-1">{'╚███╔███╔╝███████╗'}</span>
+                        <span className="webssh-logo-col-2">{'██████╔╝███████║'}</span>
+                        <span className="webssh-logo-col-3">{'███████║██║  ██║'}</span>
+                        <span className="webssh-logo-col-4">{' ███████║   ██║   '}</span>
+                        <span className="webssh-logo-col-5">{'╚██████╔╝██████╔╝'}</span>
+                      </pre>
                     </div>
-                  ))}
-                </div>
 
-                <div
-                  ref={xtermHostRef}
-                  className="webssh-xterm-mount"
-                  aria-hidden="true"
-                  data-testid="xterm-engine-mount"
-                />
-              </div>
+                    {terminalLines.map((line, i) => (
+                      <div key={i}>{redactSecretsInText(line, redactionMode)}</div>
+                    ))}
+                    <div className="webssh-prompt-line" data-testid="terminal-prompt-line">
+                      <span className="webssh-prompt-user" data-testid="prompt-username">
+                        {connectedUser}
+                      </span>
+                      <span>@</span>
+                      <span className="webssh-prompt-host" data-testid="prompt-hostname">
+                        {connectedHost}
+                      </span>
+                      <span> </span>
+                      <span className="webssh-prompt-dir" data-testid="prompt-directory">
+                        ~
+                      </span>
+                      <span className="webssh-prompt-arrow" data-testid="prompt-arrow">
+                        {' ➜ '}
+                      </span>
+                      <span className="webssh-prompt-input" data-testid="terminal-current-input">
+                        {currentInput}
+                      </span>
+                      {ghostSuggestion ? (
+                        <span className="webssh-ghost-text" data-testid="terminal-ghost-suggestion">
+                          {ghostSuggestion}
+                        </span>
+                      ) : null}
+                      <span
+                        className={`webssh-terminal-cursor ${
+                          cursorShape === 'bar'
+                            ? 'webssh-terminal-cursor--bar'
+                            : cursorShape === 'underline'
+                              ? 'webssh-terminal-cursor--underline'
+                              : ''
+                        }`.trim()}
+                        aria-hidden="true"
+                      />
+                    </div>
 
-              {splitPanes > 1 ? (
-                <div
-                  tabIndex={0}
-                  role="region"
-                  aria-label="Secondary Split Terminal Viewport"
-                  data-testid="terminal-split-pane-2"
-                  className="webssh-terminal-viewport"
-                  style={{
-                    fontSize: `${fontSize}px`,
-                    fontFamily,
-                    borderLeft: 'var(--border-hairline)'
-                  }}
-                >
-                  <div>Split Pane #2 ({broadcastInput ? 'Broadcast Input ON' : 'Independent Shell'})</div>
-                  <div>
-                    <span>webssh:~$ </span>
-                    <span>{broadcastInput ? currentInput : ''}</span>
-                    <span className="webssh-terminal-cursor" aria-hidden="true" />
+                    {/* Warp-Style Smart Shell Command Blocks */}
+                    <div className="webssh-cmd-blocks" data-testid="command-blocks-list">
+                      {commandBlocks.map((block) => (
+                        <div key={block.id} className="webssh-cmd-block" data-testid={`cmd-block-${block.id}`}>
+                          <div className="webssh-cmd-block-header">
+                            <span>
+                              <strong>$ {redactSecretsInText(block.command, redactionMode)}</strong> ·{' '}
+                              {block.timestamp} ({block.durationMs}ms)
+                            </span>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                              <Badge tone={block.exitCode === 0 ? 'success' : 'danger'}>exit {block.exitCode}</Badge>
+                              <Button
+                                variant="ghost"
+                                onClick={() =>
+                                  setCommandBlocks((prev) =>
+                                    prev.map((b) => (b.id === block.id ? { ...b, collapsed: !b.collapsed } : b))
+                                  )
+                                }
+                                testId={`toggle-block-${block.id}`}
+                              >
+                                {block.collapsed ? 'Expand' : 'Fold'}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                onClick={() => copyToClipboard(block.outputLines.join(String.fromCharCode(10)))}
+                              >
+                                Copy Output
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                onClick={() => executeTerminalCommand(block.command)}
+                              >
+                                Re-run
+                              </Button>
+                            </div>
+                          </div>
+                          {!block.collapsed ? (
+                            <div style={{ marginTop: 'var(--space-1)' }}>
+                              {block.outputLines.map((outLine, idx) => (
+                                <div key={idx}>{redactSecretsInText(outLine, redactionMode)}</div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div
+                      ref={xtermHostRef}
+                      className="webssh-xterm-mount"
+                      aria-hidden="true"
+                      data-testid="xterm-engine-mount"
+                    />
                   </div>
+
+                  {splitPanes > 1 ? (
+                    <div
+                      tabIndex={0}
+                      role="region"
+                      aria-label="Secondary Split Terminal Viewport"
+                      data-testid="terminal-split-pane-2"
+                      className="webssh-terminal-viewport"
+                      style={{
+                        fontSize: `${fontSize}px`,
+                        fontFamily,
+                        borderLeft: 'var(--border-hairline)'
+                      }}
+                    >
+                      <div>Split Pane #2 ({broadcastInput ? 'Broadcast Input ON' : 'Independent Shell'})</div>
+                      <div className="webssh-prompt-line">
+                        <span className="webssh-prompt-user">{connectedUser}</span>
+                        <span>@</span>
+                        <span className="webssh-prompt-host">{connectedHost}</span>
+                        <span> </span>
+                        <span className="webssh-prompt-dir">~</span>
+                        <span className="webssh-prompt-arrow">{' ➜ '}</span>
+                        <span>{broadcastInput ? currentInput : ''}</span>
+                        <span className="webssh-terminal-cursor" aria-hidden="true" />
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
+              </div>
             </div>
           ) : null}
 

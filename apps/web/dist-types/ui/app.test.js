@@ -79,7 +79,21 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         connectSubmit.click();
         await new Promise((r) => setTimeout(r, 10));
         const sessionTab = container.querySelector('[data-testid="tab-session-1"]');
+        expect(sessionTab?.textContent).toContain('Terminal 1');
         expect(sessionTab?.textContent).toContain('root@10.0.0.5');
+        // Verify Step 14 Studio Terminal UI, top bar controls, ASCII banner (zero copyrights), and colorful shell prompt
+        expect(container.querySelector('[data-testid="terminal-studio-container"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="tab-separator"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="stop-red-square"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="popout-terminal-btn"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="more-options-menu-btn"]')).toBeTruthy();
+        const asciiBanner = container.querySelector('[data-testid="terminal-ascii-banner"]');
+        expect(asciiBanner?.textContent).toContain('Welcome to the WebSSH Studio Interactive Terminal.');
+        expect(asciiBanner?.textContent).not.toContain('All rights reserved');
+        expect(container.querySelector('[data-testid="prompt-username"]')?.textContent).toBe('root');
+        expect(container.querySelector('[data-testid="prompt-hostname"]')?.textContent).toBe('10.0.0.5');
+        expect(container.querySelector('[data-testid="prompt-directory"]')?.textContent).toBe('~');
+        expect(container.querySelector('[data-testid="prompt-arrow"]')?.textContent).toContain('➜');
         const disconnectBtn = container.querySelector('[data-testid="disconnect-btn"]');
         disconnectBtn.click();
         await new Promise((r) => setTimeout(r, 10));

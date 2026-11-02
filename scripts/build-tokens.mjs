@@ -16,6 +16,7 @@ if (fs.existsSync(designTokensPath)) {
   pkgTokens.elevation = { ...pkgTokens.elevation, ...designTokens.elevation };
   pkgTokens.motion = { ...pkgTokens.motion, ...designTokens.motion };
   pkgTokens.typography = { ...pkgTokens.typography, ...designTokens.typography };
+  pkgTokens.studio = { ...(pkgTokens.studio || {}), ...(designTokens.studio || {}) };
   pkgTokens.themes = { ...pkgTokens.themes, ...designTokens.themes };
 }
 
@@ -59,6 +60,11 @@ for (const [key, val] of Object.entries(pkgTokens.motion)) {
 }
 for (const [key, val] of Object.entries(pkgTokens.typography)) {
   rootLines.push(`  --font-${camelToKebab(key)}: ${val};`);
+}
+if (pkgTokens.studio) {
+  for (const [key, val] of Object.entries(pkgTokens.studio)) {
+    rootLines.push(`  --studio-${camelToKebab(key)}: ${val};`);
+  }
 }
 
 rootLines.push(renderThemeVars(pkgTokens.themes.dark));
