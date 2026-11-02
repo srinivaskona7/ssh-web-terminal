@@ -26,6 +26,7 @@ type Server struct {
 
 	mu             sync.RWMutex
 	authorizedKeys map[string]bool
+	conns          map[net.Conn]struct{}
 	wg             sync.WaitGroup
 	closed         chan struct{}
 }
@@ -51,6 +52,7 @@ func NewServer(rootDir string, password string, initialKeys []ssh.PublicKey) (*S
 		rootDir:        rootDir,
 		password:       password,
 		authorizedKeys: make(map[string]bool),
+		conns:          make(map[net.Conn]struct{}),
 		closed:         make(chan struct{}),
 	}
 	for _, k := range initialKeys {
@@ -78,6 +80,11 @@ func (s *Server) HostKey() ssh.PublicKey {
 func (s *Server) Close() error {
 	close(s.closed)
 	err := s.listener.Close()
+	s.mu.Lock()
+	for c := range s.conns {
+		_ = c.Close()
+	}
+	s.mu.Unlock()
 	s.wg.Wait()
 	return err
 }
@@ -121,9 +128,17 @@ func (s *Server) acceptLoop() {
 				continue
 			}
 		}
+		s.mu.Lock()
+		s.conns[conn] = struct{}{}
+		s.mu.Unlock()
 		s.wg.Add(1)
 		go func(c net.Conn) {
-			defer s.wg.Done()
+			defer func() {
+				s.mu.Lock()
+				delete(s.conns, c)
+				s.mu.Unlock()
+				s.wg.Done()
+			}()
 			s.handleConn(c)
 		}(conn)
 	}

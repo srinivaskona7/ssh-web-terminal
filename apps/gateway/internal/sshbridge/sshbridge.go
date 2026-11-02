@@ -121,6 +121,20 @@ type HopConfig struct {
 	Signer ssh.Signer
 }
 
+type chainedConn struct {
+	net.Conn
+	parent *ssh.Client
+}
+
+func (c *chainedConn) Close() error {
+	err1 := c.Conn.Close()
+	err2 := c.parent.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
+}
+
 // DialChain dials a target SSH server directly or through one or more ProxyJump bastion hops.
 func DialChain(ctx context.Context, hops []HopConfig, target HopConfig, hkCb HostKeyCallback) (*ssh.Client, error) {
 	var currentClient *ssh.Client
@@ -152,15 +166,16 @@ func DialChain(ctx context.Context, hops []HopConfig, target HopConfig, hkCb Hos
 			}
 			currentClient = ssh.NewClient(c, chans, reqs)
 		} else {
-			conn, err := currentClient.Dial("tcp", hop.Addr)
+			prevClient := currentClient
+			conn, err := prevClient.Dial("tcp", hop.Addr)
 			if err != nil {
-				_ = currentClient.Close()
+				_ = prevClient.Close()
 				return nil, err
 			}
-			c, chans, reqs, err := ssh.NewClientConn(conn, hop.Addr, cfg)
+			wrappedConn := &chainedConn{Conn: conn, parent: prevClient}
+			c, chans, reqs, err := ssh.NewClientConn(wrappedConn, hop.Addr, cfg)
 			if err != nil {
-				_ = conn.Close()
-				_ = currentClient.Close()
+				_ = wrappedConn.Close()
 				return nil, err
 			}
 			currentClient = ssh.NewClient(c, chans, reqs)

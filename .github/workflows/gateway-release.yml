@@ -63,23 +63,26 @@ jobs:
     name: Deploy Gateway to Fly.io & Smoke Test
     needs: build-sign-push
     runs-on: ubuntu-24.04
-    if: ${{ secrets.FLY_API_TOKEN != '' }}
     environment:
       name: production
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - name: Checkout repository
+        if: env.FLY_API_TOKEN != ''
         uses: actions/checkout@v4
 
       - name: Setup flyctl
+        if: env.FLY_API_TOKEN != ''
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Deploy image to Fly.io
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        if: env.FLY_API_TOKEN != ''
         run: |
           flyctl deploy --config deploy/fly/fly.toml --image "${{ needs.build-sign-push.outputs.image_tag }}"
 
       - name: Run post-deploy health & WebSocket smoke check
+        if: env.FLY_API_TOKEN != ''
         env:
           GATEWAY_HEALTH_URL: ${{ vars.GATEWAY_HEALTH_URL || 'https://gateway.webssh.studio/healthz' }}
         run: |
