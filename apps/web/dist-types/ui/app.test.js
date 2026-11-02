@@ -2,6 +2,7 @@ import { jsx as _jsx } from "preact/jsx-runtime";
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { render } from 'preact';
+import axe from 'axe-core';
 import { App, FIFTY_FEATURES_CATALOG } from './App';
 describe('App UI Shell Integration Suite (M4-M13)', () => {
     it('starts on clean minimal Welcome screen with zero mock data, exits Zen mode on Escape, supports simple Password & Private Key (chmod 0400) connection, and enables IDE mode on demand', async () => {
@@ -12,6 +13,11 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         // 1. Default screen is Welcome with minimal options and zero mock data
         const welcomeScreen = container.querySelector('[data-testid="screen-welcome"]');
         expect(welcomeScreen).toBeTruthy();
+        const welcomeAxe = await axe.run(container, {
+            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] },
+            rules: { 'color-contrast': { enabled: false } }
+        });
+        expect(welcomeAxe.violations.map((v) => `${v.id}: ${v.help} (${v.nodes.map((n) => n.html).join(', ')})`)).toEqual([]);
         expect(welcomeScreen?.textContent).toContain('Welcome to WebSSH Studio');
         expect(container.querySelector('[data-testid="nav-features"]')).toBeNull();
         // 2. Enter Zen Mode and press Escape -> returns to Welcome screen with chrome restored
@@ -94,6 +100,11 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         expect(container.querySelector('[data-testid="prompt-hostname"]')?.textContent).toBe('10.0.0.5');
         expect(container.querySelector('[data-testid="prompt-directory"]')?.textContent).toBe('~');
         expect(container.querySelector('[data-testid="prompt-arrow"]')?.textContent).toContain('➜');
+        const workspaceAxe = await axe.run(container, {
+            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] },
+            rules: { 'color-contrast': { enabled: false } }
+        });
+        expect(workspaceAxe.violations.map((v) => `${v.id}: ${v.help}`)).toEqual([]);
         const disconnectBtn = container.querySelector('[data-testid="disconnect-btn"]');
         disconnectBtn.click();
         await new Promise((r) => setTimeout(r, 10));

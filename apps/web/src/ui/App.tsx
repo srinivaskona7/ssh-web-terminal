@@ -1417,44 +1417,38 @@ webssh:~$ `);
       {/* 2 & 3. Studio Session Tab Bar & Right-Side Controls (Stop Square, Fullscreen, Pop-out, More Menu & Custom Options) */}
       {!isFullscreen && !zenMode ? (
         <header className="webssh-topbar webssh-studio-toolbar" role="banner">
-          <div className="webssh-studio-tabs" role="tablist" aria-label="Active SSH sessions">
-            {tabs.map((tab, idx) => {
-              const isActive = tab.id === activeTabId;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive && activeScreen === 'workspace'}
-                  className={`webssh-studio-tab ${isActive && activeScreen === 'workspace' ? 'webssh-studio-tab--active' : ''}`.trim()}
-                  onClick={() => {
-                    setActiveTabId(tab.id);
-                    setSessionTabLabel(tab.title);
-                    setActiveScreen('workspace');
-                  }}
-                  data-testid={idx === 0 ? 'tab-session-1' : `tab-session-${idx + 1}`}
-                >
-                  <span className={`webssh-status-dot ${statusDotClass}`.trim()} />
-                  <span>{idx === 0 ? sessionTabLabel : tab.title}</span>
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Close ${tab.title}`}
-                    className="webssh-tab-close"
-                    data-testid={`close-tab-${tab.id}`}
-                    onClick={(e) => handleCloseTab(tab.id, e)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        handleCloseTab(tab.id, e);
-                      }
+          <div className="webssh-studio-tabs">
+            <div className="webssh-studio-tabs" role="tablist" aria-label="Active SSH sessions">
+              {tabs.map((tab, idx) => {
+                const isActive = tab.id === activeTabId;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive && activeScreen === 'workspace'}
+                    className={`webssh-studio-tab ${isActive && activeScreen === 'workspace' ? 'webssh-studio-tab--active' : ''}`.trim()}
+                    onClick={() => {
+                      setActiveTabId(tab.id);
+                      setSessionTabLabel(tab.title);
+                      setActiveScreen('workspace');
                     }}
+                    data-testid={idx === 0 ? 'tab-session-1' : `tab-session-${idx + 1}`}
                   >
-                    ×
-                  </span>
-                </button>
-              );
-            })}
+                    <span className={`webssh-status-dot ${statusDotClass}`.trim()} />
+                    <span>{idx === 0 ? sessionTabLabel : tab.title}</span>
+                    <span
+                      aria-hidden="true"
+                      className="webssh-tab-close"
+                      data-testid={`close-tab-${tab.id}`}
+                      onClick={(e) => handleCloseTab(tab.id, e)}
+                    >
+                      ×
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
             <span className="webssh-studio-tab-separator" data-testid="tab-separator" aria-hidden="true" />
             <button
               type="button"
