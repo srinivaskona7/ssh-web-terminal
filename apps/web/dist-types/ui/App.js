@@ -5,7 +5,7 @@ import { KeyVault, KnownHostsStore, base64ToBytes, bytesToBase64, validateAndIns
 import { HostRegistry } from '../hosts';
 import { PreferencesStore } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
-import { LiveGatewaySessionClient, resolveGatewayWsUrl } from '../transport';
+import { LiveGatewaySessionClient, deriveGatewayHealthUrl, resolveGatewayWsUrl, validateGatewayWsUrl } from '../transport';
 import { AsciicastRecorder, CommandPaletteRegistry, KeybindingRegistry, SPECIAL_KEYS_ROW, SnippetLibrary, interpolateSnippet, parseAsciicastV2, scrubAsciicastOutput } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
 import { computeGhostAutocomplete, computeSideBySideDiff, detectDangerousCommand, formatChmodOctal, redactSecretsInText } from './advanced-features';
@@ -147,6 +147,15 @@ export function App() {
     const [editorSaved, setEditorSaved] = useState(true);
     const [showDiffViewer, setShowDiffViewer] = useState(false);
     const [gatewayUrl, setGatewayUrl] = useState(() => resolveGatewayWsUrl());
+    const [gatewayAuthToken, setGatewayAuthToken] = useState(() => {
+        try {
+            return globalThis.sessionStorage?.getItem('webssh.gateway.authToken') ?? '';
+        }
+        catch {
+            return '';
+        }
+    });
+    const [gatewayProbeStatus, setGatewayProbeStatus] = useState(null);
     const [negotiatedCipher, setNegotiatedCipher] = useState('chacha20-poly1305@openssh.com');
     const [negotiatedServerVersion, setNegotiatedServerVersion] = useState('');
     const [pendingHostKeyPrompt, setPendingHostKeyPrompt] = useState(null);
@@ -300,6 +309,38 @@ export function App() {
             // Ignore if file does not exist yet
         }
     };
+    const handleTestGateway = async (rawUrl = gatewayUrl) => {
+        const check = validateGatewayWsUrl(rawUrl);
+        if (!check.valid) {
+            setGatewayProbeStatus({
+                ok: false,
+                message: check.error ?? 'Invalid Gateway WebSocket URL.'
+            });
+            return;
+        }
+        const healthUrl = deriveGatewayHealthUrl(check.normalizedUrl);
+        try {
+            const res = await fetch(healthUrl, { method: 'GET' });
+            if (!res.ok) {
+                setGatewayProbeStatus({
+                    ok: false,
+                    message: `Gateway returned HTTP ${res.status} at ${healthUrl}`
+                });
+                return;
+            }
+            const data = (await res.json());
+            setGatewayProbeStatus({
+                ok: data.status === 'ok',
+                message: `Gateway Online (${healthUrl}) · Active Sessions: ${data.activeSessions ?? 0} · TLS: ${data.tlsEnabled ? 'WSS Enabled' : 'HTTP/WS'} · Auth: ${data.authRequired ? 'Token Required' : 'Open'}`
+            });
+        }
+        catch (err) {
+            setGatewayProbeStatus({
+                ok: false,
+                message: `Gateway unreachable at ${healthUrl} (${err instanceof Error ? err.message : String(err)})`
+            });
+        }
+    };
     const handleAddTab = () => {
         const nextNum = tabs.length + 1;
         const newId = `tab-${Date.now()}-${nextNum}`;
@@ -307,12 +348,19 @@ export function App() {
         const newTitle = isLive
             ? `Terminal ${nextNum} (${connectedUser}@${connectedHost})`
             : `Terminal ${nextNum}`;
-        setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: isLive }]);
+        setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: isLive, channelId: nextNum }]);
         setActiveTabId(newId);
         setSessionTabLabel(newTitle);
         setActiveScreen('workspace');
         if (liveSessionRef.current?.isConnected) {
-            void liveSessionRef.current.openChannel(cols, rows).catch(() => {
+            void liveSessionRef.current
+                .openChannel(cols, rows)
+                .then((res) => {
+                if (res.ok && res.channel) {
+                    setTabs((prev) => prev.map((t) => (t.id === newId ? { ...t, channelId: res.channel, connected: true } : t)));
+                }
+            })
+                .catch(() => {
                 // Ignore channel open errors
             });
         }
@@ -320,6 +368,10 @@ export function App() {
     const handleCloseTab = (tabId, e) => {
         if (e)
             e.stopPropagation();
+        const closingTab = tabs.find((t) => t.id === tabId);
+        if (closingTab?.channelId && liveSessionRef.current?.isConnected && tabs.length > 1) {
+            liveSessionRef.current.closeChannel(closingTab.channelId);
+        }
         if (tabs.length <= 1) {
             liveSessionRef.current?.close();
             liveSessionRef.current = null;
@@ -327,7 +379,7 @@ export function App() {
             setSessionTabLabel('Terminal 1');
             setConnectedUser('bob');
             setConnectedHost('caleston-lp10');
-            setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false }]);
+            setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false, channelId: 1 }]);
             setActiveTabId('tab-1');
             setSftpRawEntries([]);
             setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
@@ -357,7 +409,7 @@ export function App() {
         setSessionTabLabel(resetTitle);
         setConnectedUser('bob');
         setConnectedHost('caleston-lp10');
-        setTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, title: resetTitle, connected: false } : t)));
+        setTabs((prev) => prev.map((t) => ({ ...t, title: t.id === activeTabId ? resetTitle : t.title, connected: false })));
     };
     const handlePrivateKeyFileUpload = async (e) => {
         const input = e.currentTarget;
@@ -391,6 +443,11 @@ export function App() {
             setConnectErrorMsg('Permissions 0644 for private key are too open! OpenSSH requires chmod 0400 (-r--------) or 0600.');
             return;
         }
+        const gwValidation = validateGatewayWsUrl(gatewayUrl);
+        if (!gwValidation.valid) {
+            setConnectErrorMsg(gwValidation.error ?? 'Invalid SSH Gateway WebSocket URL.');
+            return;
+        }
         setConnectErrorMsg('');
         const hostVal = connectHost.trim() || '127.0.0.1';
         const userVal = connectUser.trim() || 'ubuntu';
@@ -398,21 +455,6 @@ export function App() {
         const portNum = Number.parseInt(portVal, 10) || 22;
         const label = `${userVal}@${hostVal}`;
         const tabTitle = `Terminal 1 (${label})`;
-        hostRegistry.upsert({
-            id: `host-${hostVal}-${portVal}`,
-            alias: hostVal,
-            host: hostVal,
-            port: portNum,
-            user: userVal,
-            folder: 'Connected',
-            tags: [authMethod === 'Password' ? 'password' : 'key-400'],
-            favorite: true,
-            jumpHops: []
-        });
-        setHosts(hostRegistry.list());
-        setConnectedUser(userVal);
-        setConnectedHost(hostVal);
-        setSessionTabLabel(tabTitle);
         void (async () => {
             if (authMethod === 'Private Key (.pem / id_rsa)' && uploadedKeyContent.trim()) {
                 const keyCheck = await validateAndInspectPrivateKeyPem(uploadedKeyContent);
@@ -428,7 +470,8 @@ export function App() {
                     ? 'private_key'
                     : 'remote_signer';
             const client = new LiveGatewaySessionClient({
-                gatewayUrl,
+                gatewayUrl: gwValidation.normalizedUrl,
+                gatewayAuthToken,
                 host: hostVal,
                 port: portNum,
                 user: userVal,
@@ -487,18 +530,39 @@ export function App() {
                     }
                     return '';
                 },
+                onChannelClosed: (channel) => {
+                    setTabs((prev) => prev.map((t) => (t.channelId === channel ? { ...t, connected: false } : t)));
+                },
                 onStateChange: (st) => {
                     if (st === 'disconnected') {
                         setConnectionState('disconnected');
+                        setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
                     }
                 }
             });
             try {
                 const meta = await client.connect();
                 liveSessionRef.current = client;
+                hostRegistry.upsert({
+                    id: `host-${hostVal}-${portVal}`,
+                    alias: hostVal,
+                    host: hostVal,
+                    port: portNum,
+                    user: userVal,
+                    folder: 'Connected',
+                    tags: [authMethod === 'Password' ? 'password' : 'key-400'],
+                    favorite: true,
+                    jumpHops: []
+                });
+                setHosts(hostRegistry.list());
+                setConnectedUser(userVal);
+                setConnectedHost(hostVal);
+                setSessionTabLabel(tabTitle);
                 setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
                 setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
-                setTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, title: tabTitle, connected: true } : t)));
+                setTabs((prev) => prev.map((t) => t.id === activeTabId
+                    ? { ...t, title: tabTitle, connected: true, channelId: meta.ptyChannel || 1 }
+                    : t));
                 setConnectionState('connected');
                 setConnectModalOpen(false);
                 setActiveScreen('workspace');
@@ -516,6 +580,7 @@ export function App() {
             catch (err) {
                 liveSessionRef.current = null;
                 setConnectionState('disconnected');
+                setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
                 const errMsg = err instanceof Error ? err.message : String(err);
                 setConnectErrorMsg(errMsg);
                 setTerminalLines((prev) => [...prev, `[SSH Connection Error] ${errMsg}`]);
@@ -703,6 +768,28 @@ export function App() {
         }
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
             // Allow global Cmd+K handler or clear buffer when Shift is held
+            return;
+        }
+        if (e.ctrlKey && e.key.toLowerCase() === 'c') {
+            e.preventDefault();
+            const activeTab = tabs.find((t) => t.id === activeTabId);
+            const activeChan = activeTab?.channelId ?? 1;
+            if (liveSessionRef.current?.isConnected) {
+                liveSessionRef.current.sendPtyText(activeChan, '\x03');
+            }
+            updateCurrentInput('');
+            setTerminalLines((prev) => [...prev, '^C']);
+            return;
+        }
+        if (e.ctrlKey && e.key.toLowerCase() === 'l') {
+            e.preventDefault();
+            setTerminalLines([]);
+            try {
+                xtermAdapterRef.current?.terminal.clear();
+            }
+            catch {
+                // Ignore
+            }
             return;
         }
         if (e.key === 'Tab' || e.key === 'ArrowRight') {
@@ -1319,7 +1406,26 @@ export function App() {
                                                     }))), children: ["Run Playbook Across Fleet (", playbookResults.length, " Hosts)"] }) })] }), _jsx("div", { className: "webssh-grid", "data-testid": "playbook-results-grid", children: playbookResults.map((res) => (_jsxs(Card, { testId: `playbook-host-${res.hostAlias}`, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("strong", { children: [res.hostAlias, " (", res.hostAddress, ")"] }), _jsxs(Badge, { tone: res.exitCode === 0 ? 'success' : 'danger', children: ["exit ", res.exitCode, " \u00B7 ", res.durationMs, "ms"] })] }), _jsx("pre", { children: res.output })] }, res.hostAlias))) })] })) : null, activeScreen === 'welcome' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-welcome", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("h1", { children: "Welcome to WebSSH Studio" }), _jsxs("p", { style: { color: 'var(--color-fg-secondary)' }, children: ["Clean, minimal SSH workspace \u2014 connect with Username & Password or upload a Private Key (", _jsx("code", { children: "chmod 0400" }), ")."] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "default", testId: "welcome-open-terminal-btn", onClick: () => setActiveScreen('workspace'), children: [_jsx(Icon, { name: "terminal" }), " Open Terminal"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', testId: "welcome-open-ide-btn", onClick: () => {
                                                             setIdeMode(true);
                                                             setActiveScreen('features');
-                                                        }, children: "Open IDE (All 50 Features)" })] })] }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '180px' }, children: [_jsx("label", { htmlFor: "welcome-host-input", children: "Host / IP" }), _jsx("input", { id: "welcome-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or server.example.com", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "welcome-host-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '130px' }, children: [_jsx("label", { htmlFor: "welcome-user-input", children: "Username" }), _jsx("input", { id: "welcome-user-input", type: "text", className: "ui-input", placeholder: "ubuntu / root", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "welcome-user-input" })] }), _jsxs("div", { style: { width: '100px' }, children: [_jsx("label", { htmlFor: "welcome-port-input", children: "Port" }), _jsx("input", { id: "welcome-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "welcome-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Authentication Method" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
+                                                        }, children: "Open IDE (All 50 Features)" })] })] }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '220px' }, children: [_jsx("label", { htmlFor: "welcome-gateway-url-input", children: "SSH Gateway WebSocket Endpoint (WSS / WS)" }), _jsx("input", { id: "welcome-gateway-url-input", type: "text", className: "ui-input", placeholder: "wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws", value: gatewayUrl, onInput: (e) => {
+                                                                            const val = e.target.value;
+                                                                            setGatewayUrl(val);
+                                                                            setGatewayProbeStatus(null);
+                                                                            try {
+                                                                                globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                                                                            }
+                                                                            catch {
+                                                                                // ignore
+                                                                            }
+                                                                        }, "data-testid": "welcome-gateway-url-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "welcome-gateway-token-input", children: "Gateway Auth Token (Optional)" }), _jsx("input", { id: "welcome-gateway-token-input", type: "password", className: "ui-input", placeholder: "Bearer / EC2 gateway token", value: gatewayAuthToken, onInput: (e) => {
+                                                                            const val = e.target.value;
+                                                                            setGatewayAuthToken(val);
+                                                                            try {
+                                                                                globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
+                                                                            }
+                                                                            catch {
+                                                                                // ignore
+                                                                            }
+                                                                        }, "data-testid": "welcome-gateway-token-input" })] }), _jsx(Button, { variant: "default", type: "button", testId: "test-gateway-btn", onClick: () => void handleTestGateway(gatewayUrl), children: "Test Gateway" })] }), gatewayProbeStatus ? (_jsx(Badge, { tone: gatewayProbeStatus.ok ? 'success' : 'danger', testId: "gateway-probe-badge", children: gatewayProbeStatus.message })) : null, _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '180px' }, children: [_jsx("label", { htmlFor: "welcome-host-input", children: "Host / IP" }), _jsx("input", { id: "welcome-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or server.example.com", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "welcome-host-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '130px' }, children: [_jsx("label", { htmlFor: "welcome-user-input", children: "Username" }), _jsx("input", { id: "welcome-user-input", type: "text", className: "ui-input", placeholder: "ubuntu / root", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "welcome-user-input" })] }), _jsxs("div", { style: { width: '100px' }, children: [_jsx("label", { htmlFor: "welcome-port-input", children: "Port" }), _jsx("input", { id: "welcome-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "welcome-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Authentication Method" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
                                                                             setAuthMethod('Password');
                                                                             setConnectErrorMsg('');
                                                                         }, testId: "welcome-auth-password-btn", children: "Username & Password" }), _jsx(Button, { variant: authMethod === 'Private Key (.pem / id_rsa)' ? 'primary' : 'default', onClick: () => {
@@ -1441,16 +1547,26 @@ export function App() {
                                                             });
                                                         }, children: "Repair Application Asset Cache" }), cacheRepairStatus ? (_jsx(Badge, { tone: "success", testId: "settings-repair-cache-status", children: cacheRepairStatus })) : null] })] })] })) : null, !isFullscreen && !zenMode ? (_jsx("div", { className: "webssh-special-keys", role: "toolbar", "aria-label": "Mobile and Tablet Special Keys", children: SPECIAL_KEYS_ROW.map((keyLabel) => (_jsx(Button, { variant: "ghost", testId: `special-key-${keyLabel}`, children: keyLabel }, keyLabel))) })) : null] })] }), !isFullscreen && !zenMode ? (_jsxs("footer", { className: "webssh-statusbar", role: "contentinfo", "data-testid": "status-bar", children: [_jsx("span", { children: connectionState === 'connected'
                             ? `Connected: ${sessionTabLabel} · Cipher: ${negotiatedCipher}${negotiatedServerVersion ? ` · ${negotiatedServerVersion}` : ''}`
-                            : 'Status: Disconnected · Ready for SSH connection' }), _jsxs("span", { children: ["Remote Signer: Argon2id Ed25519 \u00B7 ", cols, "x", rows, " \u00B7 Font: ", fontSize, "px"] })] })) : null, _jsx(Modal, { open: connectModalOpen, title: "New SSH Connection & Argon2id Credentials", onClose: () => setConnectModalOpen(false), testId: "connect-modal", children: _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-gateway-input", children: "SSH Gateway WebSocket URL" }), _jsx("input", { id: "connect-gateway-input", type: "text", className: "ui-input", placeholder: "ws://127.0.0.1:8080/ws", value: gatewayUrl, onInput: (e) => {
+                            : 'Status: Disconnected · Ready for SSH connection' }), _jsxs("span", { children: ["Remote Signer: Argon2id Ed25519 \u00B7 ", cols, "x", rows, " \u00B7 Font: ", fontSize, "px"] })] })) : null, _jsx(Modal, { open: connectModalOpen, title: "New SSH Connection & Argon2id Credentials", onClose: () => setConnectModalOpen(false), testId: "connect-modal", children: _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-gateway-input", children: "SSH Gateway WebSocket URL" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx("input", { id: "connect-gateway-input", type: "text", className: "ui-input", placeholder: "wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws", value: gatewayUrl, onInput: (e) => {
+                                                const val = e.target.value;
+                                                setGatewayUrl(val);
+                                                setGatewayProbeStatus(null);
+                                                try {
+                                                    globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                                                }
+                                                catch {
+                                                    // ignore
+                                                }
+                                            }, "data-testid": "gateway-url-input" }), _jsx(Button, { variant: "default", type: "button", testId: "modal-test-gateway-btn", onClick: () => void handleTestGateway(gatewayUrl), children: "Test Gateway" })] })] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "connect-gateway-token-input", children: "Gateway Auth Token (Optional EC2 WSS Token)" }), _jsx("input", { id: "connect-gateway-token-input", type: "password", className: "ui-input", placeholder: "Optional GATEWAY_AUTH_TOKEN or OIDC JWT", value: gatewayAuthToken, onInput: (e) => {
                                         const val = e.target.value;
-                                        setGatewayUrl(val);
+                                        setGatewayAuthToken(val);
                                         try {
-                                            globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                                            globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
                                         }
                                         catch {
                                             // ignore
                                         }
-                                    }, "data-testid": "gateway-url-input" })] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "connect-host-input", children: "Host (IP or domain)" }), _jsx("input", { id: "connect-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or edge-01.prod.internal", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "connect-host-input" })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { flex: 2 }, children: [_jsx("label", { htmlFor: "connect-user-input", children: "Username" }), _jsx("input", { id: "connect-user-input", type: "text", className: "ui-input", placeholder: "root / ubuntu", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "connect-user-input" })] }), _jsxs("div", { style: { flex: 1 }, children: [_jsx("label", { htmlFor: "connect-port-input", children: "Port" }), _jsx("input", { id: "connect-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "connect-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Auth Mode" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
+                                    }, "data-testid": "gateway-token-input" })] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "connect-host-input", children: "Host (IP or domain)" }), _jsx("input", { id: "connect-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or edge-01.prod.internal", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "connect-host-input" })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { flex: 2 }, children: [_jsx("label", { htmlFor: "connect-user-input", children: "Username" }), _jsx("input", { id: "connect-user-input", type: "text", className: "ui-input", placeholder: "root / ubuntu", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "connect-user-input" })] }), _jsxs("div", { style: { flex: 1 }, children: [_jsx("label", { htmlFor: "connect-port-input", children: "Port" }), _jsx("input", { id: "connect-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "connect-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Auth Mode" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
                                                 setAuthMethod('Password');
                                                 setConnectErrorMsg('');
                                             }, testId: "auth-method-password-btn", children: "Username & Password" }), _jsx(Button, { variant: authMethod === 'Private Key (.pem / id_rsa)' ? 'primary' : 'default', onClick: () => {

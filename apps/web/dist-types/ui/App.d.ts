@@ -8,6 +8,7 @@ export interface SessionTabItem {
     id: string;
     title: string;
     connected: boolean;
+    channelId?: number;
 }
 export interface FeatureCatalogItem {
     id: number;

@@ -1,0 +1,29 @@
+# Caddy Reverse Proxy for WebSSH Studio EC2 Gateway (Automatic Let's Encrypt TLS 1.3 + WSS)
+# Replace ssh-gateway.yourdomain.com with your EC2 Elastic IP DNS / Route53 A-record domain.
+ssh-gateway.yourdomain.com {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	@health path /healthz
+	handle @health {
+		reverse_proxy 127.0.0.1:8080 {
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	@ws path /ws
+	handle @ws {
+		reverse_proxy 127.0.0.1:8080 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up Host {host}
+			header_up Origin {http.request.header.Origin}
+		}
+	}
+
+	respond 404
+}

@@ -261,24 +261,36 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         await new Promise((r) => setTimeout(r, 15));
         expect(viewport.textContent).toContain('Not connected to an SSH server');
         expect(viewport.textContent).not.toContain('Executed remote/shell command');
-        // 2. Connect via New Connection modal with wrong password -> must stay Disconnected
+        // 2. Connect via New Connection modal with GitHub Pages URL -> must reject immediately
         const newConnBtn = container.querySelector('[data-testid="new-connection-btn"]');
         newConnBtn.click();
         await new Promise((r) => setTimeout(r, 10));
+        const gwInput = container.querySelector('[data-testid="gateway-url-input"]');
+        gwInput.value = 'wss://srinivaskona7.github.io/ws';
+        gwInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 10));
+        const submitBtn = container.querySelector('[data-testid="connect-modal-submit-btn"]');
+        submitBtn.click();
+        await new Promise((r) => setTimeout(r, 15));
+        expect(container.querySelector('[data-testid="modal-connect-error-badge"]')?.textContent).toContain('GitHub Pages');
+        // Restore valid local gateway URL and test wrong password -> must stay Disconnected without false tab title
+        gwInput.value = 'ws://127.0.0.1:8080/ws';
+        gwInput.dispatchEvent(new Event('input', { bubbles: true }));
         const passInput = container.querySelector('[data-testid="connect-password-input"]');
         passInput.value = 'wrong-password';
         passInput.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise((r) => setTimeout(r, 10));
-        const submitBtn = container.querySelector('[data-testid="connect-modal-submit-btn"]');
         submitBtn.click();
         await new Promise((r) => setTimeout(r, 25));
         expect(container.querySelector('[data-testid="modal-connect-error-badge"]')?.textContent).toContain('SSH_CONNECT_FAILED');
+        expect(container.querySelector('[data-testid="tab-session-1"]')?.textContent).not.toContain('ubuntu@127.0.0.1');
         // 3. Connect with valid credentials -> transitions to Connected and runs real uname -s -> Linux
         passInput.value = 'testpass123';
         passInput.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise((r) => setTimeout(r, 10));
         submitBtn.click();
         await new Promise((r) => setTimeout(r, 30));
+        expect(container.querySelector('[data-testid="tab-session-1"]')?.textContent).toContain('ubuntu@127.0.0.1');
         const termViewport = container.querySelector('[data-testid="terminal-viewport"]');
         for (const ch of 'uname -s') {
             termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
@@ -286,6 +298,11 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
         await new Promise((r) => setTimeout(r, 25));
         expect(termViewport.textContent).toContain('Linux');
+        // 4. Open second tab while connected -> allocates secondary PTY channel
+        const addTabBtn = container.querySelector('[data-testid="add-tab-btn"]');
+        addTabBtn.click();
+        await new Promise((r) => setTimeout(r, 20));
+        expect(container.querySelector('[data-testid="tab-session-2"]')?.textContent).toContain('Terminal 2 (ubuntu@127.0.0.1)');
         document.body.removeChild(container);
     });
 });

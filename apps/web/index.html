@@ -192,32 +192,67 @@
           );
         }
 
-        async function repairAssetCacheOnly() {
+        function repairAssetCacheOnly() {
+          var swPromise = Promise.resolve();
           try {
-            if ('serviceWorker' in navigator) {
-              var regs = await navigator.serviceWorker.getRegistrations();
-              for (var i = 0; i < regs.length; i++) {
-                await regs[i].unregister();
-              }
+            if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+              swPromise = navigator.serviceWorker
+                .getRegistrations()
+                .then(function (regs) {
+                  return Promise.all(
+                    regs.map(function (r) {
+                      return r.unregister();
+                    })
+                  );
+                })
+                .catch(function () {});
             }
-            if ('caches' in window) {
-              var keys = await window.caches.keys();
-              for (var j = 0; j < keys.length; j++) {
-                if (keys[j].indexOf('webssh-studio-shell') === 0) {
-                  await window.caches.delete(keys[j]);
-                }
-              }
+          } catch (_e) {}
+
+          var cachePromise = Promise.resolve();
+          try {
+            if ('caches' in window && window.caches && window.caches.keys) {
+              cachePromise = window.caches
+                .keys()
+                .then(function (keys) {
+                  return Promise.all(
+                    keys
+                      .filter(function (k) {
+                        return k.indexOf('webssh-studio') === 0;
+                      })
+                      .map(function (k) {
+                        return window.caches.delete(k);
+                      })
+                  );
+                })
+                .catch(function () {});
             }
-          } catch (_err) {
-            // Preserve localStorage and IndexedDB; ignore restricted SW/Cache errors
-          }
+          } catch (_e2) {}
+
+          return Promise.all([swPromise, cachePromise]).then(function () {});
         }
 
-        window.__websshRepairAssetCacheAndReload = async function () {
-          await repairAssetCacheOnly();
-          var nextUrl = new URL(window.location.href);
-          nextUrl.searchParams.set('repaired', String(Date.now()));
-          window.location.replace(nextUrl.toString());
+        // Proactively delete legacy v1 cache-first bucket if present
+        try {
+          if ('caches' in window && window.caches && window.caches.delete) {
+            window.caches.delete('webssh-studio-v1').catch(function () {});
+          }
+        } catch (_e) {}
+
+        // Purge any stale GitHub Pages (*.github.io) WebSocket URL from localStorage on boot
+        try {
+          var savedWs = window.localStorage && window.localStorage.getItem('webssh.gateway.wsUrl');
+          if (savedWs && savedWs.toLowerCase().indexOf('.github.io') !== -1) {
+            window.localStorage.removeItem('webssh.gateway.wsUrl');
+          }
+        } catch (_e) {}
+
+        window.__websshRepairAssetCacheAndReload = function () {
+          return repairAssetCacheOnly().then(function () {
+            var nextUrl = new URL(window.location.href);
+            nextUrl.searchParams.set('repaired', String(Date.now()));
+            window.location.replace(nextUrl.toString());
+          });
         };
 
         window.__websshMarkReady = function () {
@@ -227,6 +262,7 @@
           }
           if (shell) {
             shell.setAttribute('hidden', 'hidden');
+            shell.style.display = 'none';
           }
           try {
             sessionStorage.removeItem('webssh_startup_auto_repaired');
@@ -235,20 +271,26 @@
 
         window.__websshReportStartupError = function (rawReason) {
           var appRoot = document.getElementById('app');
-          if (appRoot && appRoot.children.length > 0) return;
+          if (appRoot && appRoot.children.length > 0) {
+            window.__websshMarkReady();
+            return;
+          }
 
           var cleanReason = sanitizeReason(rawReason);
 
           try {
             var alreadyRepaired = sessionStorage.getItem('webssh_startup_auto_repaired');
-            if (!alreadyRepaired && navigator.serviceWorker && navigator.serviceWorker.controller) {
+            if (!alreadyRepaired) {
               sessionStorage.setItem('webssh_startup_auto_repaired', '1');
-              void window.__websshRepairAssetCacheAndReload();
+              window.__websshRepairAssetCacheAndReload();
               return;
             }
           } catch (_e) {}
 
-          if (shell) shell.removeAttribute('hidden');
+          if (shell) {
+            shell.removeAttribute('hidden');
+            shell.style.display = 'flex';
+          }
           if (titleEl) titleEl.textContent = 'WebSSH Studio could not finish starting';
           if (detailEl) {
             detailEl.textContent =

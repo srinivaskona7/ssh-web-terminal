@@ -89,9 +89,18 @@ export declare class GatewayUnreachableError extends Error {
     readonly gatewayUrl: string;
     constructor(gatewayUrl: string, detail?: string);
 }
+export declare function isStaticPagesHost(hostnameOrUrl: string): boolean;
+export interface GatewayUrlValidationResult {
+    valid: boolean;
+    normalizedUrl: string;
+    error?: string;
+}
+export declare function validateGatewayWsUrl(rawUrl: string): GatewayUrlValidationResult;
+export declare function deriveGatewayHealthUrl(wsUrl: string): string;
 export declare function resolveGatewayWsUrl(explicitUrl?: string): string;
 export interface LiveConnectParams {
     gatewayUrl?: string;
+    gatewayAuthToken?: string;
     host: string;
     port: number;
     user: string;

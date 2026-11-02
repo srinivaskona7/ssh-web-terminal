@@ -6,6 +6,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -40,8 +42,13 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 type ServerConfig struct {
 	ListenAddr         string
 	AllowedOrigins     []string
+	GatewayAuthToken   string
 	OIDCIssuer         string
 	OIDCClientID       string
+	OIDCHMACSecret     string
+	TLSCertFile        string
+	TLSKeyFile         string
+	RequireTLS         bool
 	DestAllowlist      []string
 	DestDenylist       []string
 	SessionGrace       time.Duration
@@ -85,12 +92,18 @@ func loadConfigFromEnv() ServerConfig {
 	if r, err := strconv.ParseFloat(os.Getenv("RATE_LIMITS"), 64); err == nil && r > 0 {
 		rate = r
 	}
+	reqTLS := os.Getenv("REQUIRE_TLS") == "1" || strings.EqualFold(os.Getenv("REQUIRE_TLS"), "true")
 
 	return ServerConfig{
 		ListenAddr:         addr,
 		AllowedOrigins:     origins,
-		OIDCIssuer:         os.Getenv("OIDC_ISSUER"),
-		OIDCClientID:       os.Getenv("OIDC_CLIENT_ID"),
+		GatewayAuthToken:   strings.TrimSpace(os.Getenv("GATEWAY_AUTH_TOKEN")),
+		OIDCIssuer:         strings.TrimSpace(os.Getenv("OIDC_ISSUER")),
+		OIDCClientID:       strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID")),
+		OIDCHMACSecret:     strings.TrimSpace(os.Getenv("OIDC_HMAC_SECRET")),
+		TLSCertFile:        strings.TrimSpace(os.Getenv("TLS_CERT_FILE")),
+		TLSKeyFile:         strings.TrimSpace(os.Getenv("TLS_KEY_FILE")),
+		RequireTLS:         reqTLS,
 		DestAllowlist:      allowlist,
 		DestDenylist:       denylist,
 		SessionGrace:       grace,
@@ -98,6 +111,31 @@ func loadConfigFromEnv() ServerConfig {
 		MaxSessionsPerUser: maxSess,
 		RateLimitPerSec:    rate,
 	}
+}
+
+func extractGatewayToken(r *http.Request) string {
+	authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(authHdr), "bearer ") {
+		return strings.TrimSpace(authHdr[7:])
+	}
+	if xTok := strings.TrimSpace(r.Header.Get("X-Gateway-Token")); xTok != "" {
+		return xTok
+	}
+	return strings.TrimSpace(r.URL.Query().Get("token"))
+}
+
+func verifyGatewayToken(cfg ServerConfig, oidc *auth.OIDCVerifier, token string) error {
+	if cfg.GatewayAuthToken != "" {
+		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(cfg.GatewayAuthToken)) != 1 {
+			return errors.New("auth: invalid or missing gateway token")
+		}
+		return nil
+	}
+	if cfg.OIDCIssuer != "" && oidc != nil {
+		_, err := oidc.Verify(token)
+		return err
+	}
+	return nil
 }
 
 type wsConn struct {
@@ -308,14 +346,40 @@ func NewMux(cfg ServerConfig) (http.Handler, error) {
 	sessions := session.NewManager(cfg.RingBufferBytes, cfg.SessionGrace, cfg.MaxSessionsPerUser)
 	auditor := audit.NewLogger(os.Stdout, 1000)
 
+	var oidcVerifier *auth.OIDCVerifier
+	if cfg.OIDCIssuer != "" {
+		oidcVerifier = &auth.OIDCVerifier{
+			Issuer:     cfg.OIDCIssuer,
+			ClientID:   cfg.OIDCClientID,
+			HMACSecret: []byte(cfg.OIDCHMACSecret),
+			AllowDev:   false,
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if err := origins.Check(origin); err == nil {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, X-Gateway-Token, Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(http.StatusOK)
 		payload := map[string]any{
 			"status":         "ok",
 			"activeSessions": sessions.ActiveCount(),
+			"tlsEnabled":     cfg.TLSCertFile != "" || cfg.RequireTLS || r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+			"authRequired":   cfg.GatewayAuthToken != "" || cfg.OIDCIssuer != "",
 		}
 		for k, v := range cfg.TestSSHDInfo {
 			payload[k] = v
@@ -330,22 +394,38 @@ func NewMux(cfg ServerConfig) (http.Handler, error) {
 	})
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			if err := origins.Check(origin); err != nil {
-				http.Error(w, err.Error(), http.StatusForbidden)
-				return
-			}
-		} else {
-			if err := origins.Check(origin); err != nil {
-				http.Error(w, err.Error(), http.StatusForbidden)
+		if cfg.RequireTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "") {
+			isHTTPS := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+			if !isHTTPS {
+				http.Error(w, "HTTPS/WSS TLS required", http.StatusForbidden)
 				return
 			}
 		}
+
+		origin := r.Header.Get("Origin")
+		if err := origins.Check(origin); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+
 		if err := limiter.Allow(r.RemoteAddr); err != nil {
 			http.Error(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
+
+		reqToken := extractGatewayToken(r)
+		if cfg.GatewayAuthToken != "" || cfg.OIDCIssuer != "" {
+			if err := verifyGatewayToken(cfg, oidcVerifier, reqToken); err != nil {
+				auditor.Record(audit.Entry{
+					Event:  audit.EventAuthFailure,
+					UserID: "ws-auth",
+					Reason: err.Error(),
+				})
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+		}
+
 		targetHost := r.URL.Query().Get("host")
 		if targetHost != "" {
 			targetPort := 22
@@ -944,6 +1024,35 @@ func handleWebSocketSession(
 					_ = ws.sendControl(res)
 				}(ctrl)
 
+			case "resume":
+				go func(msg protocol.ControlMessage) {
+					lastSeq, _ := strconv.ParseUint(msg.LastSeq, 10, 64)
+					resumed, frames, _, _, _, _, err := sessions.Resume(msg.SessionID, msg.Token, lastSeq)
+					if err != nil {
+						_ = ws.sendControl(protocol.ControlMessage{
+							Type:    "error",
+							Code:    "RESUME_FAILED",
+							Message: err.Error(),
+							Fatal:   true,
+						})
+						return
+					}
+					for _, chunk := range frames {
+						_ = ws.sendBinaryFrame(protocol.BinaryFrame{
+							Type:    protocol.FrameTypePtyData,
+							Channel: chunk.Channel,
+							Seq:     chunk.Seq,
+							Payload: chunk.Payload,
+						})
+					}
+					_ = ws.sendControl(protocol.ControlMessage{
+						Type:        "connected",
+						SessionID:   resumed.ID,
+						ResumeToken: resumed.ResumeToken,
+						PtyChannel:  protocol.FirstPtyChannelID,
+					})
+				}(ctrl)
+
 			case "deploy_key":
 				go func(msg protocol.ControlMessage) {
 					stateMu.Lock()
@@ -973,6 +1082,28 @@ func handleWebSocketSession(
 
 func main() {
 	cfg := loadConfigFromEnv()
+
+	for _, arg := range os.Args[1:] {
+		if arg == "-healthcheck" {
+			target := cfg.ListenAddr
+			if strings.HasPrefix(target, ":") {
+				target = "127.0.0.1" + target
+			}
+			scheme := "http"
+			client := &http.Client{Timeout: 3 * time.Second}
+			if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+				scheme = "https"
+				client.Transport = &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
+				}
+			}
+			resp, err := client.Get(scheme + "://" + target + "/healthz")
+			if err != nil || resp.StatusCode != http.StatusOK {
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+	}
 
 	if os.Getenv("ENABLE_TESTSSHD") == "1" {
 		rootDir := os.Getenv("TESTSSHD_ROOT")
@@ -1023,6 +1154,16 @@ Real filesystem backed by testsshd.
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+	}
+	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+		srv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+		log.Printf("WebSSH Studio Gateway listening with TLS (wss://) on %s", cfg.ListenAddr)
+		if err := srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("TLS server error: %v", err)
+		}
+		return
 	}
 	log.Printf("WebSSH Studio Gateway listening on %s", cfg.ListenAddr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

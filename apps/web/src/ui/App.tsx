@@ -23,7 +23,12 @@ import {
 import { HostRegistry, type HostProfile } from '../hosts';
 import { PreferencesStore, type CursorShape, type LayoutPreset } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
-import { LiveGatewaySessionClient, resolveGatewayWsUrl } from '../transport';
+import {
+  LiveGatewaySessionClient,
+  deriveGatewayHealthUrl,
+  resolveGatewayWsUrl,
+  validateGatewayWsUrl
+} from '../transport';
 import {
   AsciicastRecorder,
   CommandPaletteRegistry,
@@ -85,6 +90,7 @@ export interface SessionTabItem {
   id: string;
   title: string;
   connected: boolean;
+  channelId?: number;
 }
 
 export interface FeatureCatalogItem {
@@ -253,6 +259,14 @@ export function App(): JSX.Element {
   const [editorSaved, setEditorSaved] = useState(true);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
   const [gatewayUrl, setGatewayUrl] = useState<string>(() => resolveGatewayWsUrl());
+  const [gatewayAuthToken, setGatewayAuthToken] = useState<string>(() => {
+    try {
+      return globalThis.sessionStorage?.getItem('webssh.gateway.authToken') ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const [gatewayProbeStatus, setGatewayProbeStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [negotiatedCipher, setNegotiatedCipher] = useState<string>('chacha20-poly1305@openssh.com');
   const [negotiatedServerVersion, setNegotiatedServerVersion] = useState<string>('');
   const [pendingHostKeyPrompt, setPendingHostKeyPrompt] = useState<{
@@ -450,6 +464,45 @@ export function App(): JSX.Element {
     }
   };
 
+  const handleTestGateway = async (rawUrl = gatewayUrl): Promise<void> => {
+    const check = validateGatewayWsUrl(rawUrl);
+    if (!check.valid) {
+      setGatewayProbeStatus({
+        ok: false,
+        message: check.error ?? 'Invalid Gateway WebSocket URL.'
+      });
+      return;
+    }
+    const healthUrl = deriveGatewayHealthUrl(check.normalizedUrl);
+    try {
+      const res = await fetch(healthUrl, { method: 'GET' });
+      if (!res.ok) {
+        setGatewayProbeStatus({
+          ok: false,
+          message: `Gateway returned HTTP ${res.status} at ${healthUrl}`
+        });
+        return;
+      }
+      const data = (await res.json()) as {
+        status?: string;
+        activeSessions?: number;
+        tlsEnabled?: boolean;
+        authRequired?: boolean;
+      };
+      setGatewayProbeStatus({
+        ok: data.status === 'ok',
+        message: `Gateway Online (${healthUrl}) · Active Sessions: ${data.activeSessions ?? 0} · TLS: ${
+          data.tlsEnabled ? 'WSS Enabled' : 'HTTP/WS'
+        } · Auth: ${data.authRequired ? 'Token Required' : 'Open'}`
+      });
+    } catch (err) {
+      setGatewayProbeStatus({
+        ok: false,
+        message: `Gateway unreachable at ${healthUrl} (${err instanceof Error ? err.message : String(err)})`
+      });
+    }
+  };
+
   const handleAddTab = (): void => {
     const nextNum = tabs.length + 1;
     const newId = `tab-${Date.now()}-${nextNum}`;
@@ -457,19 +510,32 @@ export function App(): JSX.Element {
     const newTitle = isLive
       ? `Terminal ${nextNum} (${connectedUser}@${connectedHost})`
       : `Terminal ${nextNum}`;
-    setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: isLive }]);
+    setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: isLive, channelId: nextNum }]);
     setActiveTabId(newId);
     setSessionTabLabel(newTitle);
     setActiveScreen('workspace');
     if (liveSessionRef.current?.isConnected) {
-      void liveSessionRef.current.openChannel(cols, rows).catch(() => {
-        // Ignore channel open errors
-      });
+      void liveSessionRef.current
+        .openChannel(cols, rows)
+        .then((res) => {
+          if (res.ok && res.channel) {
+            setTabs((prev) =>
+              prev.map((t) => (t.id === newId ? { ...t, channelId: res.channel, connected: true } : t))
+            );
+          }
+        })
+        .catch(() => {
+          // Ignore channel open errors
+        });
     }
   };
 
   const handleCloseTab = (tabId: string, e?: Event): void => {
     if (e) e.stopPropagation();
+    const closingTab = tabs.find((t) => t.id === tabId);
+    if (closingTab?.channelId && liveSessionRef.current?.isConnected && tabs.length > 1) {
+      liveSessionRef.current.closeChannel(closingTab.channelId);
+    }
     if (tabs.length <= 1) {
       liveSessionRef.current?.close();
       liveSessionRef.current = null;
@@ -477,7 +543,7 @@ export function App(): JSX.Element {
       setSessionTabLabel('Terminal 1');
       setConnectedUser('bob');
       setConnectedHost('caleston-lp10');
-      setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false }]);
+      setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false, channelId: 1 }]);
       setActiveTabId('tab-1');
       setSftpRawEntries([]);
       setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
@@ -511,7 +577,7 @@ export function App(): JSX.Element {
     setConnectedUser('bob');
     setConnectedHost('caleston-lp10');
     setTabs((prev) =>
-      prev.map((t) => (t.id === activeTabId ? { ...t, title: resetTitle, connected: false } : t))
+      prev.map((t) => ({ ...t, title: t.id === activeTabId ? resetTitle : t.title, connected: false }))
     );
   };
 
@@ -546,6 +612,13 @@ export function App(): JSX.Element {
       );
       return;
     }
+
+    const gwValidation = validateGatewayWsUrl(gatewayUrl);
+    if (!gwValidation.valid) {
+      setConnectErrorMsg(gwValidation.error ?? 'Invalid SSH Gateway WebSocket URL.');
+      return;
+    }
+
     setConnectErrorMsg('');
     const hostVal = connectHost.trim() || '127.0.0.1';
     const userVal = connectUser.trim() || 'ubuntu';
@@ -553,23 +626,6 @@ export function App(): JSX.Element {
     const portNum = Number.parseInt(portVal, 10) || 22;
     const label = `${userVal}@${hostVal}`;
     const tabTitle = `Terminal 1 (${label})`;
-
-    hostRegistry.upsert({
-      id: `host-${hostVal}-${portVal}`,
-      alias: hostVal,
-      host: hostVal,
-      port: portNum,
-      user: userVal,
-      folder: 'Connected',
-      tags: [authMethod === 'Password' ? 'password' : 'key-400'],
-      favorite: true,
-      jumpHops: []
-    });
-    setHosts(hostRegistry.list());
-
-    setConnectedUser(userVal);
-    setConnectedHost(hostVal);
-    setSessionTabLabel(tabTitle);
 
     void (async () => {
       if (authMethod === 'Private Key (.pem / id_rsa)' && uploadedKeyContent.trim()) {
@@ -589,7 +645,8 @@ export function App(): JSX.Element {
             : 'remote_signer';
 
       const client = new LiveGatewaySessionClient({
-        gatewayUrl,
+        gatewayUrl: gwValidation.normalizedUrl,
+        gatewayAuthToken,
         host: hostVal,
         port: portNum,
         user: userVal,
@@ -662,9 +719,15 @@ export function App(): JSX.Element {
           }
           return '';
         },
+        onChannelClosed: (channel) => {
+          setTabs((prev) =>
+            prev.map((t) => (t.channelId === channel ? { ...t, connected: false } : t))
+          );
+        },
         onStateChange: (st) => {
           if (st === 'disconnected') {
             setConnectionState('disconnected');
+            setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
           }
         }
       });
@@ -672,10 +735,29 @@ export function App(): JSX.Element {
       try {
         const meta = await client.connect();
         liveSessionRef.current = client;
+        hostRegistry.upsert({
+          id: `host-${hostVal}-${portVal}`,
+          alias: hostVal,
+          host: hostVal,
+          port: portNum,
+          user: userVal,
+          folder: 'Connected',
+          tags: [authMethod === 'Password' ? 'password' : 'key-400'],
+          favorite: true,
+          jumpHops: []
+        });
+        setHosts(hostRegistry.list());
+        setConnectedUser(userVal);
+        setConnectedHost(hostVal);
+        setSessionTabLabel(tabTitle);
         setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
         setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
         setTabs((prev) =>
-          prev.map((t) => (t.id === activeTabId ? { ...t, title: tabTitle, connected: true } : t))
+          prev.map((t) =>
+            t.id === activeTabId
+              ? { ...t, title: tabTitle, connected: true, channelId: meta.ptyChannel || 1 }
+              : t
+          )
         );
         setConnectionState('connected');
         setConnectModalOpen(false);
@@ -694,6 +776,7 @@ export function App(): JSX.Element {
       } catch (err) {
         liveSessionRef.current = null;
         setConnectionState('disconnected');
+        setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
         const errMsg = err instanceof Error ? err.message : String(err);
         setConnectErrorMsg(errMsg);
         setTerminalLines((prev) => [...prev, `[SSH Connection Error] ${errMsg}`]);
@@ -905,6 +988,27 @@ export function App(): JSX.Element {
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
       // Allow global Cmd+K handler or clear buffer when Shift is held
+      return;
+    }
+    if (e.ctrlKey && e.key.toLowerCase() === 'c') {
+      e.preventDefault();
+      const activeTab = tabs.find((t) => t.id === activeTabId);
+      const activeChan = activeTab?.channelId ?? 1;
+      if (liveSessionRef.current?.isConnected) {
+        liveSessionRef.current.sendPtyText(activeChan, '\x03');
+      }
+      updateCurrentInput('');
+      setTerminalLines((prev) => [...prev, '^C']);
+      return;
+    }
+    if (e.ctrlKey && e.key.toLowerCase() === 'l') {
+      e.preventDefault();
+      setTerminalLines([]);
+      try {
+        xtermAdapterRef.current?.terminal.clear();
+      } catch {
+        // Ignore
+      }
       return;
     }
     if (e.key === 'Tab' || e.key === 'ArrowRight') {
@@ -2752,6 +2856,65 @@ export function App(): JSX.Element {
                   onSubmit={handleConnectSubmit}
                   style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}
                 >
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                    <div style={{ flex: 2, minWidth: '220px' }}>
+                      <label htmlFor="welcome-gateway-url-input">SSH Gateway WebSocket Endpoint (WSS / WS)</label>
+                      <input
+                        id="welcome-gateway-url-input"
+                        type="text"
+                        className="ui-input"
+                        placeholder="wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws"
+                        value={gatewayUrl}
+                        onInput={(e) => {
+                          const val = (e.target as HTMLInputElement).value;
+                          setGatewayUrl(val);
+                          setGatewayProbeStatus(null);
+                          try {
+                            globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                          } catch {
+                            // ignore
+                          }
+                        }}
+                        data-testid="welcome-gateway-url-input"
+                      />
+                    </div>
+                    <div style={{ flex: 1, minWidth: '160px' }}>
+                      <label htmlFor="welcome-gateway-token-input">Gateway Auth Token (Optional)</label>
+                      <input
+                        id="welcome-gateway-token-input"
+                        type="password"
+                        className="ui-input"
+                        placeholder="Bearer / EC2 gateway token"
+                        value={gatewayAuthToken}
+                        onInput={(e) => {
+                          const val = (e.target as HTMLInputElement).value;
+                          setGatewayAuthToken(val);
+                          try {
+                            globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
+                          } catch {
+                            // ignore
+                          }
+                        }}
+                        data-testid="welcome-gateway-token-input"
+                      />
+                    </div>
+                    <Button
+                      variant="default"
+                      type="button"
+                      testId="test-gateway-btn"
+                      onClick={() => void handleTestGateway(gatewayUrl)}
+                    >
+                      Test Gateway
+                    </Button>
+                  </div>
+                  {gatewayProbeStatus ? (
+                    <Badge
+                      tone={gatewayProbeStatus.ok ? 'success' : 'danger'}
+                      testId="gateway-probe-badge"
+                    >
+                      {gatewayProbeStatus.message}
+                    </Badge>
+                  ) : null}
                   <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
                     <div style={{ flex: 2, minWidth: '180px' }}>
                       <label htmlFor="welcome-host-input">Host / IP</label>
@@ -3605,22 +3768,53 @@ export function App(): JSX.Element {
         <form onSubmit={handleConnectSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
           <div>
             <label htmlFor="connect-gateway-input">SSH Gateway WebSocket URL</label>
+            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+              <input
+                id="connect-gateway-input"
+                type="text"
+                className="ui-input"
+                placeholder="wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws"
+                value={gatewayUrl}
+                onInput={(e) => {
+                  const val = (e.target as HTMLInputElement).value;
+                  setGatewayUrl(val);
+                  setGatewayProbeStatus(null);
+                  try {
+                    globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                  } catch {
+                    // ignore
+                  }
+                }}
+                data-testid="gateway-url-input"
+              />
+              <Button
+                variant="default"
+                type="button"
+                testId="modal-test-gateway-btn"
+                onClick={() => void handleTestGateway(gatewayUrl)}
+              >
+                Test Gateway
+              </Button>
+            </div>
+          </div>
+          <div>
+            <label htmlFor="connect-gateway-token-input">Gateway Auth Token (Optional EC2 WSS Token)</label>
             <input
-              id="connect-gateway-input"
-              type="text"
+              id="connect-gateway-token-input"
+              type="password"
               className="ui-input"
-              placeholder="ws://127.0.0.1:8080/ws"
-              value={gatewayUrl}
+              placeholder="Optional GATEWAY_AUTH_TOKEN or OIDC JWT"
+              value={gatewayAuthToken}
               onInput={(e) => {
                 const val = (e.target as HTMLInputElement).value;
-                setGatewayUrl(val);
+                setGatewayAuthToken(val);
                 try {
-                  globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                  globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
                 } catch {
                   // ignore
                 }
               }}
-              data-testid="gateway-url-input"
+              data-testid="gateway-token-input"
             />
           </div>
           <div>

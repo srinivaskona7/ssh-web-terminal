@@ -336,21 +336,179 @@ export class GatewayUnreachableError extends Error {
   }
 }
 
+const STATIC_HOST_SUFFIXES = [
+  '.github.io',
+  '.pages.dev',
+  '.netlify.app',
+  '.vercel.app',
+  '.surge.sh',
+  '.gitlab.io'
+] as const;
+
+export function isStaticPagesHost(hostnameOrUrl: string): boolean {
+  const raw = hostnameOrUrl.trim().toLowerCase();
+  if (!raw) return false;
+  let host = raw;
+  if (raw.includes('://')) {
+    try {
+      host = new URL(raw).hostname.toLowerCase();
+    } catch {
+      host = raw;
+    }
+  } else {
+    host = raw.split('/')[0]?.split(':')[0] ?? raw;
+  }
+  return STATIC_HOST_SUFFIXES.some((suffix) => host === suffix.slice(1) || host.endsWith(suffix));
+}
+
+export interface GatewayUrlValidationResult {
+  valid: boolean;
+  normalizedUrl: string;
+  error?: string;
+}
+
+export function validateGatewayWsUrl(rawUrl: string): GatewayUrlValidationResult {
+  let candidate = rawUrl.trim();
+  if (!candidate) {
+    return {
+      valid: false,
+      normalizedUrl: '',
+      error:
+        'SSH Gateway WebSocket URL is required (e.g. wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws).'
+    };
+  }
+  if (candidate.startsWith('http://')) {
+    candidate = `ws://${candidate.slice('http://'.length)}`;
+  } else if (candidate.startsWith('https://')) {
+    candidate = `wss://${candidate.slice('https://'.length)}`;
+  } else if (!candidate.includes('://')) {
+    const isLocal = candidate.startsWith('127.0.0.1') || candidate.startsWith('localhost');
+    candidate = `${isLocal ? 'ws' : 'wss'}://${candidate}`;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return {
+      valid: false,
+      normalizedUrl: candidate,
+      error: `Invalid Gateway WebSocket URL "${rawUrl}". Expected ws://host:port/ws or wss://host/ws.`
+    };
+  }
+
+  if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') {
+    return {
+      valid: false,
+      normalizedUrl: candidate,
+      error: `Unsupported protocol "${parsed.protocol}". Use ws:// or wss://.`
+    };
+  }
+
+  if (isStaticPagesHost(parsed.hostname)) {
+    return {
+      valid: false,
+      normalizedUrl: candidate,
+      error: `Invalid Gateway URL (${parsed.hostname}): GitHub Pages / static hosts cannot terminate SSH WebSocket connections. Configure your deployed EC2/Go Gateway WSS endpoint (e.g. wss://gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws).`
+    };
+  }
+
+  if (!parsed.pathname || parsed.pathname === '/') {
+    parsed.pathname = '/ws';
+  }
+
+  return {
+    valid: true,
+    normalizedUrl: parsed.toString()
+  };
+}
+
+export function deriveGatewayHealthUrl(wsUrl: string): string {
+  const v = validateGatewayWsUrl(wsUrl);
+  const target = v.valid ? v.normalizedUrl : wsUrl.trim();
+  try {
+    const u = new URL(target);
+    u.protocol = u.protocol === 'wss:' ? 'https:' : 'http:';
+    u.pathname = u.pathname.replace(/\/ws\/?$/, '/healthz');
+    if (!u.pathname.endsWith('/healthz')) {
+      u.pathname = '/healthz';
+    }
+    u.search = '';
+    return u.toString();
+  } catch {
+    return 'http://127.0.0.1:8080/healthz';
+  }
+}
+
 export function resolveGatewayWsUrl(explicitUrl?: string): string {
   const trimmed = explicitUrl?.trim();
   if (trimmed) {
+    const check = validateGatewayWsUrl(trimmed);
+    if (check.valid) {
+      return check.normalizedUrl;
+    }
+    // Return raw trimmed so validateGatewayWsUrl in connect() surfaces the specific static-host error
     return trimmed;
   }
+
+  // 1. Check ?gateway= URL query parameter
+  if (typeof window !== 'undefined' && window.location?.search) {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const fromQuery = params.get('gateway')?.trim();
+      if (fromQuery) {
+        const check = validateGatewayWsUrl(fromQuery);
+        if (check.valid) {
+          try {
+            globalThis.localStorage?.setItem('webssh.gateway.wsUrl', check.normalizedUrl);
+          } catch {
+            // ignore storage errors
+          }
+          return check.normalizedUrl;
+        }
+      }
+    } catch {
+      // ignore URLSearchParams errors
+    }
+  }
+
+  // 2. Check localStorage, automatically purging stale GitHub Pages (*.github.io) URLs
   try {
     const saved = globalThis.localStorage?.getItem('webssh.gateway.wsUrl')?.trim();
-    if (saved) return saved;
+    if (saved) {
+      if (isStaticPagesHost(saved)) {
+        globalThis.localStorage?.removeItem('webssh.gateway.wsUrl');
+      } else {
+        const check = validateGatewayWsUrl(saved);
+        if (check.valid) {
+          return check.normalizedUrl;
+        }
+      }
+    }
   } catch {
     // ignore storage access issues
   }
+
+  // 3. Check build-time VITE_GATEWAY_URL or runtime window.__WEBSSH_DEFAULT_GATEWAY_URL__
+  const envUrl =
+    (typeof window !== 'undefined' &&
+      (window as unknown as { __WEBSSH_DEFAULT_GATEWAY_URL__?: string }).__WEBSSH_DEFAULT_GATEWAY_URL__) ||
+    ((import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_GATEWAY_URL ?? '');
+  if (envUrl && envUrl.trim() && !isStaticPagesHost(envUrl)) {
+    const check = validateGatewayWsUrl(envUrl);
+    if (check.valid) {
+      return check.normalizedUrl;
+    }
+  }
+
+  // 4. Derive from current hostname ONLY when not hosted on GitHub Pages / static CDN
   const hostname =
     typeof window !== 'undefined' && window.location?.hostname
       ? window.location.hostname
       : '127.0.0.1';
+  if (isStaticPagesHost(hostname)) {
+    return 'ws://127.0.0.1:8080/ws';
+  }
   const proto =
     typeof window !== 'undefined' && window.location?.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${hostname}:8080/ws`;
@@ -358,6 +516,7 @@ export function resolveGatewayWsUrl(explicitUrl?: string): string {
 
 export interface LiveConnectParams {
   gatewayUrl?: string;
+  gatewayAuthToken?: string;
   host: string;
   port: number;
   user: string;
@@ -502,7 +661,26 @@ export class LiveGatewaySessionClient {
   }
 
   async connect(): Promise<ConnectedSessionMetadata> {
-    const wsUrl = resolveGatewayWsUrl(this.params.gatewayUrl);
+    const rawWsUrl = resolveGatewayWsUrl(this.params.gatewayUrl);
+    const validation = validateGatewayWsUrl(rawWsUrl);
+    if (!validation.valid) {
+      throw new GatewayUnreachableError(rawWsUrl, validation.error);
+    }
+
+    let wsUrl = validation.normalizedUrl;
+    const authToken = this.params.gatewayAuthToken?.trim();
+    if (authToken) {
+      try {
+        const parsed = new URL(wsUrl);
+        if (!parsed.searchParams.has('token')) {
+          parsed.searchParams.set('token', authToken);
+          wsUrl = parsed.toString();
+        }
+      } catch {
+        // Keep normalizedUrl if URL parsing fails
+      }
+    }
+
     return new Promise<ConnectedSessionMetadata>((resolve, reject) => {
       this.connectResolve = resolve;
       this.connectReject = reject;
@@ -548,7 +726,8 @@ export class LiveGatewaySessionClient {
         this.transport.sendControl({
           type: 'hello',
           protocolVersion: 1,
-          clientVersion: '1.0.0'
+          clientVersion: '1.0.0',
+          oidcToken: authToken || undefined
         });
         this.transport.sendControl({
           type: 'connect',

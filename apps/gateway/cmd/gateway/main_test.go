@@ -71,6 +71,53 @@ func TestGatewayHTTPAndSecurityEndpoints(t *testing.T) {
 	if recSSRF.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for SSRF target 169.254.169.254, got %d", recSSRF.Code)
 	}
+
+	// 5. EC2 Hardened Mode: RequireTLS + GatewayAuthToken + Restricted Frontend Origin
+	ec2Cfg := ServerConfig{
+		ListenAddr:         ":0",
+		AllowedOrigins:     []string{"https://srinivaskona7.github.io"},
+		GatewayAuthToken:   "ec2-prod-secret-token-2026",
+		RequireTLS:         true,
+		DestAllowlist:      []string{"127.0.0.1"},
+		SessionGrace:       time.Minute,
+		RingBufferBytes:    65536,
+		MaxSessionsPerUser: 5,
+		RateLimitPerSec:    100,
+	}
+	ec2Handler, err := NewMux(ec2Cfg)
+	if err != nil {
+		t.Fatalf("NewMux ec2Cfg failed: %v", err)
+	}
+
+	// Plain HTTP without X-Forwarded-Proto: https -> 403 Forbidden
+	reqNoTLS := httptest.NewRequest(http.MethodGet, "/ws?token=ec2-prod-secret-token-2026", nil)
+	reqNoTLS.Header.Set("Origin", "https://srinivaskona7.github.io")
+	recNoTLS := httptest.NewRecorder()
+	ec2Handler.ServeHTTP(recNoTLS, reqNoTLS)
+	if recNoTLS.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when RequireTLS=true and request is plain HTTP, got %d", recNoTLS.Code)
+	}
+
+	// HTTPS (via X-Forwarded-Proto) + allowed Origin, but wrong token -> 401 Unauthorized
+	reqBadTok := httptest.NewRequest(http.MethodGet, "/ws?token=wrong-token", nil)
+	reqBadTok.Header.Set("X-Forwarded-Proto", "https")
+	reqBadTok.Header.Set("Origin", "https://srinivaskona7.github.io")
+	recBadTok := httptest.NewRecorder()
+	ec2Handler.ServeHTTP(recBadTok, reqBadTok)
+	if recBadTok.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong gateway token, got %d", recBadTok.Code)
+	}
+
+	// HTTPS + allowed Origin + valid Bearer token -> reaches WebSocket upgrade check (426 Upgrade Required)
+	reqValidAuth := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	reqValidAuth.Header.Set("X-Forwarded-Proto", "https")
+	reqValidAuth.Header.Set("Origin", "https://srinivaskona7.github.io")
+	reqValidAuth.Header.Set("Authorization", "Bearer ec2-prod-secret-token-2026")
+	recValidAuth := httptest.NewRecorder()
+	ec2Handler.ServeHTTP(recValidAuth, reqValidAuth)
+	if recValidAuth.Code != http.StatusUpgradeRequired {
+		t.Fatalf("expected 426 UpgradeRequired after passing TLS, Origin, and Bearer token checks, got %d", recValidAuth.Code)
+	}
 }
 
 type testWSClient struct {

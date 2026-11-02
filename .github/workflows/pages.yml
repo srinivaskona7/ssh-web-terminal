@@ -39,7 +39,7 @@ jobs:
 
       - name: Build tokens, static web bundle, and verify all referenced assets
         env:
-          VITE_GATEWAY_URL: ${{ vars.GATEWAY_URL || 'wss://gateway.webssh.studio/ws' }}
+          VITE_GATEWAY_URL: ${{ vars.GATEWAY_URL || '' }}
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
         run: npm run build
 

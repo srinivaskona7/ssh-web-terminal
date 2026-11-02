@@ -1,8 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
 import { FrameType, decodeControlPayload, decodeFrame, encodeControlFrame, encodeFrame } from '@webssh/protocol';
-import { GatewaySessionTransport, MAX_PENDING_INPUT_BYTES, PendingInputQueue, buildTmuxAttachCommand, computeBackoffMs } from './index.js';
+import { GatewaySessionTransport, MAX_PENDING_INPUT_BYTES, PendingInputQueue, buildTmuxAttachCommand, computeBackoffMs, deriveGatewayHealthUrl, isStaticPagesHost, resolveGatewayWsUrl, validateGatewayWsUrl } from './index.js';
 describe('Transport Resilience & Sequence Replay (M4)', () => {
+    it('rejects GitHub Pages (*.github.io) as a gateway URL and resolves real configurable gateway endpoints', () => {
+        expect(isStaticPagesHost('srinivaskona7.github.io')).toBe(true);
+        expect(isStaticPagesHost('wss://srinivaskona7.github.io:8080/ws')).toBe(true);
+        expect(isStaticPagesHost('wss://ssh-gateway.ec2.example.com/ws')).toBe(false);
+        const ghCheck = validateGatewayWsUrl('wss://srinivaskona7.github.io/ws');
+        expect(ghCheck.valid).toBe(false);
+        expect(ghCheck.error).toContain('GitHub Pages');
+        const ec2Check = validateGatewayWsUrl('https://ssh-gateway.ec2.example.com');
+        expect(ec2Check.valid).toBe(true);
+        expect(ec2Check.normalizedUrl).toBe('wss://ssh-gateway.ec2.example.com/ws');
+        expect(deriveGatewayHealthUrl(ec2Check.normalizedUrl)).toBe('https://ssh-gateway.ec2.example.com/healthz');
+        // Ensure stale GitHub Pages URLs in localStorage are automatically purged
+        globalThis.localStorage?.setItem('webssh.gateway.wsUrl', 'wss://srinivaskona7.github.io:8080/ws');
+        const resolved = resolveGatewayWsUrl();
+        expect(resolved).not.toContain('github.io');
+        expect(globalThis.localStorage?.getItem('webssh.gateway.wsUrl')).toBeNull();
+    });
     it('computes exponential backoff with jitter within expected bounds', () => {
         fc.assert(fc.property(fc.integer({ min: 0, max: 12 }), fc.double({ min: 0, max: 1, noNaN: true }), (attempt, randVal) => {
             const delay = computeBackoffMs(attempt, 250, 15_000, () => randVal);
