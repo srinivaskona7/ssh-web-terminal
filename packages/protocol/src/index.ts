@@ -50,6 +50,11 @@ export type ControlMessage =
       host: string;
       port: number;
       user: string;
+      authMethod?: 'password' | 'private_key' | 'remote_signer';
+      password?: string;
+      privateKeyPem?: string;
+      privateKeyPassphrase?: string;
+      publicKey?: string;
       keyFingerprint: string;
       jump?: JumpHop[];
       cols: number;
@@ -87,7 +92,50 @@ export type ControlMessage =
       resumeToken: string;
       ptyChannel: number;
       cipher: string;
+      kex?: string;
       serverVersion: string;
+      authMethodUsed?: string;
+      sftpReady?: boolean;
+      sftpError?: string;
+    }
+  | {
+      type: 'open_channel';
+      opId: string;
+      channel?: number;
+      cols: number;
+      rows: number;
+    }
+  | {
+      type: 'channel_opened';
+      opId: string;
+      channel: number;
+      ok: boolean;
+      error?: string;
+    }
+  | {
+      type: 'close_channel';
+      channel: number;
+    }
+  | {
+      type: 'channel_closed';
+      channel: number;
+      exitCode?: number;
+    }
+  | {
+      type: 'exec_command';
+      opId: string;
+      command: string;
+      timeoutMs?: number;
+    }
+  | {
+      type: 'exec_result';
+      opId: string;
+      ok: boolean;
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+      durationMs: number;
+      error?: string;
     }
   | {
       type: 'resize';
@@ -124,9 +172,22 @@ export type ControlMessage =
   | {
       type: 'sftp_op';
       opId: string;
-      op: 'list' | 'stat' | 'mkdir' | 'remove' | 'rename' | 'upload_init' | 'upload_chunk' | 'upload_commit' | 'download_read' | 'write_file' | 'read_file';
+      op:
+        | 'list'
+        | 'stat'
+        | 'chmod'
+        | 'mkdir'
+        | 'remove'
+        | 'rename'
+        | 'upload_init'
+        | 'upload_chunk'
+        | 'upload_commit'
+        | 'download_read'
+        | 'write_file'
+        | 'read_file';
       path: string;
       targetPath?: string;
+      mode?: string;
       offset?: number;
       size?: number;
       sha256?: string;
@@ -140,7 +201,33 @@ export type ControlMessage =
       dataBase64?: string;
       offset?: number;
       size?: number;
+      mode?: string;
       sha256?: string;
+      error?: string;
+    }
+  | {
+      type: 'tunnel_op';
+      opId: string;
+      op: 'start' | 'stop' | 'http_preview';
+      tunnelId?: string;
+      forwardType?: 'L' | 'R' | 'D';
+      bindAddress?: string;
+      localPort?: number;
+      remoteHost?: string;
+      remotePort?: number;
+      httpPath?: string;
+    }
+  | {
+      type: 'tunnel_result';
+      opId: string;
+      ok: boolean;
+      tunnelId?: string;
+      active?: boolean;
+      boundAddress?: string;
+      statusCode?: number;
+      statusText?: string;
+      bodyPreview?: string;
+      bytesTransferred?: number;
       error?: string;
     }
   | {

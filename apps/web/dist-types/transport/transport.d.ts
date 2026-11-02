@@ -85,4 +85,79 @@ export declare class GatewaySessionTransport {
     private flushQueuedInput;
     handleInboundBytes(raw: Uint8Array): Promise<void>;
 }
+export declare class GatewayUnreachableError extends Error {
+    readonly gatewayUrl: string;
+    constructor(gatewayUrl: string, detail?: string);
+}
+export declare function resolveGatewayWsUrl(explicitUrl?: string): string;
+export interface LiveConnectParams {
+    gatewayUrl?: string;
+    host: string;
+    port: number;
+    user: string;
+    authMethod: 'password' | 'private_key' | 'remote_signer';
+    password?: string;
+    privateKeyPem?: string;
+    privateKeyPassphrase?: string;
+    publicKey?: string;
+    keyFingerprint?: string;
+    cols: number;
+    rows: number;
+    onPtyData: (channel: number, data: Uint8Array) => void;
+    onHostKeyPrompt: (msg: Extract<ControlMessage, {
+        type: 'hostkey_prompt';
+    }>) => Promise<boolean>;
+    onSignRequest?: (msg: Extract<ControlMessage, {
+        type: 'sign_request';
+    }>) => Promise<string>;
+    onChannelClosed?: (channel: number, exitCode: number) => void;
+    onStateChange?: (state: TransportConnectionState, rttMs: number) => void;
+    onFatalError?: (code: string, message: string) => void;
+}
+export type ConnectedSessionMetadata = Extract<ControlMessage, {
+    type: 'connected';
+}>;
+export declare class LiveGatewaySessionClient {
+    private readonly params;
+    readonly transport: GatewaySessionTransport;
+    private ws;
+    private pingTimer;
+    private opCounter;
+    private readonly textEncoder;
+    private pendingExec;
+    private pendingSftp;
+    private pendingTunnel;
+    private pendingChannelOpen;
+    private connectResolve;
+    private connectReject;
+    private metadata;
+    constructor(params: LiveConnectParams);
+    get sessionMetadata(): ConnectedSessionMetadata | null;
+    get isConnected(): boolean;
+    private nextOpId;
+    private handleControlMessage;
+    connect(): Promise<ConnectedSessionMetadata>;
+    private rejectAllPending;
+    sendPtyText(channel: number, text: string): boolean;
+    sendPtyBytes(channel: number, bytes: Uint8Array): boolean;
+    resizeChannel(channel: number, cols: number, rows: number): void;
+    closeChannel(channel: number): void;
+    openChannel(cols: number, rows: number, requestedChannel?: number): Promise<Extract<ControlMessage, {
+        type: 'channel_opened';
+    }>>;
+    execCommand(command: string, timeoutMs?: number): Promise<Extract<ControlMessage, {
+        type: 'exec_result';
+    }>>;
+    sftpOp(params: Omit<Extract<ControlMessage, {
+        type: 'sftp_op';
+    }>, 'type' | 'opId'>): Promise<Extract<ControlMessage, {
+        type: 'sftp_result';
+    }>>;
+    tunnelOp(params: Omit<Extract<ControlMessage, {
+        type: 'tunnel_op';
+    }>, 'type' | 'opId'>): Promise<Extract<ControlMessage, {
+        type: 'tunnel_result';
+    }>>;
+    close(): void;
+}
 //# sourceMappingURL=transport.d.ts.map

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { render } from 'preact';
 import axe from 'axe-core';
 import { App, FIFTY_FEATURES_CATALOG } from './App';
+import { AppErrorBoundary, buildSafeDiagnosticReport, repairApplicationAssetCaches, sanitizeDiagnosticMessage } from './ErrorBoundary';
 describe('App UI Shell Integration Suite (M4-M13)', () => {
     it('starts on clean minimal Welcome screen with zero mock data, exits Zen mode on Escape, supports simple Password & Private Key (chmod 0400) connection, and enables IDE mode on demand', async () => {
         const container = document.createElement('div');
@@ -189,6 +190,102 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         navVault.click();
         await new Promise((r) => setTimeout(r, 10));
         expect(container.querySelector('[data-testid="fido2-hardware-card"]')?.textContent).toContain('sk-ssh-ed25519@openssh.com');
+        document.body.removeChild(container);
+    });
+    it('renders AppErrorBoundary fallback with Retry, targeted cache repair, and secret-safe diagnostics while preserving localStorage', async () => {
+        localStorage.setItem('webssh.hosts.v1', JSON.stringify([{ id: 'h-keep', alias: 'keep-host', host: '10.0.0.9', port: 22, user: 'ubuntu', tags: [], favorite: true, jumpHops: [] }]));
+        localStorage.setItem('webssh.preferences.v2', JSON.stringify({
+            schemaVersion: 2,
+            activeThemeId: 'non-existent-corrupted-theme',
+            typography: { fontFamily: 'JetBrains Mono', fontSize: null }
+        }));
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        render(_jsx(App, {}), container);
+        // Verify shell renders even with invalid activeThemeId in localStorage and preserves saved host
+        expect(container.querySelector('[data-testid="workspace-root"]')).toBeTruthy();
+        const toggleIdeBtn = container.querySelector('[data-testid="toggle-ide-mode-btn"]');
+        toggleIdeBtn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        const navHosts = container.querySelector('[data-testid="nav-hosts"]');
+        navHosts.click();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(container.querySelector('[data-testid="screen-hosts"]')?.textContent).toContain('keep-host');
+        // Verify secret-safe diagnostic sanitizer strips private keys, tokens, and passwords
+        const unsafeMsg = 'Startup failed with token=ghp_1234567890abcdefghijklmnopqrstuvwx and -----BEGIN OPENSSH PRIVATE KEY----- AAAA secret=my-secret-pass';
+        const sanitized = sanitizeDiagnosticMessage(unsafeMsg);
+        expect(sanitized).not.toContain('ghp_1234567890abcdefghijklmnopqrstuvwx');
+        expect(sanitized).not.toContain('my-secret-pass');
+        expect(sanitized).not.toContain('BEGIN OPENSSH PRIVATE KEY');
+        const report = buildSafeDiagnosticReport(new Error(unsafeMsg));
+        expect(report.reason).not.toContain('my-secret-pass');
+        // Verify repairApplicationAssetCaches preserves localStorage
+        await repairApplicationAssetCaches();
+        expect(localStorage.getItem('webssh.hosts.v1')).toContain('keep-host');
+        // Verify AppErrorBoundary catches render errors and recovers on Retry
+        let shouldThrow = true;
+        function FlakyChild() {
+            if (shouldThrow) {
+                throw new Error('Simulated transient component error password=supersecret');
+            }
+            return _jsx("div", { "data-testid": "recovered-child", children: "Recovered Content" });
+        }
+        const boundaryContainer = document.createElement('div');
+        document.body.appendChild(boundaryContainer);
+        render(_jsx(AppErrorBoundary, { children: _jsx(FlakyChild, {}) }), boundaryContainer);
+        await new Promise((r) => setTimeout(r, 10));
+        const fallback = boundaryContainer.querySelector('[data-testid="error-boundary-fallback"]');
+        expect(fallback).toBeTruthy();
+        expect(fallback?.textContent).not.toContain('supersecret');
+        shouldThrow = false;
+        const retryBtn = boundaryContainer.querySelector('[data-testid="error-boundary-retry-btn"]');
+        retryBtn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        expect(boundaryContainer.querySelector('[data-testid="recovered-child"]')?.textContent).toBe('Recovered Content');
+        document.body.removeChild(container);
+        document.body.removeChild(boundaryContainer);
+    });
+    it('executes real SSH commands over WebSocket when connected and rejects fake execution when disconnected', async () => {
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        render(_jsx(App, {}), container);
+        // 1. Switch to terminal while disconnected and run uname -s -> must NOT fake success
+        const openTermBtn = container.querySelector('[data-testid="welcome-open-terminal-btn"]');
+        openTermBtn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        const viewport = container.querySelector('[data-testid="terminal-viewport"]');
+        for (const ch of 'uname -s') {
+            viewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
+        }
+        viewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await new Promise((r) => setTimeout(r, 15));
+        expect(viewport.textContent).toContain('Not connected to an SSH server');
+        expect(viewport.textContent).not.toContain('Executed remote/shell command');
+        // 2. Connect via New Connection modal with wrong password -> must stay Disconnected
+        const newConnBtn = container.querySelector('[data-testid="new-connection-btn"]');
+        newConnBtn.click();
+        await new Promise((r) => setTimeout(r, 10));
+        const passInput = container.querySelector('[data-testid="connect-password-input"]');
+        passInput.value = 'wrong-password';
+        passInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 10));
+        const submitBtn = container.querySelector('[data-testid="connect-modal-submit-btn"]');
+        submitBtn.click();
+        await new Promise((r) => setTimeout(r, 25));
+        expect(container.querySelector('[data-testid="modal-connect-error-badge"]')?.textContent).toContain('SSH_CONNECT_FAILED');
+        // 3. Connect with valid credentials -> transitions to Connected and runs real uname -s -> Linux
+        passInput.value = 'testpass123';
+        passInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 10));
+        submitBtn.click();
+        await new Promise((r) => setTimeout(r, 30));
+        const termViewport = container.querySelector('[data-testid="terminal-viewport"]');
+        for (const ch of 'uname -s') {
+            termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
+        }
+        termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await new Promise((r) => setTimeout(r, 25));
+        expect(termViewport.textContent).toContain('Linux');
         document.body.removeChild(container);
     });
 });

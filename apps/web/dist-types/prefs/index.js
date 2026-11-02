@@ -36,52 +36,118 @@ export function createDefaultPreferences() {
         notificationsEnabled: true
     };
 }
+function toFiniteNumber(val, fallback) {
+    return typeof val === 'number' && Number.isFinite(val) ? val : fallback;
+}
+const VALID_LAYOUT_PRESETS = [
+    'sidebar-left',
+    'sidebar-right',
+    'bottom-files',
+    'compact',
+    'zen'
+];
+const VALID_CURSOR_SHAPES = ['block', 'underline', 'bar'];
 export function clampPreferencesLimits(prefs) {
+    const defaults = createDefaultPreferences();
+    const typo = typeof prefs.typography === 'object' && prefs.typography !== null
+        ? prefs.typography
+        : defaults.typography;
+    const surf = typeof prefs.surface === 'object' && prefs.surface !== null
+        ? prefs.surface
+        : defaults.surface;
+    const lim = typeof prefs.storageLimits === 'object' && prefs.storageLimits !== null
+        ? prefs.storageLimits
+        : defaults.storageLimits;
+    const customThemes = typeof prefs.customThemes === 'object' && prefs.customThemes !== null && !Array.isArray(prefs.customThemes)
+        ? prefs.customThemes
+        : {};
+    const perHostOverrides = typeof prefs.perHostOverrides === 'object' && prefs.perHostOverrides !== null && !Array.isArray(prefs.perHostOverrides)
+        ? prefs.perHostOverrides
+        : {};
+    const rawThemeId = typeof prefs.activeThemeId === 'string' ? prefs.activeThemeId.trim() : '';
+    const isKnownTheme = THEME_IDS.includes(rawThemeId) ||
+        Object.prototype.hasOwnProperty.call(customThemes, rawThemeId);
+    const layoutPreset = VALID_LAYOUT_PRESETS.includes(prefs.layoutPreset)
+        ? prefs.layoutPreset
+        : defaults.layoutPreset;
+    const cursorShape = VALID_CURSOR_SHAPES.includes(surf.cursorShape)
+        ? surf.cursorShape
+        : defaults.surface.cursorShape;
     return {
+        ...defaults,
         ...prefs,
+        schemaVersion: 2,
+        activeThemeId: isKnownTheme ? rawThemeId : defaults.activeThemeId,
+        customThemes,
+        perHostOverrides,
+        layoutPreset,
+        vaultAutoLockMinutes: Math.min(120, Math.max(1, toFiniteNumber(prefs.vaultAutoLockMinutes, defaults.vaultAutoLockMinutes))),
+        notificationsEnabled: typeof prefs.notificationsEnabled === 'boolean'
+            ? prefs.notificationsEnabled
+            : defaults.notificationsEnabled,
         typography: {
-            ...prefs.typography,
-            fontSize: Math.min(28, Math.max(10, prefs.typography.fontSize)),
-            lineHeight: Math.min(2.2, Math.max(1.0, prefs.typography.lineHeight)),
-            letterSpacing: Math.min(4, Math.max(-1, prefs.typography.letterSpacing))
+            fontFamily: typeof typo.fontFamily === 'string' && typo.fontFamily.trim().length > 0
+                ? typo.fontFamily
+                : defaults.typography.fontFamily,
+            fontSize: Math.min(28, Math.max(10, toFiniteNumber(typo.fontSize, defaults.typography.fontSize))),
+            lineHeight: Math.min(2.2, Math.max(1.0, toFiniteNumber(typo.lineHeight, defaults.typography.lineHeight))),
+            letterSpacing: Math.min(4, Math.max(-1, toFiniteNumber(typo.letterSpacing, defaults.typography.letterSpacing))),
+            ligatures: typeof typo.ligatures === 'boolean' ? typo.ligatures : defaults.typography.ligatures
         },
         surface: {
-            ...prefs.surface,
-            surfaceOpacity: Math.min(1.0, Math.max(0.5, prefs.surface.surfaceOpacity))
+            ...surf,
+            cursorShape,
+            cursorBlink: typeof surf.cursorBlink === 'boolean' ? surf.cursorBlink : defaults.surface.cursorBlink,
+            surfaceOpacity: Math.min(1.0, Math.max(0.5, toFiniteNumber(surf.surfaceOpacity, defaults.surface.surfaceOpacity)))
         },
         storageLimits: {
-            maxScrollbackLines: Math.min(100_000, Math.max(1_000, prefs.storageLimits.maxScrollbackLines)),
-            maxLocalStorageMiB: Math.min(1024, Math.max(32, prefs.storageLimits.maxLocalStorageMiB)),
-            maxInFlightBufferMiB: Math.min(128, Math.max(8, prefs.storageLimits.maxInFlightBufferMiB)),
-            maxConcurrentTransfers: Math.min(6, Math.max(1, prefs.storageLimits.maxConcurrentTransfers)),
-            maxRecordingMiB: Math.min(256, Math.max(8, prefs.storageLimits.maxRecordingMiB))
+            maxScrollbackLines: Math.min(100_000, Math.max(1_000, toFiniteNumber(lim.maxScrollbackLines, defaults.storageLimits.maxScrollbackLines))),
+            maxLocalStorageMiB: Math.min(1024, Math.max(32, toFiniteNumber(lim.maxLocalStorageMiB, defaults.storageLimits.maxLocalStorageMiB))),
+            maxInFlightBufferMiB: Math.min(128, Math.max(8, toFiniteNumber(lim.maxInFlightBufferMiB, defaults.storageLimits.maxInFlightBufferMiB))),
+            maxConcurrentTransfers: Math.min(6, Math.max(1, toFiniteNumber(lim.maxConcurrentTransfers, defaults.storageLimits.maxConcurrentTransfers))),
+            maxRecordingMiB: Math.min(256, Math.max(8, toFiniteNumber(lim.maxRecordingMiB, defaults.storageLimits.maxRecordingMiB)))
         }
     };
 }
 export function migratePreferences(raw) {
     const defaults = createDefaultPreferences();
-    if (typeof raw !== 'object' || raw === null) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
         return defaults;
     }
     const obj = raw;
-    if (obj.schemaVersion === 2) {
+    if (obj.schemaVersion === 2 || typeof obj.typography === 'object' || typeof obj.activeThemeId === 'string') {
+        const rawTypo = typeof obj.typography === 'object' && obj.typography !== null && !Array.isArray(obj.typography)
+            ? obj.typography
+            : {};
+        const rawSurface = typeof obj.surface === 'object' && obj.surface !== null && !Array.isArray(obj.surface)
+            ? obj.surface
+            : {};
+        const rawLimits = typeof obj.storageLimits === 'object' && obj.storageLimits !== null && !Array.isArray(obj.storageLimits)
+            ? obj.storageLimits
+            : {};
+        const rawCustomThemes = typeof obj.customThemes === 'object' && obj.customThemes !== null && !Array.isArray(obj.customThemes)
+            ? obj.customThemes
+            : {};
+        const rawOverrides = typeof obj.perHostOverrides === 'object' && obj.perHostOverrides !== null && !Array.isArray(obj.perHostOverrides)
+            ? obj.perHostOverrides
+            : {};
         const merged = {
             ...defaults,
             ...obj,
             typography: {
                 ...defaults.typography,
-                ...(obj.typography ?? {})
+                ...rawTypo
             },
             surface: {
                 ...defaults.surface,
-                ...(obj.surface ?? {})
+                ...rawSurface
             },
             storageLimits: {
                 ...defaults.storageLimits,
-                ...(obj.storageLimits ?? {})
+                ...rawLimits
             },
-            customThemes: obj.customThemes ?? {},
-            perHostOverrides: obj.perHostOverrides ?? {},
+            customThemes: rawCustomThemes,
+            perHostOverrides: rawOverrides,
             schemaVersion: 2
         };
         return clampPreferencesLimits(merged);

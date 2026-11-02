@@ -3,16 +3,48 @@ import '@webssh/ui-kit/tokens.css';
 import '@webssh/ui-kit/ui-kit.css';
 import './ui/app.css';
 import { App } from './ui/App';
+import { AppErrorBoundary } from './ui/ErrorBoundary';
 
-if (typeof window !== 'undefined' && 'serviceWorker' in navigator && window.location.protocol === 'https:') {
+function isServiceWorkerSupportedContext(): boolean {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+    return false;
+  }
+  return (
+    window.location.protocol === 'https:' ||
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1'
+  );
+}
+
+if (isServiceWorkerSupportedContext()) {
   window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('./sw.js').catch(() => {
-      // Offline SW registration optional in restricted contexts
-    });
+    void navigator.serviceWorker
+      .register('./sw.js', { updateViaCache: 'none' })
+      .then((reg) => {
+        // Check for updated service worker without forcing a page reload on active sessions
+        void reg.update().catch(() => undefined);
+      })
+      .catch(() => {
+        // Offline SW registration optional in restricted contexts
+      });
   });
 }
 
 const root = document.getElementById('app');
 if (root) {
-  render(<App />, root);
+  try {
+    render(
+      <AppErrorBoundary>
+        <App />
+      </AppErrorBoundary>,
+      root
+    );
+    if (typeof window !== 'undefined' && typeof window.__websshMarkReady === 'function') {
+      window.__websshMarkReady();
+    }
+  } catch (err) {
+    if (typeof window !== 'undefined' && typeof window.__websshReportStartupError === 'function') {
+      window.__websshReportStartupError(err instanceof Error ? err.message : String(err));
+    }
+  }
 }

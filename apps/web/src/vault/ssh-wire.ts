@@ -321,3 +321,117 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   }
   return out;
 }
+
+export interface PrivateKeyInspectionResult {
+  valid: boolean;
+  format?: 'openssh' | 'pkcs8' | 'pem';
+  keyType?: string;
+  encrypted?: boolean;
+  fingerprint?: string;
+  error?: string;
+}
+
+/**
+ * Validates and inspects a PEM or OpenSSH private key string without fabricating local POSIX file permissions.
+ * Note: Browser File APIs do not expose local filesystem chmod bits; only key structure, cipher/KDF state,
+ * and public key fingerprint are derivable client-side.
+ */
+export async function validateAndInspectPrivateKeyPem(pemText: string): Promise<PrivateKeyInspectionResult> {
+  const trimmed = pemText.trim();
+  if (!trimmed) {
+    return { valid: false, error: 'Private key content is empty.' };
+  }
+
+  const headerMatch = trimmed.match(
+    /^-----BEGIN (OPENSSH|RSA|EC|DSA|ENCRYPTED)? ?PRIVATE KEY-----([\s\S]+?)-----END (OPENSSH|RSA|EC|DSA|ENCRYPTED)? ?PRIVATE KEY-----$/
+  );
+  if (!headerMatch || (headerMatch[1] ?? '') !== (headerMatch[3] ?? '')) {
+    return {
+      valid: false,
+      error: 'Invalid private key PEM boundary: expected -----BEGIN [OPENSSH|RSA|EC|PRIVATE] KEY-----.'
+    };
+  }
+
+  const kind = headerMatch[1] ?? '';
+  const bodyRaw = headerMatch[2] ?? '';
+  const procEncrypted = /Proc-Type:\s*4,ENCRYPTED/i.test(bodyRaw);
+  const base64Body = bodyRaw
+    .split(/\r?\n/)
+    .filter((line) => !line.includes(':') && line.trim().length > 0)
+    .join('');
+
+  let decoded: Uint8Array;
+  try {
+    decoded = base64ToBytes(base64Body);
+  } catch {
+    return { valid: false, error: 'Private key base64 payload is corrupted.' };
+  }
+
+  if (decoded.byteLength < 32) {
+    return { valid: false, error: 'Private key payload is truncated (< 32 bytes).' };
+  }
+
+  if (kind === 'OPENSSH') {
+    const magic = 'openssh-key-v1' + String.fromCharCode(0);
+    for (let i = 0; i < magic.length; i++) {
+      if (decoded[i] !== magic.charCodeAt(i)) {
+        return { valid: false, error: 'Invalid OpenSSH key container magic header.' };
+      }
+    }
+    try {
+      let offset = magic.length;
+      const cipher = readSshBytes(decoded, offset);
+      offset = cipher.nextOffset;
+      const kdf = readSshBytes(decoded, offset);
+      offset = kdf.nextOffset;
+      const kdfOpts = readSshBytes(decoded, offset);
+      offset = kdfOpts.nextOffset;
+      const numKeys = new DataView(decoded.buffer, decoded.byteOffset, decoded.byteLength).getUint32(offset, false);
+      if (numKeys < 1) {
+        return { valid: false, error: 'OpenSSH key container contains 0 keys.' };
+      }
+      offset += 4;
+      const pubBlob = readSshBytes(decoded, offset);
+      const pubTypeField = readSshBytes(pubBlob.value, 0);
+      const dec = new TextDecoder();
+      const cipherName = dec.decode(cipher.value);
+      const kdfName = dec.decode(kdf.value);
+      const keyType = dec.decode(pubTypeField.value);
+      const fingerprint = await computeSshFingerprint(pubBlob.value);
+      const encrypted = cipherName !== 'none' || kdfName !== 'none';
+      return {
+        valid: true,
+        format: 'openssh',
+        keyType,
+        encrypted,
+        fingerprint
+      };
+    } catch (err) {
+      return {
+        valid: false,
+        error: `Malformed OpenSSH key structure: ${err instanceof Error ? err.message : String(err)}`
+      };
+    }
+  }
+
+  if (kind === 'ENCRYPTED') {
+    return {
+      valid: true,
+      format: 'pkcs8',
+      keyType: 'pkcs8-encrypted',
+      encrypted: true
+    };
+  }
+
+  if (decoded[0] !== 0x30 && !procEncrypted) {
+    return { valid: false, error: 'Invalid ASN.1 DER sequence in PEM private key.' };
+  }
+
+  return {
+    valid: true,
+    format: kind === '' ? 'pkcs8' : 'pem',
+    keyType: kind === 'RSA' ? 'ssh-rsa' : kind === 'EC' ? 'ecdsa' : 'pkcs8',
+    encrypted: procEncrypted
+  };
+}
+

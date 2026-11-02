@@ -131,7 +131,8 @@ export function ErrorState({ title, message, onRetry }: { title: string; message
 }
 
 export function ComponentGallery({ activeTheme, onSelectTheme }: { activeTheme: ThemeId; onSelectTheme: (t: ThemeId) => void }): JSX.Element {
-  const audit = auditThemeContrast(THEMES[activeTheme]);
+  const safeTheme = (activeTheme in THEMES ? THEMES[activeTheme] : THEMES.dark) ?? THEMES.dark;
+  const audit = auditThemeContrast(safeTheme);
   return (
     <Card testId="component-gallery">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-3)' }}>

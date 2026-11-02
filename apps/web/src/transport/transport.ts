@@ -322,3 +322,409 @@ export class GatewaySessionTransport {
     }
   }
 }
+
+export class GatewayUnreachableError extends Error {
+  public readonly gatewayUrl: string;
+  constructor(gatewayUrl: string, detail?: string) {
+    super(
+      detail
+        ? `SSH Gateway unreachable at ${gatewayUrl}: ${detail}`
+        : `SSH Gateway unreachable at ${gatewayUrl}. Ensure the WebSSH Gateway service is running or update the Gateway WebSocket URL.`
+    );
+    this.name = 'GatewayUnreachableError';
+    this.gatewayUrl = gatewayUrl;
+  }
+}
+
+export function resolveGatewayWsUrl(explicitUrl?: string): string {
+  const trimmed = explicitUrl?.trim();
+  if (trimmed) {
+    return trimmed;
+  }
+  try {
+    const saved = globalThis.localStorage?.getItem('webssh.gateway.wsUrl')?.trim();
+    if (saved) return saved;
+  } catch {
+    // ignore storage access issues
+  }
+  const hostname =
+    typeof window !== 'undefined' && window.location?.hostname
+      ? window.location.hostname
+      : '127.0.0.1';
+  const proto =
+    typeof window !== 'undefined' && window.location?.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${hostname}:8080/ws`;
+}
+
+export interface LiveConnectParams {
+  gatewayUrl?: string;
+  host: string;
+  port: number;
+  user: string;
+  authMethod: 'password' | 'private_key' | 'remote_signer';
+  password?: string;
+  privateKeyPem?: string;
+  privateKeyPassphrase?: string;
+  publicKey?: string;
+  keyFingerprint?: string;
+  cols: number;
+  rows: number;
+  onPtyData: (channel: number, data: Uint8Array) => void;
+  onHostKeyPrompt: (msg: Extract<ControlMessage, { type: 'hostkey_prompt' }>) => Promise<boolean>;
+  onSignRequest?: (msg: Extract<ControlMessage, { type: 'sign_request' }>) => Promise<string>;
+  onChannelClosed?: (channel: number, exitCode: number) => void;
+  onStateChange?: (state: TransportConnectionState, rttMs: number) => void;
+  onFatalError?: (code: string, message: string) => void;
+}
+
+export type ConnectedSessionMetadata = Extract<ControlMessage, { type: 'connected' }>;
+
+export class LiveGatewaySessionClient {
+  public readonly transport: GatewaySessionTransport;
+  private ws: WebSocket | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private opCounter = 0;
+  private readonly textEncoder = new TextEncoder();
+
+  private pendingExec = new Map<
+    string,
+    {
+      resolve: (res: Extract<ControlMessage, { type: 'exec_result' }>) => void;
+      reject: (err: Error) => void;
+    }
+  >();
+  private pendingSftp = new Map<
+    string,
+    {
+      resolve: (res: Extract<ControlMessage, { type: 'sftp_result' }>) => void;
+      reject: (err: Error) => void;
+    }
+  >();
+  private pendingTunnel = new Map<
+    string,
+    {
+      resolve: (res: Extract<ControlMessage, { type: 'tunnel_result' }>) => void;
+      reject: (err: Error) => void;
+    }
+  >();
+  private pendingChannelOpen = new Map<
+    string,
+    {
+      resolve: (res: Extract<ControlMessage, { type: 'channel_opened' }>) => void;
+      reject: (err: Error) => void;
+    }
+  >();
+
+  private connectResolve: ((meta: ConnectedSessionMetadata) => void) | null = null;
+  private connectReject: ((err: Error) => void) | null = null;
+  private metadata: ConnectedSessionMetadata | null = null;
+
+  constructor(private readonly params: LiveConnectParams) {
+    this.transport = new GatewaySessionTransport({
+      onPtyData: params.onPtyData,
+      onHostKeyPrompt: params.onHostKeyPrompt,
+      onSignRequest: params.onSignRequest,
+      onStateChange: params.onStateChange,
+      onControlMessage: (msg) => this.handleControlMessage(msg)
+    });
+  }
+
+  get sessionMetadata(): ConnectedSessionMetadata | null {
+    return this.metadata;
+  }
+
+  get isConnected(): boolean {
+    return this.transport.connectionState === 'connected' && this.metadata !== null;
+  }
+
+  private nextOpId(prefix: string): string {
+    this.opCounter += 1;
+    return `${prefix}_${Date.now()}_${this.opCounter}`;
+  }
+
+  private handleControlMessage(msg: ControlMessage): void {
+    switch (msg.type) {
+      case 'connected':
+        this.metadata = msg;
+        if (this.connectResolve) {
+          const resolve = this.connectResolve;
+          this.connectResolve = null;
+          this.connectReject = null;
+          resolve(msg);
+        }
+        break;
+      case 'error':
+        if (this.connectReject) {
+          const reject = this.connectReject;
+          this.connectResolve = null;
+          this.connectReject = null;
+          reject(new Error(`${msg.code}: ${msg.message}`));
+        } else if (msg.fatal) {
+          this.params.onFatalError?.(msg.code, msg.message);
+        }
+        break;
+      case 'exec_result': {
+        const waiter = this.pendingExec.get(msg.opId);
+        if (waiter) {
+          this.pendingExec.delete(msg.opId);
+          waiter.resolve(msg);
+        }
+        break;
+      }
+      case 'sftp_result': {
+        const waiter = this.pendingSftp.get(msg.opId);
+        if (waiter) {
+          this.pendingSftp.delete(msg.opId);
+          waiter.resolve(msg);
+        }
+        break;
+      }
+      case 'tunnel_result': {
+        const waiter = this.pendingTunnel.get(msg.opId);
+        if (waiter) {
+          this.pendingTunnel.delete(msg.opId);
+          waiter.resolve(msg);
+        }
+        break;
+      }
+      case 'channel_opened': {
+        const waiter = this.pendingChannelOpen.get(msg.opId);
+        if (waiter) {
+          this.pendingChannelOpen.delete(msg.opId);
+          waiter.resolve(msg);
+        }
+        break;
+      }
+      case 'channel_closed':
+        this.params.onChannelClosed?.(msg.channel, msg.exitCode ?? 0);
+        break;
+    }
+  }
+
+  async connect(): Promise<ConnectedSessionMetadata> {
+    const wsUrl = resolveGatewayWsUrl(this.params.gatewayUrl);
+    return new Promise<ConnectedSessionMetadata>((resolve, reject) => {
+      this.connectResolve = resolve;
+      this.connectReject = reject;
+
+      let wsOpened = false;
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(wsUrl);
+      } catch (err) {
+        this.connectResolve = null;
+        this.connectReject = null;
+        reject(new GatewayUnreachableError(wsUrl, err instanceof Error ? err.message : String(err)));
+        return;
+      }
+
+      socket.binaryType = 'arraybuffer';
+      this.ws = socket;
+
+      const openTimeout = setTimeout(() => {
+        if (!wsOpened) {
+          try {
+            socket.close();
+          } catch {
+            // ignore
+          }
+          if (this.connectReject) {
+            const rej = this.connectReject;
+            this.connectResolve = null;
+            this.connectReject = null;
+            rej(new GatewayUnreachableError(wsUrl, 'Connection timed out'));
+          }
+        }
+      }, 6000);
+
+      socket.onopen = () => {
+        wsOpened = true;
+        clearTimeout(openTimeout);
+        this.transport.attachSender((bytes) => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(bytes);
+          }
+        });
+        this.transport.sendControl({
+          type: 'hello',
+          protocolVersion: 1,
+          clientVersion: '1.0.0'
+        });
+        this.transport.sendControl({
+          type: 'connect',
+          host: this.params.host,
+          port: this.params.port,
+          user: this.params.user,
+          authMethod: this.params.authMethod,
+          password: this.params.password,
+          privateKeyPem: this.params.privateKeyPem,
+          privateKeyPassphrase: this.params.privateKeyPassphrase,
+          publicKey: this.params.publicKey,
+          keyFingerprint: this.params.keyFingerprint ?? '',
+          cols: this.params.cols,
+          rows: this.params.rows
+        });
+        this.transport.sendPing();
+        this.pingTimer = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            this.transport.sendPing();
+          }
+        }, 5000);
+      };
+
+      socket.onmessage = (ev: MessageEvent) => {
+        if (ev.data instanceof ArrayBuffer) {
+          void this.transport.handleInboundBytes(new Uint8Array(ev.data));
+        } else if (ev.data instanceof Blob) {
+          void ev.data.arrayBuffer().then((buf) => this.transport.handleInboundBytes(new Uint8Array(buf)));
+        }
+      };
+
+      socket.onerror = () => {
+        clearTimeout(openTimeout);
+        if (!wsOpened && this.connectReject) {
+          const rej = this.connectReject;
+          this.connectResolve = null;
+          this.connectReject = null;
+          rej(new GatewayUnreachableError(wsUrl));
+        }
+      };
+
+      socket.onclose = () => {
+        clearTimeout(openTimeout);
+        if (this.pingTimer) {
+          clearInterval(this.pingTimer);
+          this.pingTimer = null;
+        }
+        this.transport.detachSender(false);
+        if (this.connectReject) {
+          const rej = this.connectReject;
+          this.connectResolve = null;
+          this.connectReject = null;
+          rej(
+            wsOpened
+              ? new Error('Gateway connection closed before SSH session completed.')
+              : new GatewayUnreachableError(wsUrl)
+          );
+        }
+        this.rejectAllPending(new Error('SSH session disconnected.'));
+      };
+    });
+  }
+
+  private rejectAllPending(err: Error): void {
+    for (const [, w] of this.pendingExec) w.reject(err);
+    this.pendingExec.clear();
+    for (const [, w] of this.pendingSftp) w.reject(err);
+    this.pendingSftp.clear();
+    for (const [, w] of this.pendingTunnel) w.reject(err);
+    this.pendingTunnel.clear();
+    for (const [, w] of this.pendingChannelOpen) w.reject(err);
+    this.pendingChannelOpen.clear();
+  }
+
+  sendPtyText(channel: number, text: string): boolean {
+    return this.transport.sendPtyInput(channel, this.textEncoder.encode(text));
+  }
+
+  sendPtyBytes(channel: number, bytes: Uint8Array): boolean {
+    return this.transport.sendPtyInput(channel, bytes);
+  }
+
+  resizeChannel(channel: number, cols: number, rows: number): void {
+    this.transport.sendControl({
+      type: 'resize',
+      channel,
+      cols,
+      rows
+    });
+  }
+
+  closeChannel(channel: number): void {
+    this.transport.sendControl({
+      type: 'close_channel',
+      channel
+    });
+  }
+
+  openChannel(
+    cols: number,
+    rows: number,
+    requestedChannel?: number
+  ): Promise<Extract<ControlMessage, { type: 'channel_opened' }>> {
+    const opId = this.nextOpId('chan');
+    return new Promise((resolve, reject) => {
+      this.pendingChannelOpen.set(opId, { resolve, reject });
+      this.transport.sendControl({
+        type: 'open_channel',
+        opId,
+        channel: requestedChannel,
+        cols,
+        rows
+      });
+    });
+  }
+
+  execCommand(
+    command: string,
+    timeoutMs = 15000
+  ): Promise<Extract<ControlMessage, { type: 'exec_result' }>> {
+    const opId = this.nextOpId('exec');
+    return new Promise((resolve, reject) => {
+      this.pendingExec.set(opId, { resolve, reject });
+      this.transport.sendControl({
+        type: 'exec_command',
+        opId,
+        command,
+        timeoutMs
+      });
+    });
+  }
+
+  sftpOp(
+    params: Omit<Extract<ControlMessage, { type: 'sftp_op' }>, 'type' | 'opId'>
+  ): Promise<Extract<ControlMessage, { type: 'sftp_result' }>> {
+    const opId = this.nextOpId('sftp');
+    return new Promise((resolve, reject) => {
+      this.pendingSftp.set(opId, { resolve, reject });
+      this.transport.sendControl({
+        type: 'sftp_op',
+        opId,
+        ...params
+      });
+    });
+  }
+
+  tunnelOp(
+    params: Omit<Extract<ControlMessage, { type: 'tunnel_op' }>, 'type' | 'opId'>
+  ): Promise<Extract<ControlMessage, { type: 'tunnel_result' }>> {
+    const opId = this.nextOpId('tun');
+    return new Promise((resolve, reject) => {
+      this.pendingTunnel.set(opId, { resolve, reject });
+      this.transport.sendControl({
+        type: 'tunnel_op',
+        opId,
+        ...params
+      });
+    });
+  }
+
+  close(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    this.transport.detachSender(false);
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+    this.metadata = null;
+    this.rejectAllPending(new Error('Session closed by user.'));
+  }
+}
+

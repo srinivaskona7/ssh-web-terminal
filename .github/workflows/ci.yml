@@ -92,6 +92,8 @@ jobs:
         run: npx playwright install --with-deps ${{ matrix.browser }}
 
       - name: Build tokens & web bundle
+        env:
+          VITE_BASE_PATH: /ssh-web-terminal/
         run: npm run build
 
       - name: Run Playwright suite (${{ matrix.browser }})

@@ -6,13 +6,317 @@
     <meta name="referrer" content="no-referrer" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self' ws: wss: http: https:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:;"
+      content="default-src 'self'; connect-src 'self' ws: wss: http: https:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; script-src 'self' 'unsafe-inline';"
     />
     <link rel="manifest" href="./manifest.webmanifest" />
     <title>WebSSH Studio</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #0b0d12;
+        color: #e6edf3;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      }
+      #startup-shell {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        padding: 24px;
+        box-sizing: border-box;
+        text-align: center;
+      }
+      #startup-shell[hidden] {
+        display: none !important;
+      }
+      .startup-card {
+        width: 100%;
+        max-width: 520px;
+        background: #11151d;
+        border: 1px solid #343e52;
+        border-radius: 12px;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      .startup-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      .startup-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 9999px;
+        background: #171c26;
+        border: 1px solid #343e52;
+        color: #9da7b3;
+        font-size: 11px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .startup-detail {
+        color: #9da7b3;
+        font-size: 13px;
+        line-height: 1.45;
+        margin: 8px 0 0;
+      }
+      .startup-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .startup-actions[hidden] {
+        display: none !important;
+      }
+      .startup-btn {
+        padding: 8px 14px;
+        border-radius: 8px;
+        border: 1px solid #343e52;
+        background: #171c26;
+        color: #e6edf3;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .startup-btn--primary {
+        border-color: #4f8cff;
+        background: #4f8cff;
+        color: #0b0d12;
+      }
+      .startup-diag {
+        margin-top: 14px;
+        padding: 10px;
+        border-radius: 8px;
+        background: #0b0d12;
+        border: 1px solid #232a38;
+        color: #9da7b3;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        text-align: left;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .startup-diag[hidden] {
+        display: none !important;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
+    <div id="startup-shell" role="status" aria-live="polite" data-testid="startup-loading-shell">
+      <div class="startup-card">
+        <div class="startup-header">
+          <strong id="startup-title" data-testid="startup-shell-title">Starting WebSSH Studio…</strong>
+          <span class="startup-badge" id="startup-version" data-testid="startup-shell-version">
+            __WEBSSH_BUILD_VERSION__
+          </span>
+        </div>
+        <p id="startup-detail" class="startup-detail" data-testid="startup-shell-detail">
+          Initializing terminal workspace and non-extractable WebCrypto vault.
+        </p>
+        <div id="startup-actions" class="startup-actions" hidden data-testid="startup-shell-actions">
+          <button
+            type="button"
+            class="startup-btn startup-btn--primary"
+            id="startup-retry-btn"
+            data-testid="startup-retry-btn"
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            class="startup-btn"
+            id="startup-repair-cache-btn"
+            data-testid="startup-repair-cache-btn"
+          >
+            Repair Asset Cache &amp; Reload
+          </button>
+          <button
+            type="button"
+            class="startup-btn"
+            id="startup-copy-diag-btn"
+            data-testid="startup-copy-diag-btn"
+          >
+            Copy Safe Diagnostics
+          </button>
+        </div>
+        <pre id="startup-diag" class="startup-diag" hidden data-testid="startup-shell-diagnostics"></pre>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var BUILD_VERSION = '__WEBSSH_BUILD_VERSION__';
+        window.__WEBSSH_BUILD_VERSION__ = BUILD_VERSION;
+
+        var shell = document.getElementById('startup-shell');
+        var titleEl = document.getElementById('startup-title');
+        var detailEl = document.getElementById('startup-detail');
+        var actionsEl = document.getElementById('startup-actions');
+        var diagEl = document.getElementById('startup-diag');
+        var retryBtn = document.getElementById('startup-retry-btn');
+        var repairBtn = document.getElementById('startup-repair-cache-btn');
+        var copyBtn = document.getElementById('startup-copy-diag-btn');
+        var startupTimer = null;
+
+        function sanitizeReason(raw) {
+          var str = String(raw || 'Application bundle failed to initialize.');
+          return str
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 240)
+            .replace(/-----BEGIN [A-Z0-9 ]+-----[\s\S]*/gi, '[REDACTED_KEY]')
+            .replace(/(?:password|passphrase|secret|token|authorization)\s*[:=]\s*\S+/gi, '[REDACTED]');
+        }
+
+        function buildStartupDiagnostics(reason) {
+          return JSON.stringify(
+            {
+              buildVersion: BUILD_VERSION,
+              timestamp: new Date().toISOString(),
+              pathname: window.location.pathname,
+              online: Boolean(navigator.onLine),
+              serviceWorkerControlled: Boolean(
+                navigator.serviceWorker && navigator.serviceWorker.controller
+              ),
+              reason: sanitizeReason(reason)
+            },
+            null,
+            2
+          );
+        }
+
+        async function repairAssetCacheOnly() {
+          try {
+            if ('serviceWorker' in navigator) {
+              var regs = await navigator.serviceWorker.getRegistrations();
+              for (var i = 0; i < regs.length; i++) {
+                await regs[i].unregister();
+              }
+            }
+            if ('caches' in window) {
+              var keys = await window.caches.keys();
+              for (var j = 0; j < keys.length; j++) {
+                if (keys[j].indexOf('webssh-studio-shell') === 0) {
+                  await window.caches.delete(keys[j]);
+                }
+              }
+            }
+          } catch (_err) {
+            // Preserve localStorage and IndexedDB; ignore restricted SW/Cache errors
+          }
+        }
+
+        window.__websshRepairAssetCacheAndReload = async function () {
+          await repairAssetCacheOnly();
+          var nextUrl = new URL(window.location.href);
+          nextUrl.searchParams.set('repaired', String(Date.now()));
+          window.location.replace(nextUrl.toString());
+        };
+
+        window.__websshMarkReady = function () {
+          if (startupTimer) {
+            clearTimeout(startupTimer);
+            startupTimer = null;
+          }
+          if (shell) {
+            shell.setAttribute('hidden', 'hidden');
+          }
+          try {
+            sessionStorage.removeItem('webssh_startup_auto_repaired');
+          } catch (_e) {}
+        };
+
+        window.__websshReportStartupError = function (rawReason) {
+          var appRoot = document.getElementById('app');
+          if (appRoot && appRoot.children.length > 0) return;
+
+          var cleanReason = sanitizeReason(rawReason);
+
+          try {
+            var alreadyRepaired = sessionStorage.getItem('webssh_startup_auto_repaired');
+            if (!alreadyRepaired && navigator.serviceWorker && navigator.serviceWorker.controller) {
+              sessionStorage.setItem('webssh_startup_auto_repaired', '1');
+              void window.__websshRepairAssetCacheAndReload();
+              return;
+            }
+          } catch (_e) {}
+
+          if (shell) shell.removeAttribute('hidden');
+          if (titleEl) titleEl.textContent = 'WebSSH Studio could not finish starting';
+          if (detailEl) {
+            detailEl.textContent =
+              cleanReason +
+              ' — Saved hosts, Key Vault keys, and preferences in browser storage were preserved.';
+          }
+          if (actionsEl) actionsEl.removeAttribute('hidden');
+          if (diagEl) {
+            diagEl.textContent = buildStartupDiagnostics(cleanReason);
+            diagEl.removeAttribute('hidden');
+          }
+        };
+
+        if (retryBtn) {
+          retryBtn.addEventListener('click', function () {
+            window.location.reload();
+          });
+        }
+
+        if (repairBtn) {
+          repairBtn.addEventListener('click', function () {
+            void window.__websshRepairAssetCacheAndReload();
+          });
+        }
+
+        if (copyBtn) {
+          copyBtn.addEventListener('click', function () {
+            var text = diagEl ? diagEl.textContent || '' : buildStartupDiagnostics('Manual diagnostic copy');
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+              void navigator.clipboard.writeText(text).catch(function () {});
+            }
+            copyBtn.textContent = 'Copied Diagnostics';
+          });
+        }
+
+        window.addEventListener(
+          'error',
+          function (evt) {
+            var appRoot = document.getElementById('app');
+            if (appRoot && appRoot.children.length > 0) return;
+            var target = evt && evt.target;
+            if (target && (target.tagName === 'SCRIPT' || target.tagName === 'LINK')) {
+              var assetUrl = target.src || target.href || 'static bundle';
+              window.__websshReportStartupError('Failed to load asset: ' + assetUrl);
+              return;
+            }
+            if (evt && evt.message) {
+              window.__websshReportStartupError(evt.message);
+            }
+          },
+          true
+        );
+
+        window.addEventListener('unhandledrejection', function (evt) {
+          var appRoot = document.getElementById('app');
+          if (appRoot && appRoot.children.length > 0) return;
+          var reason = evt && evt.reason ? evt.reason.message || String(evt.reason) : 'Unhandled startup promise rejection';
+          window.__websshReportStartupError(reason);
+        });
+
+        startupTimer = setTimeout(function () {
+          var appRoot = document.getElementById('app');
+          if (!appRoot || appRoot.children.length === 0) {
+            window.__websshReportStartupError('Timed out waiting for application shell to mount.');
+          }
+        }, 5000);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

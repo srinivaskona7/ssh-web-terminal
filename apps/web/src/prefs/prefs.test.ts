@@ -83,4 +83,26 @@ describe('PreferencesStore, theme editor, per-host overrides, and v1->v2 migrati
     const res = validateCustomThemeContrast(lowContrast);
     expect(res.passesAA).toBe(false);
   });
+
+  it('recovers only malformed preference fields while preserving valid user settings', () => {
+    const recovered = migratePreferences({
+      schemaVersion: 2,
+      activeThemeId: 'deleted-nonexistent-theme',
+      layoutPreset: 'invalid-layout',
+      typography: {
+        fontFamily: 'Fira Code',
+        fontSize: Number.NaN,
+        lineHeight: null
+      },
+      surface: null,
+      storageLimits: 'corrupted'
+    });
+    expect(recovered.activeThemeId).toBe('dark');
+    expect(recovered.layoutPreset).toBe('sidebar-left');
+    expect(recovered.typography.fontFamily).toBe('Fira Code');
+    expect(recovered.typography.fontSize).toBe(13);
+    expect(recovered.typography.lineHeight).toBe(1.45);
+    expect(recovered.surface.cursorShape).toBe('block');
+    expect(recovered.storageLimits.maxScrollbackLines).toBe(10_000);
+  });
 });

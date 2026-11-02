@@ -1,13 +1,15 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "preact/jsx-runtime";
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { Badge, Button, Card, ComponentGallery, EmptyState, Icon, Modal, THEME_IDS, THEMES, applyThemeToDocument } from '@webssh/ui-kit';
-import { KeyVault } from '../vault';
+import { KeyVault, KnownHostsStore, base64ToBytes, bytesToBase64, validateAndInspectPrivateKeyPem } from '../vault';
 import { HostRegistry } from '../hosts';
 import { PreferencesStore } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
+import { LiveGatewaySessionClient, resolveGatewayWsUrl } from '../transport';
 import { AsciicastRecorder, CommandPaletteRegistry, KeybindingRegistry, SPECIAL_KEYS_ROW, SnippetLibrary, interpolateSnippet, parseAsciicastV2, scrubAsciicastOutput } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
 import { computeGhostAutocomplete, computeSideBySideDiff, detectDangerousCommand, formatChmodOctal, redactSecretsInText } from './advanced-features';
+import { repairApplicationAssetCaches } from './ErrorBoundary';
 export const FIFTY_FEATURES_CATALOG = [
     { id: 1, category: 'Connection', title: 'In-browser key generation (Ed25519 / ECDSA P-256)', description: 'Generate non-extractable WebCrypto SSH key pairs stored in IndexedDB.', targetScreen: 'vault', actionLabel: 'Generate Key in Vault' },
     { id: 2, category: 'Connection', title: 'Public key export (authorized_keys snippet)', description: 'Copy one-line OpenSSH authorized_keys deployment command.', targetScreen: 'vault', actionLabel: 'Copy Public Key Snippet' },
@@ -68,6 +70,9 @@ export function App() {
     const prefsStore = useMemo(() => new PreferencesStore(), []);
     const hostRegistry = useMemo(() => new HostRegistry(), []);
     const vault = useMemo(() => new KeyVault(), []);
+    const knownHosts = useMemo(() => new KnownHostsStore(), []);
+    const liveSessionRef = useRef(null);
+    const hostKeyDecisionResolverRef = useRef(null);
     const storageGuard = useMemo(() => new StorageGuard(), []);
     const snippetLib = useMemo(() => new SnippetLibrary([
         {
@@ -105,9 +110,12 @@ export function App() {
     // Default to clean Welcome screen & Minimal Mode (IDE mode disabled until requested)
     const [activeScreen, setActiveScreen] = useState('welcome');
     const [ideMode, setIdeMode] = useState(false);
-    const [activeTheme, setActiveTheme] = useState(prefsStore.get().activeThemeId || 'dark');
-    const [layoutPreset, setLayoutPreset] = useState('sidebar-left');
-    const [cursorShape, setCursorShape] = useState('block');
+    const [activeTheme, setActiveTheme] = useState(() => {
+        const stored = prefsStore.get().activeThemeId;
+        return THEME_IDS.includes(stored) ? stored : 'dark';
+    });
+    const [layoutPreset, setLayoutPreset] = useState(() => prefsStore.get().layoutPreset);
+    const [cursorShape, setCursorShape] = useState(() => prefsStore.get().surface.cursorShape);
     const [zenMode, setZenMode] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [isPseudoFullscreen, setIsPseudoFullscreen] = useState(false);
@@ -122,7 +130,8 @@ export function App() {
     const [paletteOpen, setPaletteOpen] = useState(false);
     const [paletteQuery, setPaletteQuery] = useState('');
     const [hostKeyModal, setHostKeyModal] = useState('none');
-    const [hosts, setHosts] = useState([]);
+    const [hosts, setHosts] = useState(() => hostRegistry.list());
+    const [cacheRepairStatus, setCacheRepairStatus] = useState('');
     const [hostSearch, setHostSearch] = useState('');
     const [sshConfigInput, setSshConfigInput] = useState('');
     const [generatedPubKey, setGeneratedPubKey] = useState('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWebSSHStudioBrowserNonExtractableKey webssh@browser');
@@ -131,10 +140,17 @@ export function App() {
     const [fileFilter, setFileFilter] = useState('');
     const [transferStatus, setTransferStatus] = useState('Disconnected — Connect to an SSH host to browse SFTP files');
     const [sftpRawEntries, setSftpRawEntries] = useState([]);
-    const [editorOriginalContent] = useState('');
+    const [sftpCurrentPath, setSftpCurrentPath] = useState('~');
+    const [editorFilePath, setEditorFilePath] = useState('README.md');
+    const [editorOriginalContent, setEditorOriginalContent] = useState('');
     const [editorContent, setEditorContent] = useState('');
     const [editorSaved, setEditorSaved] = useState(true);
     const [showDiffViewer, setShowDiffViewer] = useState(false);
+    const [gatewayUrl, setGatewayUrl] = useState(() => resolveGatewayWsUrl());
+    const [negotiatedCipher, setNegotiatedCipher] = useState('chacha20-poly1305@openssh.com');
+    const [negotiatedServerVersion, setNegotiatedServerVersion] = useState('');
+    const [pendingHostKeyPrompt, setPendingHostKeyPrompt] = useState(null);
+    const [tunnelPreviewOutput, setTunnelPreviewOutput] = useState('Connect to an SSH host and click Probe HTTP Preview to inspect remote localhost HTTP responses.');
     const [scrubberSec, setScrubberSec] = useState(2.5);
     const [snippetVarService, setSnippetVarService] = useState('sshd');
     const [snippetVarLines, setSnippetVarLines] = useState('50');
@@ -246,25 +262,75 @@ export function App() {
         setCopiedSnippet(true);
         setTimeout(() => setCopiedSnippet(false), 2000);
     };
+    const refreshSftpDirectory = async (targetPath = sftpCurrentPath, sessionClient = liveSessionRef.current) => {
+        if (!sessionClient || !sessionClient.isConnected) {
+            setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
+            return;
+        }
+        try {
+            const res = await sessionClient.sftpOp({ op: 'list', path: targetPath });
+            if (res.ok && res.entries) {
+                setSftpCurrentPath(targetPath);
+                setSftpRawEntries(res.entries);
+                setTransferStatus(`Listed ${res.entries.length} remote items in ${targetPath}`);
+            }
+            else {
+                setTransferStatus(`SFTP list error: ${res.error ?? 'Unknown error'}`);
+            }
+        }
+        catch (err) {
+            setTransferStatus(`SFTP list failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    };
+    const loadRemoteFileIntoEditor = async (remotePath = editorFilePath, sessionClient = liveSessionRef.current) => {
+        if (!sessionClient || !sessionClient.isConnected) {
+            return;
+        }
+        try {
+            const res = await sessionClient.sftpOp({ op: 'read_file', path: remotePath });
+            if (res.ok && res.dataBase64 !== undefined) {
+                const text = new TextDecoder().decode(base64ToBytes(res.dataBase64));
+                setEditorFilePath(remotePath);
+                setEditorOriginalContent(text);
+                setEditorContent(text);
+                setEditorSaved(true);
+            }
+        }
+        catch {
+            // Ignore if file does not exist yet
+        }
+    };
     const handleAddTab = () => {
         const nextNum = tabs.length + 1;
         const newId = `tab-${Date.now()}-${nextNum}`;
-        const newTitle = `Terminal ${nextNum}`;
-        setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: false }]);
+        const isLive = Boolean(liveSessionRef.current?.isConnected);
+        const newTitle = isLive
+            ? `Terminal ${nextNum} (${connectedUser}@${connectedHost})`
+            : `Terminal ${nextNum}`;
+        setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: isLive }]);
         setActiveTabId(newId);
         setSessionTabLabel(newTitle);
         setActiveScreen('workspace');
+        if (liveSessionRef.current?.isConnected) {
+            void liveSessionRef.current.openChannel(cols, rows).catch(() => {
+                // Ignore channel open errors
+            });
+        }
     };
     const handleCloseTab = (tabId, e) => {
         if (e)
             e.stopPropagation();
         if (tabs.length <= 1) {
+            liveSessionRef.current?.close();
+            liveSessionRef.current = null;
             setConnectionState('disconnected');
             setSessionTabLabel('Terminal 1');
             setConnectedUser('bob');
             setConnectedHost('caleston-lp10');
             setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false }]);
             setActiveTabId('tab-1');
+            setSftpRawEntries([]);
+            setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
             setTerminalLines([
                 'WebSSH Studio v1.0.0',
                 "Type 'help' for local commands or click 'New Connection' to authenticate."
@@ -279,12 +345,14 @@ export function App() {
         }
     };
     const handleDisconnect = () => {
+        liveSessionRef.current?.close();
+        liveSessionRef.current = null;
         setConnectionState('disconnected');
         setPendingInputBytes(0);
+        setSftpRawEntries([]);
+        setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
         setTerminalLines((prev) => [...prev, `Disconnected from ${sessionTabLabel}.`]);
-        writeToXterm(`
-Disconnected from ${sessionTabLabel}.
-webssh:~$ `);
+        writeToXterm(`${String.fromCharCode(13, 10)}Disconnected from ${sessionTabLabel}.${String.fromCharCode(13, 10)}webssh:~$ `);
         const resetTitle = 'Terminal 1';
         setSessionTabLabel(resetTitle);
         setConnectedUser('bob');
@@ -301,10 +369,19 @@ webssh:~$ `);
         setConnectErrorMsg('');
         try {
             const text = typeof file.text === 'function' ? await file.text() : '';
-            setUploadedKeyContent(text || `-----BEGIN OPENSSH PRIVATE KEY----- (${file.name})`);
+            setUploadedKeyContent(text);
+            if (text.trim()) {
+                const check = await validateAndInspectPrivateKeyPem(text);
+                if (!check.valid) {
+                    setConnectErrorMsg(check.error ?? 'Invalid private key format');
+                }
+                else if (check.fingerprint) {
+                    setGeneratedFp(check.fingerprint);
+                }
+            }
         }
         catch {
-            setUploadedKeyContent(`-----BEGIN OPENSSH PRIVATE KEY----- (${file.name})`);
+            setUploadedKeyContent('');
         }
     };
     const handleConnectSubmit = (e) => {
@@ -315,17 +392,17 @@ webssh:~$ `);
             return;
         }
         setConnectErrorMsg('');
-        const hostVal = connectHost.trim() || 'caleston-lp10';
-        const userVal = connectUser.trim() || 'bob';
+        const hostVal = connectHost.trim() || '127.0.0.1';
+        const userVal = connectUser.trim() || 'ubuntu';
         const portVal = connectPort.trim() || '22';
+        const portNum = Number.parseInt(portVal, 10) || 22;
         const label = `${userVal}@${hostVal}`;
         const tabTitle = `Terminal 1 (${label})`;
-        // Save connected host cleanly into HostRegistry
         hostRegistry.upsert({
             id: `host-${hostVal}-${portVal}`,
             alias: hostVal,
             host: hostVal,
-            port: Number.parseInt(portVal, 10) || 22,
+            port: portNum,
             user: userVal,
             folder: 'Connected',
             tags: [authMethod === 'Password' ? 'password' : 'key-400'],
@@ -336,26 +413,122 @@ webssh:~$ `);
         setConnectedUser(userVal);
         setConnectedHost(hostVal);
         setSessionTabLabel(tabTitle);
-        setTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, title: tabTitle, connected: true } : t)));
-        setConnectionState('connected');
-        setConnectModalOpen(false);
-        setActiveScreen('workspace');
-        const authDetail = authMethod === 'Private Key (.pem / id_rsa)'
-            ? `Private Key ${uploadedKeyFileName || 'id_ed25519'} [chmod ${keyPermissionMode}]`
-            : authMethod;
-        const msg = `Connected to ${label}:${portVal} (${authDetail})`;
-        setTerminalLines((prev) => [...prev, msg]);
-        writeToXterm(`
-${msg}
-webssh:~$ `);
+        void (async () => {
+            if (authMethod === 'Private Key (.pem / id_rsa)' && uploadedKeyContent.trim()) {
+                const keyCheck = await validateAndInspectPrivateKeyPem(uploadedKeyContent);
+                if (!keyCheck.valid) {
+                    setConnectErrorMsg(keyCheck.error ?? 'Invalid private key PEM format.');
+                    return;
+                }
+            }
+            liveSessionRef.current?.close();
+            const protocolAuthMethod = authMethod === 'Password'
+                ? 'password'
+                : authMethod === 'Private Key (.pem / id_rsa)'
+                    ? 'private_key'
+                    : 'remote_signer';
+            const client = new LiveGatewaySessionClient({
+                gatewayUrl,
+                host: hostVal,
+                port: portNum,
+                user: userVal,
+                authMethod: protocolAuthMethod,
+                password: connectPassword,
+                privateKeyPem: authMethod === 'Private Key (.pem / id_rsa)' ? uploadedKeyContent : undefined,
+                publicKey: authMethod === 'Argon2id Ed25519 Key' ? generatedPubKey : undefined,
+                keyFingerprint: generatedFp,
+                cols,
+                rows,
+                onPtyData: (_channel, data) => {
+                    try {
+                        xtermAdapterRef.current?.writeBytes(data);
+                    }
+                    catch {
+                        // ignore
+                    }
+                    const rawText = new TextDecoder().decode(data);
+                    const cleaned = rawText
+                        .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+                        .replace(/\r/g, '')
+                        .split('\n')
+                        .map((l) => l.trimEnd())
+                        .filter((l) => l.length > 0);
+                    if (cleaned.length > 0) {
+                        setTerminalLines((prev) => [...prev.slice(-200), ...cleaned]);
+                    }
+                },
+                onHostKeyPrompt: async (prompt) => {
+                    const v = knownHosts.verify(prompt.host, prompt.port, prompt.algorithm, prompt.fingerprint, prompt.publicKeyBase64);
+                    if (v.status === 'trusted') {
+                        return true;
+                    }
+                    if (v.status === 'mismatch') {
+                        setPendingHostKeyPrompt({
+                            host: prompt.host,
+                            port: prompt.port,
+                            algorithm: prompt.algorithm,
+                            fingerprint: prompt.fingerprint,
+                            publicKeyBase64: prompt.publicKeyBase64,
+                            expectedFingerprint: v.expectedFingerprint
+                        });
+                        setHostKeyModal('mismatch');
+                        return new Promise((resolve) => {
+                            hostKeyDecisionResolverRef.current = resolve;
+                        });
+                    }
+                    knownHosts.trustNewHost(prompt.host, prompt.port, prompt.algorithm, prompt.fingerprint, prompt.publicKeyBase64);
+                    return true;
+                },
+                onSignRequest: async (req) => {
+                    const allKeys = vault.listKeys();
+                    if (allKeys[0]) {
+                        const resp = await vault.signChallenge(allKeys[0].id, base64ToBytes(req.dataBase64));
+                        return bytesToBase64(resp.rawWebCryptoSignature);
+                    }
+                    return '';
+                },
+                onStateChange: (st) => {
+                    if (st === 'disconnected') {
+                        setConnectionState('disconnected');
+                    }
+                }
+            });
+            try {
+                const meta = await client.connect();
+                liveSessionRef.current = client;
+                setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
+                setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
+                setTabs((prev) => prev.map((t) => (t.id === activeTabId ? { ...t, title: tabTitle, connected: true } : t)));
+                setConnectionState('connected');
+                setConnectModalOpen(false);
+                setActiveScreen('workspace');
+                const authDetail = authMethod === 'Private Key (.pem / id_rsa)'
+                    ? `Private Key ${uploadedKeyFileName || 'id_ed25519'} [chmod ${keyPermissionMode}]`
+                    : authMethod;
+                const msg = `Connected to ${label}:${portVal} (${authDetail} · ${meta.serverVersion || 'SSH-2.0'})`;
+                setTerminalLines((prev) => [...prev, msg]);
+                writeToXterm(`${String.fromCharCode(13, 10)}${msg}${String.fromCharCode(13, 10)}`);
+                if (meta.sftpReady) {
+                    void refreshSftpDirectory('~', client);
+                    void loadRemoteFileIntoEditor('README.md', client);
+                }
+            }
+            catch (err) {
+                liveSessionRef.current = null;
+                setConnectionState('disconnected');
+                const errMsg = err instanceof Error ? err.message : String(err);
+                setConnectErrorMsg(errMsg);
+                setTerminalLines((prev) => [...prev, `[SSH Connection Error] ${errMsg}`]);
+            }
+        })();
     };
-    const appendCommandBlock = (command, outputLines, exitCode = 0) => {
+    const appendCommandBlock = (command, outputLines, exitCode = 0, durationMs = 12) => {
         const entry = {
             id: `block-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
             command,
             outputLines,
-            timestamp: '08:15:10',
-            durationMs: 28,
+            timestamp: new Date().toISOString().slice(11, 19),
+            durationMs,
             exitCode,
             collapsed: false
         };
@@ -398,9 +571,7 @@ webssh:~$ `);
             const helpMsg = 'Available local commands: connect <user@host>, pubkey, font <size>, clear, vault, split, features, telemetry, tunnels, playbooks';
             setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, helpMsg]);
             appendCommandBlock(trimmed, [helpMsg], 0);
-            writeToXterm(`
-${helpMsg}
-webssh:~$ `);
+            writeToXterm(`${String.fromCharCode(13, 10)}${helpMsg}${String.fromCharCode(13, 10)}webssh:~$ `);
             return;
         }
         if (cmd === 'pubkey') {
@@ -408,9 +579,7 @@ webssh:~$ `);
             const out = [`Ed25519 Public Key: ${generatedPubKey}`, `Copy helper: ${authorizedKeysSnippet}`];
             setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, ...out]);
             appendCommandBlock(trimmed, out, 0);
-            writeToXterm(`
-Ed25519 Public Key: ${generatedPubKey}
-webssh:~$ `);
+            writeToXterm(`${String.fromCharCode(13, 10)}Ed25519 Public Key: ${generatedPubKey}${String.fromCharCode(13, 10)}webssh:~$ `);
             return;
         }
         if (cmd === 'font') {
@@ -421,9 +590,7 @@ webssh:~$ `);
                 const msg = `Terminal font size set to ${clamped}px.`;
                 setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
                 appendCommandBlock(trimmed, [msg], 0);
-                writeToXterm(`
-${msg}
-webssh:~$ `);
+                writeToXterm(`${String.fromCharCode(13, 10)}${msg}${String.fromCharCode(13, 10)}webssh:~$ `);
             }
             else {
                 const msg = 'Usage: font <size> (11-32)';
@@ -493,12 +660,39 @@ webssh:~$ `);
             setActiveScreen('playbooks');
             return;
         }
-        const unknownMsg = `Executed remote/shell command: ${trimmed}`;
-        setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, unknownMsg]);
-        appendCommandBlock(trimmed, [unknownMsg], 0);
-        writeToXterm(`
-${unknownMsg}
-webssh:~$ `);
+        const activeClient = liveSessionRef.current;
+        if (activeClient && activeClient.isConnected) {
+            setTerminalLines((prev) => [...prev, `${connectedUser}@${connectedHost}:~$ ${trimmed}`]);
+            if (broadcastInput && splitPanes > 1) {
+                activeClient.sendPtyText(2, trimmed + String.fromCharCode(13));
+            }
+            void activeClient
+                .execCommand(trimmed)
+                .then((res) => {
+                const outText = [res.stdout, res.stderr, res.error]
+                    .filter((part) => Boolean(part && part.trim().length > 0))
+                    .join(String.fromCharCode(10));
+                const outLines = outText
+                    ? outText
+                        .replace(/\r/g, '')
+                        .split(String.fromCharCode(10))
+                        .filter((line) => line.length > 0)
+                    : [`(exit ${res.exitCode ?? 0})`];
+                setTerminalLines((prev) => [...prev, ...outLines]);
+                appendCommandBlock(trimmed, outLines, res.exitCode ?? (res.ok ? 0 : 1), res.durationMs ?? 10);
+                writeToXterm(`${String.fromCharCode(13, 10)}${outLines.join(String.fromCharCode(13, 10))}${String.fromCharCode(13, 10)}`);
+            })
+                .catch((err) => {
+                const errLine = `Remote execution failed: ${err instanceof Error ? err.message : String(err)}`;
+                setTerminalLines((prev) => [...prev, errLine]);
+                appendCommandBlock(trimmed, [errLine], 1, 0);
+            });
+            return;
+        }
+        const offlineMsg = `Not connected to an SSH server. Click 'New Connection' or run 'connect <user@host>' to execute '${trimmed}' on a remote host.`;
+        setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, offlineMsg]);
+        appendCommandBlock(trimmed, [offlineMsg], 1, 0);
+        writeToXterm(`${String.fromCharCode(13, 10)}${offlineMsg}${String.fromCharCode(13, 10)}webssh:~$ `);
     };
     const handleTerminalKeyDown = (e) => {
         if (e.key === 'Escape' && zenMode) {
@@ -592,6 +786,7 @@ webssh:~$ `);
                     if (!disposed) {
                         setCols(c);
                         setRows(r);
+                        liveSessionRef.current?.resizeChannel(1, c, r);
                     }
                 }
             });
@@ -1046,21 +1241,79 @@ webssh:~$ `);
                                                                                 }, children: "Web Preview" })) : (_jsx(Badge, { tone: "neutral", children: "TCP Tunnel" })) })] }, lp.port))) })] })] })] })] })) : null, activeScreen === 'tunnels' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-tunnels", children: [_jsx("h1", { children: "Port Forwarding & Network Tunneling Studio (-L / -R / -D SOCKS5)" }), _jsxs(Card, { children: [_jsx("h2", { children: "Create Custom SSH Port Forward Rule" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("label", { htmlFor: "new-tunnel-local", children: "Local Port" }), _jsx("input", { id: "new-tunnel-local", type: "number", className: "ui-input", value: newTunnelLocalPort, onInput: (e) => setNewTunnelLocalPort(e.target.value), "data-testid": "new-tunnel-local-input", style: { width: '110px' } }), _jsx("label", { htmlFor: "new-tunnel-remote", children: "Remote Port" }), _jsx("input", { id: "new-tunnel-remote", type: "number", className: "ui-input", value: newTunnelRemotePort, onInput: (e) => setNewTunnelRemotePort(e.target.value), "data-testid": "new-tunnel-remote-input", style: { width: '110px' } }), _jsx(Button, { variant: "primary", testId: "add-tunnel-btn", onClick: () => {
                                                             const lPort = Number.parseInt(newTunnelLocalPort, 10) || 8080;
                                                             const rPort = Number.parseInt(newTunnelRemotePort, 10) || 80;
-                                                            setTunnels((prev) => [
-                                                                ...prev,
-                                                                {
-                                                                    id: `tunnel-${Date.now()}`,
-                                                                    name: `Custom Tunnel :${lPort}->:${rPort}`,
-                                                                    type: 'L',
+                                                            const tunId = `tunnel-${Date.now()}`;
+                                                            const activeClient = liveSessionRef.current;
+                                                            if (activeClient && activeClient.isConnected) {
+                                                                void activeClient
+                                                                    .tunnelOp({
+                                                                    op: 'start',
+                                                                    tunnelId: tunId,
+                                                                    forwardType: 'L',
                                                                     bindAddress: '127.0.0.1',
                                                                     localPort: lPort,
                                                                     remoteHost: '127.0.0.1',
-                                                                    remotePort: rPort,
-                                                                    active: true,
-                                                                    bytesTransferred: 0
+                                                                    remotePort: rPort
+                                                                })
+                                                                    .then((res) => {
+                                                                    setTunnels((prev) => [
+                                                                        ...prev,
+                                                                        {
+                                                                            id: tunId,
+                                                                            name: `Custom Tunnel :${lPort}->:${rPort}`,
+                                                                            type: 'L',
+                                                                            bindAddress: res.boundAddress || '127.0.0.1',
+                                                                            localPort: lPort,
+                                                                            remoteHost: '127.0.0.1',
+                                                                            remotePort: rPort,
+                                                                            active: Boolean(res.ok && res.active),
+                                                                            bytesTransferred: 0
+                                                                        }
+                                                                    ]);
+                                                                });
+                                                            }
+                                                            else {
+                                                                setTunnels((prev) => [
+                                                                    ...prev,
+                                                                    {
+                                                                        id: tunId,
+                                                                        name: `Custom Tunnel :${lPort}->:${rPort}`,
+                                                                        type: 'L',
+                                                                        bindAddress: '127.0.0.1',
+                                                                        localPort: lPort,
+                                                                        remoteHost: '127.0.0.1',
+                                                                        remotePort: rPort,
+                                                                        active: true,
+                                                                        bytesTransferred: 0
+                                                                    }
+                                                                ]);
+                                                            }
+                                                        }, children: "+ Add Tunnel" })] })] }), _jsx("div", { className: "webssh-grid", children: tunnels.map((t) => (_jsxs(Card, { testId: `tunnel-card-${t.id}`, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("strong", { children: ["[-", t.type, "] ", t.name] }), _jsx(Badge, { tone: t.active ? 'success' : 'neutral', children: t.active ? 'Active' : 'Stopped' })] }), _jsxs("p", { children: [t.bindAddress, ":", t.localPort, " \u2192 ", t.remoteHost, ":", t.remotePort, " \u00B7", ' ', Math.round(t.bytesTransferred / 1024), " KiB transferred"] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", testId: `toggle-tunnel-${t.id}`, onClick: () => {
+                                                                if (t.active && liveSessionRef.current?.isConnected) {
+                                                                    void liveSessionRef.current.tunnelOp({ op: 'stop', tunnelId: t.id });
                                                                 }
-                                                            ]);
-                                                        }, children: "+ Add Tunnel" })] })] }), _jsx("div", { className: "webssh-grid", children: tunnels.map((t) => (_jsxs(Card, { testId: `tunnel-card-${t.id}`, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("strong", { children: ["[-", t.type, "] ", t.name] }), _jsx(Badge, { tone: t.active ? 'success' : 'neutral', children: t.active ? 'Active' : 'Stopped' })] }), _jsxs("p", { children: [t.bindAddress, ":", t.localPort, " \u2192 ", t.remoteHost, ":", t.remotePort, " \u00B7", ' ', Math.round(t.bytesTransferred / 1024), " KiB transferred"] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", testId: `toggle-tunnel-${t.id}`, onClick: () => setTunnels((prev) => prev.map((item) => (item.id === t.id ? { ...item, active: !item.active } : item))), children: t.active ? 'Pause Tunnel' : 'Start Tunnel' }), _jsxs(Button, { variant: "primary", onClick: () => setWebPreviewPort(t.localPort), children: ["Preview :", t.localPort] })] })] }, t.id))) }), _jsxs(Card, { testId: "remote-web-preview-card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("h2", { children: ["One-Click Web Preview \u2014 Remote localhost:", webPreviewPort] }), _jsx(Badge, { tone: "success", children: "SSH HTTP Proxy Tunnel Active" })] }), _jsxs("p", { children: ["Proxying remote ", _jsxs("code", { children: ["http://127.0.0.1:", webPreviewPort] }), " over multiplexed SSH channel #4:"] }), _jsxs("pre", { children: ["HTTP/1.1 200 OK \u00B7 Service on 127.0.0.1:", webPreviewPort, " (Grafana / Prometheus / Dev Server Ready)"] })] })] })) : null, activeScreen === 'playbooks' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-playbooks", children: [_jsx("h1", { children: "Multi-Host Playbook & Fleet Runner" }), _jsxs(Card, { children: [_jsx("label", { htmlFor: "playbook-script-input", children: "Fleet Playbook Command / Script" }), _jsx("input", { id: "playbook-script-input", type: "text", className: "ui-input", value: playbookScript, onInput: (e) => setPlaybookScript(e.target.value), "data-testid": "playbook-script-input" }), _jsx("div", { style: { marginTop: 'var(--space-2)' }, children: _jsxs(Button, { variant: "primary", testId: "run-playbook-btn", onClick: () => setPlaybookResults((prev) => prev.map((r) => ({
+                                                                setTunnels((prev) => prev.map((item) => (item.id === t.id ? { ...item, active: !item.active } : item)));
+                                                            }, children: t.active ? 'Pause Tunnel' : 'Start Tunnel' }), _jsxs(Button, { variant: "primary", onClick: () => setWebPreviewPort(t.remotePort || t.localPort), children: ["Preview :", t.remotePort || t.localPort] })] })] }, t.id))) }), _jsxs(Card, { testId: "remote-web-preview-card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("h2", { children: ["One-Click Web Preview \u2014 Remote localhost:", webPreviewPort] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }, children: [_jsx(Badge, { tone: connectionState === 'connected' ? 'success' : 'neutral', children: connectionState === 'connected' ? 'SSH Direct-TCPIP Ready' : 'Disconnected' }), _jsx(Button, { variant: "primary", testId: "probe-http-preview-btn", onClick: () => {
+                                                                    const activeClient = liveSessionRef.current;
+                                                                    if (!activeClient || !activeClient.isConnected) {
+                                                                        setTunnelPreviewOutput(`Cannot probe 127.0.0.1:${webPreviewPort}: Not connected to an SSH host.`);
+                                                                        return;
+                                                                    }
+                                                                    void activeClient
+                                                                        .tunnelOp({
+                                                                        op: 'http_preview',
+                                                                        remoteHost: '127.0.0.1',
+                                                                        remotePort: webPreviewPort,
+                                                                        httpPath: '/'
+                                                                    })
+                                                                        .then((res) => {
+                                                                        if (res.ok) {
+                                                                            setTunnelPreviewOutput(`HTTP/1.1 ${res.statusText || res.statusCode || 200}${String.fromCharCode(10)}${res.bodyPreview || ''}`);
+                                                                        }
+                                                                        else {
+                                                                            setTunnelPreviewOutput(`Tunnel HTTP Probe Failed on 127.0.0.1:${webPreviewPort}: ${res.error || 'Connection refused'}`);
+                                                                        }
+                                                                    });
+                                                                }, children: "Probe HTTP Preview" })] })] }), _jsxs("p", { children: ["Proxying remote ", _jsxs("code", { children: ["http://127.0.0.1:", webPreviewPort] }), " over SSH ", _jsx("code", { children: "direct-tcpip" }), " channel:"] }), _jsx("pre", { "data-testid": "tunnel-preview-output", children: tunnelPreviewOutput })] })] })) : null, activeScreen === 'playbooks' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-playbooks", children: [_jsx("h1", { children: "Multi-Host Playbook & Fleet Runner" }), _jsxs(Card, { children: [_jsx("label", { htmlFor: "playbook-script-input", children: "Fleet Playbook Command / Script" }), _jsx("input", { id: "playbook-script-input", type: "text", className: "ui-input", value: playbookScript, onInput: (e) => setPlaybookScript(e.target.value), "data-testid": "playbook-script-input" }), _jsx("div", { style: { marginTop: 'var(--space-2)' }, children: _jsxs(Button, { variant: "primary", testId: "run-playbook-btn", onClick: () => setPlaybookResults((prev) => prev.map((r) => ({
                                                         ...r,
                                                         output: `[Executed "${playbookScript}"] -> ${r.output}`
                                                     }))), children: ["Run Playbook Across Fleet (", playbookResults.length, " Hosts)"] }) })] }), _jsx("div", { className: "webssh-grid", "data-testid": "playbook-results-grid", children: playbookResults.map((res) => (_jsxs(Card, { testId: `playbook-host-${res.hostAlias}`, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsxs("strong", { children: [res.hostAlias, " (", res.hostAddress, ")"] }), _jsxs(Badge, { tone: res.exitCode === 0 ? 'success' : 'danger', children: ["exit ", res.exitCode, " \u00B7 ", res.durationMs, "ms"] })] }), _jsx("pre", { children: res.output })] }, res.hostAlias))) })] })) : null, activeScreen === 'welcome' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-welcome", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("h1", { children: "Welcome to WebSSH Studio" }), _jsxs("p", { style: { color: 'var(--color-fg-secondary)' }, children: ["Clean, minimal SSH workspace \u2014 connect with Username & Password or upload a Private Key (", _jsx("code", { children: "chmod 0400" }), ")."] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "default", testId: "welcome-open-terminal-btn", onClick: () => setActiveScreen('workspace'), children: [_jsx(Icon, { name: "terminal" }), " Open Terminal"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', testId: "welcome-open-ide-btn", onClick: () => {
@@ -1108,8 +1361,28 @@ webssh:~$ `);
                                                                             ...prev,
                                                                             publicExec: e.currentTarget.checked
                                                                         })), "data-testid": "chmod-public-exec" }), ' ', "Public Exec"] })] }), _jsxs(Button, { variant: "primary", testId: "apply-chmod-btn", onClick: () => {
-                                                            setChmodTargetFile('/etc/nginx/nginx.conf');
-                                                            setTransferStatus(`Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`);
+                                                            const activeClient = liveSessionRef.current;
+                                                            if (activeClient && activeClient.isConnected) {
+                                                                void activeClient
+                                                                    .sftpOp({
+                                                                    op: 'chmod',
+                                                                    path: chmodTargetFile,
+                                                                    mode: chmodFormatted.octal
+                                                                })
+                                                                    .then((res) => {
+                                                                    if (res.ok) {
+                                                                        setTransferStatus(`Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`);
+                                                                        void refreshSftpDirectory(sftpCurrentPath, activeClient);
+                                                                    }
+                                                                    else {
+                                                                        setTransferStatus(`chmod failed on ${chmodTargetFile}: ${res.error ?? 'Unknown error'}`);
+                                                                    }
+                                                                });
+                                                            }
+                                                            else {
+                                                                setChmodTargetFile('/etc/nginx/nginx.conf');
+                                                                setTransferStatus(`Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`);
+                                                            }
                                                         }, children: ["Apply chmod ", chmodFormatted.octal] })] }), _jsxs(Card, { testId: "server-relay-card", children: [_jsx("h2", { children: "Server-to-Server Direct SFTP Relay" }), _jsx("p", { "data-testid": "relay-status-text", children: relayStatus }), _jsx(Button, { variant: "primary", testId: "trigger-sftp-relay-btn", onClick: () => setRelayStatus('Transferred 5.0 MiB directly: prod-edge-01 → staging-web (SHA-256 verified, 0 local disk usage)'), children: "Relay File Between Hosts" })] })] }), _jsxs(Card, { testId: "live-log-tailer-card", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h2", { children: "Live Log Tailer (tail -f /var/log/nginx/error.log)" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx("input", { type: "search", className: "ui-input", placeholder: "Filter log stream (e.g. error, warn)\u2026", "aria-label": "Filter log stream", value: tailFilter, onInput: (e) => setTailFilter(e.target.value), "data-testid": "tail-filter-input" }), _jsx(Button, { variant: "default", testId: "tail-pause-btn", onClick: () => setTailPaused((p) => !p), children: tailPaused ? 'Resume Stream' : 'Pause Stream' }), _jsx(Button, { variant: "primary", testId: "tail-append-btn", onClick: () => {
                                                                     if (!tailPaused) {
                                                                         setTailLogLines((prev) => [
@@ -1119,7 +1392,32 @@ webssh:~$ `);
                                                                     }
                                                                 }, children: "Simulate Log Event" })] })] }), _jsx("pre", { "data-testid": "tail-log-output", children: tailLogLines
                                                     .filter((l) => !tailFilter || l.toLowerCase().includes(tailFilter.toLowerCase()))
-                                                    .join(String.fromCharCode(10)) })] })] })) : null, activeScreen === 'editor' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-editor", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h1", { children: "Remote File Editor \u2014 /etc/nginx/nginx.conf" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", testId: "toggle-diff-viewer-btn", onClick: () => setShowDiffViewer((d) => !d), children: showDiffViewer ? 'Hide Side-by-Side Diff' : 'Compare Side-by-Side Diff' }), _jsxs(Button, { variant: "primary", onClick: () => setEditorSaved(true), testId: "save-remote-file-btn", children: ["Save to host ", editorSaved ? '(Saved)' : '(Unsaved*)'] })] })] }), _jsx("textarea", { className: "ui-input", rows: 10, "aria-label": "Remote file content", value: editorContent, onInput: (e) => {
+                                                    .join(String.fromCharCode(10)) })] })] })) : null, activeScreen === 'editor' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-editor", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("h1", { children: ["Remote File Editor \u2014 ", editorFilePath] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("input", { type: "text", className: "ui-input", "aria-label": "Remote file path", value: editorFilePath, onInput: (e) => setEditorFilePath(e.target.value), "data-testid": "editor-filepath-input", style: { width: '200px' } }), _jsx(Button, { variant: "default", testId: "load-remote-file-btn", onClick: () => void loadRemoteFileIntoEditor(editorFilePath), children: "Load from Host" }), _jsx(Button, { variant: "default", testId: "toggle-diff-viewer-btn", onClick: () => setShowDiffViewer((d) => !d), children: showDiffViewer ? 'Hide Side-by-Side Diff' : 'Compare Side-by-Side Diff' }), _jsxs(Button, { variant: "primary", onClick: () => {
+                                                            const activeClient = liveSessionRef.current;
+                                                            if (activeClient && activeClient.isConnected) {
+                                                                const encoded = bytesToBase64(new TextEncoder().encode(editorContent));
+                                                                void activeClient
+                                                                    .sftpOp({
+                                                                    op: 'write_file',
+                                                                    path: editorFilePath,
+                                                                    dataBase64: encoded
+                                                                })
+                                                                    .then((res) => {
+                                                                    if (res.ok) {
+                                                                        setEditorOriginalContent(editorContent);
+                                                                        setEditorSaved(true);
+                                                                        setTransferStatus(`Saved ${editorFilePath} over SFTP`);
+                                                                        void refreshSftpDirectory(sftpCurrentPath, activeClient);
+                                                                    }
+                                                                    else {
+                                                                        setTransferStatus(`Save failed: ${res.error ?? 'Unknown error'}`);
+                                                                    }
+                                                                });
+                                                            }
+                                                            else {
+                                                                setEditorSaved(true);
+                                                            }
+                                                        }, testId: "save-remote-file-btn", children: ["Save to host ", editorSaved ? '(Saved)' : '(Unsaved*)'] })] })] }), _jsx("textarea", { className: "ui-input", rows: 10, "aria-label": "Remote file content", value: editorContent, onInput: (e) => {
                                             setEditorContent(e.target.value);
                                             setEditorSaved(false);
                                         } }), showDiffViewer ? (_jsxs(Card, { testId: "side-by-side-diff-card", children: [_jsx("h2", { children: "Side-by-Side Diff vs Remote /etc/nginx/nginx.conf" }), _jsxs("div", { className: "webssh-diff-grid", children: [_jsxs("div", { children: [_jsx("strong", { children: "Original Remote File" }), diffEntries.map((d) => (_jsxs("div", { className: `webssh-diff-line--${d.status}`, children: [d.lineNumber, ": ", d.before] }, `orig-${d.lineNumber}`)))] }), _jsxs("div", { children: [_jsx("strong", { children: "Modified Buffer" }), diffEntries.map((d) => (_jsxs("div", { className: `webssh-diff-line--${d.status}`, children: [d.lineNumber, ": ", d.after] }, `mod-${d.lineNumber}`)))] })] })] })) : null] })) : null, activeScreen === 'snippets' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-snippets", children: [_jsx("h1", { children: "Snippets & Asciicast v2 Session Replay" }), _jsxs(Card, { children: [_jsx("h2", { children: "Variable Interpolation Parameters" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "snip-var-service", children: "service" }), _jsx("input", { id: "snip-var-service", className: "ui-input", value: snippetVarService, onInput: (e) => setSnippetVarService(e.target.value) })] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "snip-var-lines", children: "lines" }), _jsx("input", { id: "snip-var-lines", className: "ui-input", value: snippetVarLines, onInput: (e) => setSnippetVarLines(e.target.value) })] })] })] }), _jsx("div", { className: "webssh-grid", children: snippetLib.list().map((snip) => {
@@ -1137,9 +1435,22 @@ webssh:~$ `);
                                                         }, children: "Simulate Reconnecting" }), _jsx(Button, { variant: "default", testId: "sim-resumed-btn", onClick: () => {
                                                             setConnectionState('resumed');
                                                             setPendingInputBytes(0);
-                                                        }, children: "Simulate Resumed" })] })] })] })) : null, !isFullscreen && !zenMode ? (_jsx("div", { className: "webssh-special-keys", role: "toolbar", "aria-label": "Mobile and Tablet Special Keys", children: SPECIAL_KEYS_ROW.map((keyLabel) => (_jsx(Button, { variant: "ghost", testId: `special-key-${keyLabel}`, children: keyLabel }, keyLabel))) })) : null] })] }), !isFullscreen && !zenMode ? (_jsxs("footer", { className: "webssh-statusbar", role: "contentinfo", "data-testid": "status-bar", children: [_jsx("span", { children: connectionState === 'connected'
-                            ? `Connected: ${sessionTabLabel} · Cipher: chacha20-poly1305@openssh.com`
-                            : 'Status: Disconnected · Ready for SSH connection' }), _jsxs("span", { children: ["Remote Signer: Argon2id Ed25519 \u00B7 ", cols, "x", rows, " \u00B7 Font: ", fontSize, "px"] })] })) : null, _jsx(Modal, { open: connectModalOpen, title: "New SSH Connection & Argon2id Credentials", onClose: () => setConnectModalOpen(false), testId: "connect-modal", children: _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-host-input", children: "Host (IP or domain)" }), _jsx("input", { id: "connect-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or edge-01.prod.internal", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "connect-host-input" })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { flex: 2 }, children: [_jsx("label", { htmlFor: "connect-user-input", children: "Username" }), _jsx("input", { id: "connect-user-input", type: "text", className: "ui-input", placeholder: "root / ubuntu", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "connect-user-input" })] }), _jsxs("div", { style: { flex: 1 }, children: [_jsx("label", { htmlFor: "connect-port-input", children: "Port" }), _jsx("input", { id: "connect-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "connect-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Auth Mode" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
+                                                        }, children: "Simulate Resumed" })] })] }), _jsxs(Card, { testId: "settings-asset-cache-card", children: [_jsx("h2", { children: "Application Asset Cache Recovery" }), _jsx("p", { children: "Purge Service Worker and static bundle caches without clearing your saved SSH hosts, non-extractable Key Vault keys, or user preferences." }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: "default", testId: "settings-repair-cache-btn", onClick: () => {
+                                                            void repairApplicationAssetCaches().then((res) => {
+                                                                setCacheRepairStatus(`Cleared ${res.deletedCaches.length} asset cache(s) and unregistered ${res.unregisteredServiceWorkers} service worker(s). Saved hosts, keys, and settings preserved.`);
+                                                            });
+                                                        }, children: "Repair Application Asset Cache" }), cacheRepairStatus ? (_jsx(Badge, { tone: "success", testId: "settings-repair-cache-status", children: cacheRepairStatus })) : null] })] })] })) : null, !isFullscreen && !zenMode ? (_jsx("div", { className: "webssh-special-keys", role: "toolbar", "aria-label": "Mobile and Tablet Special Keys", children: SPECIAL_KEYS_ROW.map((keyLabel) => (_jsx(Button, { variant: "ghost", testId: `special-key-${keyLabel}`, children: keyLabel }, keyLabel))) })) : null] })] }), !isFullscreen && !zenMode ? (_jsxs("footer", { className: "webssh-statusbar", role: "contentinfo", "data-testid": "status-bar", children: [_jsx("span", { children: connectionState === 'connected'
+                            ? `Connected: ${sessionTabLabel} · Cipher: ${negotiatedCipher}${negotiatedServerVersion ? ` · ${negotiatedServerVersion}` : ''}`
+                            : 'Status: Disconnected · Ready for SSH connection' }), _jsxs("span", { children: ["Remote Signer: Argon2id Ed25519 \u00B7 ", cols, "x", rows, " \u00B7 Font: ", fontSize, "px"] })] })) : null, _jsx(Modal, { open: connectModalOpen, title: "New SSH Connection & Argon2id Credentials", onClose: () => setConnectModalOpen(false), testId: "connect-modal", children: _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-gateway-input", children: "SSH Gateway WebSocket URL" }), _jsx("input", { id: "connect-gateway-input", type: "text", className: "ui-input", placeholder: "ws://127.0.0.1:8080/ws", value: gatewayUrl, onInput: (e) => {
+                                        const val = e.target.value;
+                                        setGatewayUrl(val);
+                                        try {
+                                            globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                                        }
+                                        catch {
+                                            // ignore
+                                        }
+                                    }, "data-testid": "gateway-url-input" })] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "connect-host-input", children: "Host (IP or domain)" }), _jsx("input", { id: "connect-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or edge-01.prod.internal", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "connect-host-input" })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { flex: 2 }, children: [_jsx("label", { htmlFor: "connect-user-input", children: "Username" }), _jsx("input", { id: "connect-user-input", type: "text", className: "ui-input", placeholder: "root / ubuntu", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "connect-user-input" })] }), _jsxs("div", { style: { flex: 1 }, children: [_jsx("label", { htmlFor: "connect-port-input", children: "Port" }), _jsx("input", { id: "connect-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "connect-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Auth Mode" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
                                                 setAuthMethod('Password');
                                                 setConnectErrorMsg('');
                                             }, testId: "auth-method-password-btn", children: "Username & Password" }), _jsx(Button, { variant: authMethod === 'Private Key (.pem / id_rsa)' ? 'primary' : 'default', onClick: () => {
@@ -1151,7 +1462,31 @@ webssh:~$ `);
                                             }, testId: "auth-method-pubkey-btn", children: "Argon2id Ed25519 Key" })] })] }), authMethod === 'Password' ? (_jsxs("div", { children: [_jsx("label", { htmlFor: "connect-password-input", children: "Password" }), _jsx("input", { id: "connect-password-input", type: "password", className: "ui-input", placeholder: "Enter SSH password\u2026", value: connectPassword, onInput: (e) => setConnectPassword(e.target.value), "data-testid": "connect-password-input" })] })) : null, authMethod === 'Private Key (.pem / id_rsa)' ? (_jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' }, children: [_jsx("label", { htmlFor: "modal-key-file-input", children: "Upload Private Key (.pem / id_ed25519 / id_rsa)" }), _jsxs(Badge, { tone: keyPermissionMode === '0644' ? 'danger' : 'success', testId: "modal-key-chmod-badge", children: ["chmod ", keyPermissionMode, " ", keyPermissionMode === '0400' ? '(-r--------)' : keyPermissionMode === '0600' ? '(-rw-------)' : '(UNSAFE)'] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }, children: [_jsx("input", { id: "modal-key-file-input", type: "file", className: "ui-input", accept: ".pem,.key,.pub,*", onChange: (e) => void handlePrivateKeyFileUpload(e), "data-testid": "modal-private-key-file-input" }), _jsx(Button, { variant: "default", testId: "modal-set-chmod-400-btn", onClick: () => {
                                                 setKeyPermissionMode('0400');
                                                 setConnectErrorMsg('');
-                                            }, children: "chmod 400" })] })] })) : null, _jsxs("div", { children: [_jsx("label", { htmlFor: "connect-pubkey-snippet", children: "Public Key Snippet (authorized_keys)" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-1)' }, children: [_jsx("input", { id: "connect-pubkey-snippet", type: "text", className: "ui-input", readOnly: true, value: authorizedKeysSnippet, "data-testid": "connect-pubkey-snippet" }), _jsxs(Button, { variant: "default", onClick: () => copyToClipboard(authorizedKeysSnippet), testId: "copy-pubkey-snippet-btn", children: [_jsx(Icon, { name: "copy" }), " ", copiedSnippet ? 'Copied' : 'Copy'] })] })] }), connectErrorMsg ? (_jsx(Badge, { tone: "danger", testId: "modal-connect-error-badge", children: connectErrorMsg })) : null, _jsxs("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", onClick: () => setConnectModalOpen(false), children: "Cancel" }), _jsx(Button, { variant: "primary", type: "submit", testId: "connect-modal-submit-btn", children: "Connect" })] })] }) }), _jsxs(Modal, { open: paletteOpen, title: "Command Palette", onClose: () => setPaletteOpen(false), testId: "command-palette-modal", children: [_jsx("input", { type: "search", className: "ui-input", placeholder: "Type a command or search actions\u2026", value: paletteQuery, onInput: (e) => setPaletteQuery(e.target.value), "aria-label": "Command palette search", "data-testid": "command-palette-input" }), _jsx("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', marginTop: 'var(--space-3)' }, children: paletteRegistry.search(paletteQuery).map((cmd) => (_jsxs(Button, { variant: "ghost", onClick: () => void cmd.run(), testId: `palette-cmd-${cmd.id}`, children: [_jsx("span", { children: cmd.title }), cmd.shortcut ? _jsx(Badge, { tone: "neutral", children: cmd.shortcut }) : null] }, cmd.id))) })] }), _jsxs(Modal, { open: hostKeyModal !== 'none', danger: hostKeyModal === 'mismatch', title: hostKeyModal === 'mismatch' ? 'WARNING: REMOTE HOST KEY CHANGED' : 'Verify Unknown Host Key (TOFU)', onClose: () => setHostKeyModal('none'), testId: "hostkey-modal", children: [_jsxs("p", { children: ["Host: ", _jsxs("strong", { children: [connectHost || 'localhost', ":", connectPort || '22'] })] }), _jsxs("p", { children: ["SHA-256 Fingerprint: ", _jsx("code", { children: generatedFp })] }), hostKeyModal === 'mismatch' ? (_jsx("p", { children: "The host key does not match your pinned fingerprint. This could indicate a man-in-the-middle attack. Connection is blocked unless you explicitly override." })) : (_jsx("p", { children: "Trust on first use (TOFU) will pin this SHA-256 fingerprint in your browser store." })), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }, children: [_jsx(Button, { variant: hostKeyModal === 'mismatch' ? 'danger' : 'primary', onClick: () => setHostKeyModal('none'), testId: "hostkey-confirm-btn", children: hostKeyModal === 'mismatch' ? 'Explicit Override & Pin New Key' : 'Trust & Pin Host Key' }), _jsx(Button, { variant: "default", onClick: () => setHostKeyModal('none'), children: "Disconnect" })] })] }), _jsxs(Modal, { open: dangerousCommandPending !== null, danger: true, title: "DANGEROUS COMMAND SAFETY GUARD", onClose: () => setDangerousCommandPending(null), testId: "dangerous-command-modal", children: [_jsxs("p", { children: ["Intercepted potentially destructive command:", ' ', _jsx("code", { "data-testid": "dangerous-command-text", children: dangerousCommandPending?.command })] }), _jsx("p", { "data-testid": "dangerous-command-reason", children: dangerousCommandPending?.reason }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }, children: [_jsx(Button, { variant: "danger", testId: "confirm-dangerous-cmd-btn", onClick: () => {
+                                            }, children: "chmod 400" })] })] })) : null, _jsxs("div", { children: [_jsx("label", { htmlFor: "connect-pubkey-snippet", children: "Public Key Snippet (authorized_keys)" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-1)' }, children: [_jsx("input", { id: "connect-pubkey-snippet", type: "text", className: "ui-input", readOnly: true, value: authorizedKeysSnippet, "data-testid": "connect-pubkey-snippet" }), _jsxs(Button, { variant: "default", onClick: () => copyToClipboard(authorizedKeysSnippet), testId: "copy-pubkey-snippet-btn", children: [_jsx(Icon, { name: "copy" }), " ", copiedSnippet ? 'Copied' : 'Copy'] })] })] }), connectErrorMsg ? (_jsx(Badge, { tone: "danger", testId: "modal-connect-error-badge", children: connectErrorMsg })) : null, _jsxs("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsx(Button, { variant: "default", onClick: () => setConnectModalOpen(false), children: "Cancel" }), _jsx(Button, { variant: "primary", type: "submit", testId: "connect-modal-submit-btn", children: "Connect" })] })] }) }), _jsxs(Modal, { open: paletteOpen, title: "Command Palette", onClose: () => setPaletteOpen(false), testId: "command-palette-modal", children: [_jsx("input", { type: "search", className: "ui-input", placeholder: "Type a command or search actions\u2026", value: paletteQuery, onInput: (e) => setPaletteQuery(e.target.value), "aria-label": "Command palette search", "data-testid": "command-palette-input" }), _jsx("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', marginTop: 'var(--space-3)' }, children: paletteRegistry.search(paletteQuery).map((cmd) => (_jsxs(Button, { variant: "ghost", onClick: () => void cmd.run(), testId: `palette-cmd-${cmd.id}`, children: [_jsx("span", { children: cmd.title }), cmd.shortcut ? _jsx(Badge, { tone: "neutral", children: cmd.shortcut }) : null] }, cmd.id))) })] }), _jsxs(Modal, { open: hostKeyModal !== 'none', danger: hostKeyModal === 'mismatch', title: hostKeyModal === 'mismatch' ? 'WARNING: REMOTE HOST KEY CHANGED' : 'Verify Unknown Host Key (TOFU)', onClose: () => {
+                    setHostKeyModal('none');
+                    if (hostKeyDecisionResolverRef.current) {
+                        hostKeyDecisionResolverRef.current(false);
+                        hostKeyDecisionResolverRef.current = null;
+                    }
+                }, testId: "hostkey-modal", children: [_jsxs("p", { children: ["Host:", ' ', _jsxs("strong", { children: [pendingHostKeyPrompt?.host || connectHost || 'localhost', ":", pendingHostKeyPrompt?.port || connectPort || '22'] })] }), _jsxs("p", { children: ["SHA-256 Fingerprint:", ' ', _jsx("code", { "data-testid": "hostkey-modal-fingerprint", children: pendingHostKeyPrompt?.fingerprint || generatedFp })] }), hostKeyModal === 'mismatch' ? (_jsxs("p", { children: ["The host key does not match your pinned fingerprint (", _jsx("code", { children: pendingHostKeyPrompt?.expectedFingerprint || 'pinned-key' }), "). This could indicate a man-in-the-middle attack. Connection is blocked unless you explicitly override."] })) : (_jsx("p", { children: "Trust on first use (TOFU) will pin this SHA-256 fingerprint in your browser store." })), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }, children: [_jsx(Button, { variant: hostKeyModal === 'mismatch' ? 'danger' : 'primary', onClick: () => {
+                                    if (pendingHostKeyPrompt) {
+                                        knownHosts.revokeHost(pendingHostKeyPrompt.host, pendingHostKeyPrompt.port);
+                                        knownHosts.trustNewHost(pendingHostKeyPrompt.host, pendingHostKeyPrompt.port, pendingHostKeyPrompt.algorithm, pendingHostKeyPrompt.fingerprint, pendingHostKeyPrompt.publicKeyBase64);
+                                    }
+                                    setHostKeyModal('none');
+                                    setPendingHostKeyPrompt(null);
+                                    if (hostKeyDecisionResolverRef.current) {
+                                        hostKeyDecisionResolverRef.current(true);
+                                        hostKeyDecisionResolverRef.current = null;
+                                    }
+                                }, testId: "hostkey-confirm-btn", children: hostKeyModal === 'mismatch' ? 'Explicit Override & Pin New Key' : 'Trust & Pin Host Key' }), _jsx(Button, { variant: "default", testId: "hostkey-reject-btn", onClick: () => {
+                                    setHostKeyModal('none');
+                                    setPendingHostKeyPrompt(null);
+                                    if (hostKeyDecisionResolverRef.current) {
+                                        hostKeyDecisionResolverRef.current(false);
+                                        hostKeyDecisionResolverRef.current = null;
+                                    }
+                                }, children: "Disconnect" })] })] }), _jsxs(Modal, { open: dangerousCommandPending !== null, danger: true, title: "DANGEROUS COMMAND SAFETY GUARD", onClose: () => setDangerousCommandPending(null), testId: "dangerous-command-modal", children: [_jsxs("p", { children: ["Intercepted potentially destructive command:", ' ', _jsx("code", { "data-testid": "dangerous-command-text", children: dangerousCommandPending?.command })] }), _jsx("p", { "data-testid": "dangerous-command-reason", children: dangerousCommandPending?.reason }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }, children: [_jsx(Button, { variant: "danger", testId: "confirm-dangerous-cmd-btn", onClick: () => {
                                     const cmdToRun = dangerousCommandPending?.command;
                                     setDangerousCommandPending(null);
                                     if (cmdToRun) {

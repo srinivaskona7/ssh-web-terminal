@@ -62,4 +62,30 @@ describe('HostRegistry and ~/.ssh/config parser with ProxyJump resolution (M6/M7
     expect(registry.list('staging')).toHaveLength(1);
     expect(registry.list('', 'Production')).toHaveLength(1);
   });
+
+  it('preserves valid saved hosts even when storage contains malformed entries', () => {
+    localStorage.setItem(
+      'webssh.test.hosts.mixed',
+      JSON.stringify([
+        null,
+        'corrupted-entry',
+        { id: '', host: '' },
+        {
+          id: 'valid-host-1',
+          alias: 'prod-bastion',
+          host: '10.10.0.15',
+          port: 2222,
+          user: 'admin',
+          tags: ['prod', 123],
+          favorite: true
+        }
+      ])
+    );
+    const registry = new HostRegistry('webssh.test.hosts.mixed');
+    const hosts = registry.list();
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0]?.id).toBe('valid-host-1');
+    expect(hosts[0]?.alias).toBe('prod-bastion');
+    expect(hosts[0]?.tags).toEqual(['prod']);
+  });
 });

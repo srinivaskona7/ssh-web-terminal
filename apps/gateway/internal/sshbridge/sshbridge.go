@@ -1,6 +1,7 @@
 package sshbridge
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -11,10 +12,14 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -113,12 +118,24 @@ func FormatHostKeyFingerprint(pub ssh.PublicKey) string {
 	return ssh.FingerprintSHA256(pub)
 }
 
+func ParsePrivateKeySigner(pemText string, passphrase string) (ssh.Signer, error) {
+	raw := []byte(strings.TrimSpace(pemText))
+	if len(raw) == 0 {
+		return nil, errors.New("empty private key PEM")
+	}
+	if passphrase != "" {
+		return ssh.ParsePrivateKeyWithPassphrase(raw, []byte(passphrase))
+	}
+	return ssh.ParsePrivateKey(raw)
+}
+
 type HopConfig struct {
-	Addr   string
-	Host   string
-	Port   int
-	User   string
-	Signer ssh.Signer
+	Addr     string
+	Host     string
+	Port     int
+	User     string
+	Signer   ssh.Signer
+	Password string
 }
 
 type chainedConn struct {
@@ -141,25 +158,40 @@ func DialChain(ctx context.Context, hops []HopConfig, target HopConfig, hkCb Hos
 
 	allHops := append(append([]HopConfig{}, hops...), target)
 	for i, hop := range allHops {
+		var authMethods []ssh.AuthMethod
+		if hop.Signer != nil {
+			authMethods = append(authMethods, ssh.PublicKeys(hop.Signer))
+		}
+		if hop.Password != "" {
+			authMethods = append(authMethods, ssh.Password(hop.Password))
+		}
+		if len(authMethods) == 0 {
+			if currentClient != nil {
+				_ = currentClient.Close()
+			}
+			return nil, errors.New("sshbridge: no authentication method provided")
+		}
+
+		hopCopy := hop
 		cfg := &ssh.ClientConfig{
-			User: hop.User,
-			Auth: []ssh.AuthMethod{ssh.PublicKeys(hop.Signer)},
+			User: hopCopy.User,
+			Auth: authMethods,
 			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 				if hkCb == nil {
 					return nil
 				}
-				return hkCb(ctx, hop.Host, hop.Port, key)
+				return hkCb(ctx, hopCopy.Host, hopCopy.Port, key)
 			},
 			Timeout: 10 * time.Second,
 		}
 
 		if i == 0 {
 			var d net.Dialer
-			conn, err := d.DialContext(ctx, "tcp", hop.Addr)
+			conn, err := d.DialContext(ctx, "tcp", hopCopy.Addr)
 			if err != nil {
 				return nil, err
 			}
-			c, chans, reqs, err := ssh.NewClientConn(conn, hop.Addr, cfg)
+			c, chans, reqs, err := ssh.NewClientConn(conn, hopCopy.Addr, cfg)
 			if err != nil {
 				_ = conn.Close()
 				return nil, err
@@ -167,13 +199,13 @@ func DialChain(ctx context.Context, hops []HopConfig, target HopConfig, hkCb Hos
 			currentClient = ssh.NewClient(c, chans, reqs)
 		} else {
 			prevClient := currentClient
-			conn, err := prevClient.Dial("tcp", hop.Addr)
+			conn, err := prevClient.Dial("tcp", hopCopy.Addr)
 			if err != nil {
 				_ = prevClient.Close()
 				return nil, err
 			}
 			wrappedConn := &chainedConn{Conn: conn, parent: prevClient}
-			c, chans, reqs, err := ssh.NewClientConn(wrappedConn, hop.Addr, cfg)
+			c, chans, reqs, err := ssh.NewClientConn(wrappedConn, hopCopy.Addr, cfg)
 			if err != nil {
 				_ = wrappedConn.Close()
 				return nil, err
@@ -182,6 +214,52 @@ func DialChain(ctx context.Context, hops []HopConfig, target HopConfig, hkCb Hos
 		}
 	}
 	return currentClient, nil
+}
+
+// ExecCommand executes a single non-interactive command over a fresh SSH session channel.
+func ExecCommand(ctx context.Context, client *ssh.Client, command string, timeout time.Duration) (string, string, int, int64, error) {
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	start := time.Now()
+	sess, err := client.NewSession()
+	if err != nil {
+		return "", "", 1, 0, err
+	}
+	defer sess.Close()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	sess.Stdout = &stdoutBuf
+	sess.Stderr = &stderrBuf
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sess.Run(command)
+	}()
+
+	var runErr error
+	select {
+	case <-execCtx.Done():
+		_ = sess.Close()
+		return stdoutBuf.String(), stderrBuf.String(), 124, time.Since(start).Milliseconds(), errors.New("command timed out")
+	case runErr = <-done:
+	}
+
+	dur := time.Since(start).Milliseconds()
+	exitCode := 0
+	if runErr != nil {
+		var exitErr *ssh.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitStatus()
+			runErr = nil
+		} else {
+			exitCode = 1
+		}
+	}
+	return stdoutBuf.String(), stderrBuf.String(), exitCode, dur, runErr
 }
 
 // DeployAuthorizedKey connects once with a password (ssh-copy-id equivalent) and appends pubKeyLine to ~/.ssh/authorized_keys.
@@ -253,8 +331,14 @@ func SanitizeRemotePath(p string) (string, error) {
 		return "", ErrPathTraversal
 	}
 	trimmed := strings.TrimSpace(p)
-	if trimmed == "" {
+	if trimmed == "" || trimmed == "~" {
 		return ".", nil
+	}
+	if strings.HasPrefix(trimmed, "~/") {
+		trimmed = strings.TrimPrefix(trimmed, "~/")
+		if trimmed == "" {
+			return ".", nil
+		}
 	}
 	cleaned := path.Clean(filepath.ToSlash(trimmed))
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
@@ -277,6 +361,10 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 		Type: "sftp_result",
 		OpID: msg.OpID,
 	}
+	if b == nil || b.client == nil {
+		res.Error = "SFTP subsystem is not available on this session"
+		return res
+	}
 	cleanPath, err := SanitizeRemotePath(msg.Path)
 	if err != nil {
 		res.Error = err.Error()
@@ -292,9 +380,13 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 		}
 		entries := make([]protocol.SftpDirEntry, 0, len(infos))
 		for _, info := range infos {
+			entryPath := path.Join(cleanPath, info.Name())
+			if cleanPath == "." {
+				entryPath = info.Name()
+			}
 			entries = append(entries, protocol.SftpDirEntry{
 				Name:    info.Name(),
-				Path:    path.Join(cleanPath, info.Name()),
+				Path:    entryPath,
 				Size:    info.Size(),
 				Mode:    info.Mode().String(),
 				ModTime: info.ModTime().Unix(),
@@ -303,6 +395,45 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 		}
 		res.OK = true
 		res.Entries = entries
+		return res
+
+	case "stat":
+		info, err := b.client.Stat(cleanPath)
+		if err != nil {
+			res.Error = err.Error()
+			return res
+		}
+		res.OK = true
+		res.Size = info.Size()
+		res.Mode = info.Mode().String()
+		res.Entries = []protocol.SftpDirEntry{
+			{
+				Name:    info.Name(),
+				Path:    cleanPath,
+				Size:    info.Size(),
+				Mode:    info.Mode().String(),
+				ModTime: info.ModTime().Unix(),
+				IsDir:   info.IsDir(),
+			},
+		}
+		return res
+
+	case "chmod":
+		modeStr := strings.TrimSpace(msg.Mode)
+		if modeStr == "" {
+			res.Error = "missing chmod mode"
+			return res
+		}
+		modeVal, parseErr := strconv.ParseUint(modeStr, 8, 32)
+		if parseErr != nil {
+			res.Error = fmt.Sprintf("invalid octal mode %q: %v", modeStr, parseErr)
+			return res
+		}
+		if err := b.client.Chmod(cleanPath, os.FileMode(modeVal)); err != nil {
+			res.Error = err.Error()
+			return res
+		}
+		res.OK = true
 		return res
 
 	case "mkdir":
@@ -472,5 +603,207 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 	default:
 		res.Error = fmt.Sprintf("unsupported sftp op %q", msg.Op)
 		return res
+	}
+}
+
+type activeTunnel struct {
+	id         string
+	listener   net.Listener
+	remoteAddr string
+	bytesMoved atomic.Int64
+}
+
+type TunnelManager struct {
+	client  *ssh.Client
+	mu      sync.Mutex
+	tunnels map[string]*activeTunnel
+}
+
+func NewTunnelManager(client *ssh.Client) *TunnelManager {
+	return &TunnelManager{
+		client:  client,
+		tunnels: make(map[string]*activeTunnel),
+	}
+}
+
+func (tm *TunnelManager) CloseAll() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for id, t := range tm.tunnels {
+		if t.listener != nil {
+			_ = t.listener.Close()
+		}
+		delete(tm.tunnels, id)
+	}
+}
+
+func (tm *TunnelManager) HandleOp(msg protocol.ControlMessage) protocol.ControlMessage {
+	res := protocol.ControlMessage{
+		Type:     "tunnel_result",
+		OpID:     msg.OpID,
+		TunnelID: msg.TunnelID,
+	}
+	if tm == nil || tm.client == nil {
+		res.Error = "SSH session not connected"
+		return res
+	}
+
+	switch msg.Op {
+	case "start":
+		remoteHost := msg.RemoteHost
+		if remoteHost == "" {
+			remoteHost = "127.0.0.1"
+		}
+		if msg.RemotePort <= 0 || msg.RemotePort > 65535 {
+			res.Error = fmt.Sprintf("invalid remote port %d", msg.RemotePort)
+			return res
+		}
+		remoteTarget := fmt.Sprintf("%s:%d", remoteHost, msg.RemotePort)
+
+		bindHost := msg.BindAddress
+		if bindHost == "" {
+			bindHost = "127.0.0.1"
+		}
+		localPort := msg.LocalPort
+		if localPort < 0 || localPort > 65535 {
+			res.Error = fmt.Sprintf("invalid local port %d", localPort)
+			return res
+		}
+		listenAddr := fmt.Sprintf("%s:%d", bindHost, localPort)
+		ln, err := net.Listen("tcp", listenAddr)
+		if err != nil && localPort > 0 {
+			// If requested port is unavailable or privileged, try ephemeral port only if requested or report actual bind error
+			ln, err = net.Listen("tcp", fmt.Sprintf("%s:0", bindHost))
+			if err != nil {
+				res.Error = fmt.Sprintf("failed to bind local listener %s: %v", listenAddr, err)
+				return res
+			}
+		} else if err != nil {
+			res.Error = fmt.Sprintf("failed to bind local listener %s: %v", listenAddr, err)
+			return res
+		}
+
+		tunID := msg.TunnelID
+		if tunID == "" {
+			tunID = fmt.Sprintf("tun_%d", time.Now().UnixNano())
+		}
+		tun := &activeTunnel{
+			id:         tunID,
+			listener:   ln,
+			remoteAddr: remoteTarget,
+		}
+
+		tm.mu.Lock()
+		if old, exists := tm.tunnels[tunID]; exists && old.listener != nil {
+			_ = old.listener.Close()
+		}
+		tm.tunnels[tunID] = tun
+		tm.mu.Unlock()
+
+		go tm.acceptLoop(tun)
+
+		res.OK = true
+		res.TunnelID = tunID
+		res.Active = true
+		res.BoundAddress = ln.Addr().String()
+		return res
+
+	case "stop":
+		tm.mu.Lock()
+		tun, exists := tm.tunnels[msg.TunnelID]
+		if exists {
+			if tun.listener != nil {
+				_ = tun.listener.Close()
+			}
+			delete(tm.tunnels, msg.TunnelID)
+		}
+		tm.mu.Unlock()
+		res.OK = true
+		res.Active = false
+		return res
+
+	case "http_preview":
+		remoteHost := msg.RemoteHost
+		if remoteHost == "" {
+			remoteHost = "127.0.0.1"
+		}
+		port := msg.RemotePort
+		if port <= 0 {
+			port = msg.LocalPort
+		}
+		if port <= 0 || port > 65535 {
+			res.Error = "invalid target port for HTTP preview"
+			return res
+		}
+		target := fmt.Sprintf("%s:%d", remoteHost, port)
+		rConn, err := tm.client.Dial("tcp", target)
+		if err != nil {
+			res.Error = fmt.Sprintf("remote tunnel dial %s failed: %v", target, err)
+			return res
+		}
+		defer rConn.Close()
+		_ = rConn.SetDeadline(time.Now().Add(4 * time.Second))
+
+		reqPath := msg.HttpPath
+		if reqPath == "" || !strings.HasPrefix(reqPath, "/") {
+			reqPath = "/" + strings.TrimPrefix(reqPath, "/")
+		}
+		req, err := http.NewRequest(http.MethodGet, "http://"+target+reqPath, nil)
+		if err != nil {
+			res.Error = err.Error()
+			return res
+		}
+		req.Header.Set("Connection", "close")
+		req.Header.Set("User-Agent", "WebSSH-Studio-Tunnel-Preview/1.0")
+		if err := req.Write(rConn); err != nil {
+			res.Error = fmt.Sprintf("failed writing HTTP request over tunnel: %v", err)
+			return res
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(rConn), req)
+		if err != nil {
+			res.Error = fmt.Sprintf("failed reading HTTP response from %s: %v", target, err)
+			return res
+		}
+		defer resp.Body.Close()
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		res.OK = true
+		res.StatusCode = resp.StatusCode
+		res.StatusText = resp.Status
+		res.BodyPreview = string(bodyBytes)
+		res.BytesTransferred = int64(len(bodyBytes))
+		return res
+
+	default:
+		res.Error = fmt.Sprintf("unsupported tunnel op %q", msg.Op)
+		return res
+	}
+}
+
+func (tm *TunnelManager) acceptLoop(tun *activeTunnel) {
+	for {
+		localConn, err := tun.listener.Accept()
+		if err != nil {
+			return
+		}
+		go func(lc net.Conn) {
+			defer lc.Close()
+			rc, err := tm.client.Dial("tcp", tun.remoteAddr)
+			if err != nil {
+				return
+			}
+			defer rc.Close()
+			done := make(chan struct{}, 2)
+			go func() {
+				n, _ := io.Copy(rc, lc)
+				tun.bytesMoved.Add(n)
+				done <- struct{}{}
+			}()
+			go func() {
+				n, _ := io.Copy(lc, rc)
+				tun.bytesMoved.Add(n)
+				done <- struct{}{}
+			}()
+			<-done
+		}(localConn)
 	}
 }

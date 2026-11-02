@@ -50,4 +50,18 @@ export declare function parseOpenSshEd25519PrivateKeyPem(pemText: string): {
     pub32: Uint8Array;
     comment: string;
 };
+export interface PrivateKeyInspectionResult {
+    valid: boolean;
+    format?: 'openssh' | 'pkcs8' | 'pem';
+    keyType?: string;
+    encrypted?: boolean;
+    fingerprint?: string;
+    error?: string;
+}
+/**
+ * Validates and inspects a PEM or OpenSSH private key string without fabricating local POSIX file permissions.
+ * Note: Browser File APIs do not expose local filesystem chmod bits; only key structure, cipher/KDF state,
+ * and public key fingerprint are derivable client-side.
+ */
+export declare function validateAndInspectPrivateKeyPem(pemText: string): Promise<PrivateKeyInspectionResult>;
 //# sourceMappingURL=ssh-wire.d.ts.map

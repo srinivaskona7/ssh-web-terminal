@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
-import { KeyVault, KnownHostsStore, encodeOpenSshEd25519PrivateKeyPem, formatAuthorizedKeysSnippet, p1363ToSshMpint, sshMpintToP1363, wrapEd25519SeedAsPkcs8 } from './index.js';
+import { KeyVault, KnownHostsStore, encodeOpenSshEd25519PrivateKeyPem, formatAuthorizedKeysSnippet, p1363ToSshMpint, sshMpintToP1363, validateAndInspectPrivateKeyPem, wrapEd25519SeedAsPkcs8 } from './index.js';
 describe('Vault & Remote-Signer Auth (M3)', () => {
     it('generates non-extractable Ed25519 and ECDSA P-256 keys and signs challenges', async () => {
         const vault = new KeyVault(60_000);
@@ -88,6 +88,20 @@ describe('Vault & Remote-Signer Auth (M3)', () => {
         expect(store.revokeHost('prod.example.com', 22)).toBe(true);
         const reTrusted = store.trustNewHost('prod.example.com', 22, 'ssh-ed25519', 'SHA256:evil999', 'AAAA999');
         expect(reTrusted.fingerprint).toBe('SHA256:evil999');
+    });
+    it('validates OpenSSH and PEM private keys accurately without fabricating chmod permissions', async () => {
+        const seed = new Uint8Array(32).fill(7);
+        const pub = new Uint8Array(32).fill(9);
+        const pem = encodeOpenSshEd25519PrivateKeyPem(seed, pub, 'ops@prod');
+        const validRes = await validateAndInspectPrivateKeyPem(pem);
+        expect(validRes.valid).toBe(true);
+        expect(validRes.format).toBe('openssh');
+        expect(validRes.keyType).toBe('ssh-ed25519');
+        expect(validRes.encrypted).toBe(false);
+        expect(validRes.fingerprint?.startsWith('SHA256:')).toBe(true);
+        const invalidRes = await validateAndInspectPrivateKeyPem('not-a-private-key');
+        expect(invalidRes.valid).toBe(false);
+        expect(invalidRes.error).toContain('Invalid private key');
     });
 });
 //# sourceMappingURL=vault.test.js.map

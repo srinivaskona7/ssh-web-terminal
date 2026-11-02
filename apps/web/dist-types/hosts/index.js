@@ -11,14 +11,19 @@ export class HostRegistry {
                 const raw = localStorage.getItem(this.storageKey);
                 if (raw) {
                     const parsed = JSON.parse(raw);
-                    for (const h of parsed) {
-                        this.hosts.set(h.id, h);
+                    if (Array.isArray(parsed)) {
+                        for (const item of parsed) {
+                            const sanitized = sanitizeHostProfile(item);
+                            if (sanitized) {
+                                this.hosts.set(sanitized.id, sanitized);
+                            }
+                        }
                     }
                 }
             }
         }
         catch {
-            // Ignore malformed or unavailable storage
+            // Ignore malformed or unavailable storage without wiping other keys
         }
     }
     save() {
@@ -73,6 +78,50 @@ export class HostRegistry {
         this.save();
         return imported;
     }
+}
+function sanitizeHostProfile(raw) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        return null;
+    }
+    const obj = raw;
+    const id = typeof obj.id === 'string' && obj.id.trim().length > 0 ? obj.id.trim() : null;
+    const host = typeof obj.host === 'string' && obj.host.trim().length > 0 ? obj.host.trim() : null;
+    if (!id || !host) {
+        return null;
+    }
+    const alias = typeof obj.alias === 'string' && obj.alias.trim().length > 0 ? obj.alias.trim() : host;
+    const user = typeof obj.user === 'string' && obj.user.trim().length > 0 ? obj.user.trim() : 'root';
+    const port = typeof obj.port === 'number' && Number.isFinite(obj.port) && obj.port > 0 && obj.port <= 65535
+        ? obj.port
+        : 22;
+    const tags = Array.isArray(obj.tags)
+        ? obj.tags.filter((t) => typeof t === 'string')
+        : [];
+    const jumpHops = Array.isArray(obj.jumpHops)
+        ? obj.jumpHops
+            .filter((jh) => typeof jh === 'object' && jh !== null)
+            .filter((jh) => typeof jh.host === 'string' && jh.host.length > 0)
+            .map((jh) => ({
+            host: String(jh.host),
+            port: typeof jh.port === 'number' && Number.isFinite(jh.port) ? jh.port : 22,
+            user: typeof jh.user === 'string' && jh.user.length > 0 ? jh.user : 'root'
+        }))
+        : [];
+    return {
+        id,
+        alias,
+        host,
+        port,
+        user,
+        keyFingerprint: typeof obj.keyFingerprint === 'string' ? obj.keyFingerprint : undefined,
+        folder: typeof obj.folder === 'string' ? obj.folder : undefined,
+        tags,
+        favorite: Boolean(obj.favorite),
+        notes: typeof obj.notes === 'string' ? obj.notes : undefined,
+        jumpHops,
+        tmuxAutoAttach: typeof obj.tmuxAutoAttach === 'string' ? obj.tmuxAutoAttach : undefined,
+        lastConnectedAt: typeof obj.lastConnectedAt === 'number' ? obj.lastConnectedAt : undefined
+    };
 }
 function parseJumpHopSpec(spec, byAlias, defaultUser) {
     const existing = byAlias.get(spec);

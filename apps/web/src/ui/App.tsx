@@ -13,10 +13,17 @@ import {
   applyThemeToDocument,
   type ThemeId
 } from '@webssh/ui-kit';
-import { KeyVault } from '../vault';
+import {
+  KeyVault,
+  KnownHostsStore,
+  base64ToBytes,
+  bytesToBase64,
+  validateAndInspectPrivateKeyPem
+} from '../vault';
 import { HostRegistry, type HostProfile } from '../hosts';
 import { PreferencesStore, type CursorShape, type LayoutPreset } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
+import { LiveGatewaySessionClient, resolveGatewayWsUrl } from '../transport';
 import {
   AsciicastRecorder,
   CommandPaletteRegistry,
@@ -45,6 +52,7 @@ import {
   type SshCertificateInfo,
   type SshTunnelRule
 } from './advanced-features';
+import { repairApplicationAssetCaches } from './ErrorBoundary';
 
 export type ScreenId =
   | 'workspace'
@@ -151,6 +159,9 @@ export function App(): JSX.Element {
   const hostRegistry = useMemo(() => new HostRegistry(), []);
 
   const vault = useMemo(() => new KeyVault(), []);
+  const knownHosts = useMemo(() => new KnownHostsStore(), []);
+  const liveSessionRef = useRef<LiveGatewaySessionClient | null>(null);
+  const hostKeyDecisionResolverRef = useRef<((trusted: boolean) => void) | null>(null);
   const storageGuard = useMemo(() => new StorageGuard(), []);
   const snippetLib = useMemo(
     () =>
@@ -200,11 +211,12 @@ export function App(): JSX.Element {
   // Default to clean Welcome screen & Minimal Mode (IDE mode disabled until requested)
   const [activeScreen, setActiveScreen] = useState<ScreenId>('welcome');
   const [ideMode, setIdeMode] = useState<boolean>(false);
-  const [activeTheme, setActiveTheme] = useState<ThemeId>(
-    (prefsStore.get().activeThemeId as ThemeId) || 'dark'
-  );
-  const [layoutPreset, setLayoutPreset] = useState<LayoutPreset>('sidebar-left');
-  const [cursorShape, setCursorShape] = useState<CursorShape>('block');
+  const [activeTheme, setActiveTheme] = useState<ThemeId>(() => {
+    const stored = prefsStore.get().activeThemeId;
+    return (THEME_IDS as readonly string[]).includes(stored) ? (stored as ThemeId) : 'dark';
+  });
+  const [layoutPreset, setLayoutPreset] = useState<LayoutPreset>(() => prefsStore.get().layoutPreset);
+  const [cursorShape, setCursorShape] = useState<CursorShape>(() => prefsStore.get().surface.cursorShape);
   const [zenMode, setZenMode] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isPseudoFullscreen, setIsPseudoFullscreen] = useState(false);
@@ -220,7 +232,8 @@ export function App(): JSX.Element {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState('');
   const [hostKeyModal, setHostKeyModal] = useState<'none' | 'tofu' | 'mismatch'>('none');
-  const [hosts, setHosts] = useState<HostProfile[]>([]);
+  const [hosts, setHosts] = useState<HostProfile[]>(() => hostRegistry.list());
+  const [cacheRepairStatus, setCacheRepairStatus] = useState<string>('');
   const [hostSearch, setHostSearch] = useState('');
   const [sshConfigInput, setSshConfigInput] = useState('');
   const [generatedPubKey, setGeneratedPubKey] = useState(
@@ -233,10 +246,26 @@ export function App(): JSX.Element {
   const [sftpRawEntries, setSftpRawEntries] = useState<
     { name: string; path: string; size: number; mode: string; modTime: number; isDir: boolean }[]
   >([]);
-  const [editorOriginalContent] = useState('');
+  const [sftpCurrentPath, setSftpCurrentPath] = useState<string>('~');
+  const [editorFilePath, setEditorFilePath] = useState<string>('README.md');
+  const [editorOriginalContent, setEditorOriginalContent] = useState('');
   const [editorContent, setEditorContent] = useState('');
   const [editorSaved, setEditorSaved] = useState(true);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
+  const [gatewayUrl, setGatewayUrl] = useState<string>(() => resolveGatewayWsUrl());
+  const [negotiatedCipher, setNegotiatedCipher] = useState<string>('chacha20-poly1305@openssh.com');
+  const [negotiatedServerVersion, setNegotiatedServerVersion] = useState<string>('');
+  const [pendingHostKeyPrompt, setPendingHostKeyPrompt] = useState<{
+    host: string;
+    port: number;
+    algorithm: string;
+    fingerprint: string;
+    publicKeyBase64: string;
+    expectedFingerprint?: string;
+  } | null>(null);
+  const [tunnelPreviewOutput, setTunnelPreviewOutput] = useState<string>(
+    'Connect to an SSH host and click Probe HTTP Preview to inspect remote localhost HTTP responses.'
+  );
   const [scrubberSec, setScrubberSec] = useState(2.5);
   const [snippetVarService, setSnippetVarService] = useState('sshd');
   const [snippetVarLines, setSnippetVarLines] = useState('50');
@@ -378,25 +407,80 @@ export function App(): JSX.Element {
     setTimeout(() => setCopiedSnippet(false), 2000);
   };
 
+  const refreshSftpDirectory = async (
+    targetPath = sftpCurrentPath,
+    sessionClient = liveSessionRef.current
+  ): Promise<void> => {
+    if (!sessionClient || !sessionClient.isConnected) {
+      setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
+      return;
+    }
+    try {
+      const res = await sessionClient.sftpOp({ op: 'list', path: targetPath });
+      if (res.ok && res.entries) {
+        setSftpCurrentPath(targetPath);
+        setSftpRawEntries(res.entries);
+        setTransferStatus(`Listed ${res.entries.length} remote items in ${targetPath}`);
+      } else {
+        setTransferStatus(`SFTP list error: ${res.error ?? 'Unknown error'}`);
+      }
+    } catch (err) {
+      setTransferStatus(`SFTP list failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const loadRemoteFileIntoEditor = async (
+    remotePath = editorFilePath,
+    sessionClient = liveSessionRef.current
+  ): Promise<void> => {
+    if (!sessionClient || !sessionClient.isConnected) {
+      return;
+    }
+    try {
+      const res = await sessionClient.sftpOp({ op: 'read_file', path: remotePath });
+      if (res.ok && res.dataBase64 !== undefined) {
+        const text = new TextDecoder().decode(base64ToBytes(res.dataBase64));
+        setEditorFilePath(remotePath);
+        setEditorOriginalContent(text);
+        setEditorContent(text);
+        setEditorSaved(true);
+      }
+    } catch {
+      // Ignore if file does not exist yet
+    }
+  };
+
   const handleAddTab = (): void => {
     const nextNum = tabs.length + 1;
     const newId = `tab-${Date.now()}-${nextNum}`;
-    const newTitle = `Terminal ${nextNum}`;
-    setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: false }]);
+    const isLive = Boolean(liveSessionRef.current?.isConnected);
+    const newTitle = isLive
+      ? `Terminal ${nextNum} (${connectedUser}@${connectedHost})`
+      : `Terminal ${nextNum}`;
+    setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: isLive }]);
     setActiveTabId(newId);
     setSessionTabLabel(newTitle);
     setActiveScreen('workspace');
+    if (liveSessionRef.current?.isConnected) {
+      void liveSessionRef.current.openChannel(cols, rows).catch(() => {
+        // Ignore channel open errors
+      });
+    }
   };
 
   const handleCloseTab = (tabId: string, e?: Event): void => {
     if (e) e.stopPropagation();
     if (tabs.length <= 1) {
+      liveSessionRef.current?.close();
+      liveSessionRef.current = null;
       setConnectionState('disconnected');
       setSessionTabLabel('Terminal 1');
       setConnectedUser('bob');
       setConnectedHost('caleston-lp10');
       setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false }]);
       setActiveTabId('tab-1');
+      setSftpRawEntries([]);
+      setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
       setTerminalLines([
         'WebSSH Studio v1.0.0',
         "Type 'help' for local commands or click 'New Connection' to authenticate."
@@ -412,12 +496,16 @@ export function App(): JSX.Element {
   };
 
   const handleDisconnect = (): void => {
+    liveSessionRef.current?.close();
+    liveSessionRef.current = null;
     setConnectionState('disconnected');
     setPendingInputBytes(0);
+    setSftpRawEntries([]);
+    setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
     setTerminalLines((prev) => [...prev, `Disconnected from ${sessionTabLabel}.`]);
-    writeToXterm(`
-Disconnected from ${sessionTabLabel}.
-webssh:~$ `);
+    writeToXterm(
+      `${String.fromCharCode(13, 10)}Disconnected from ${sessionTabLabel}.${String.fromCharCode(13, 10)}webssh:~$ `
+    );
     const resetTitle = 'Terminal 1';
     setSessionTabLabel(resetTitle);
     setConnectedUser('bob');
@@ -436,9 +524,17 @@ webssh:~$ `);
     setConnectErrorMsg('');
     try {
       const text = typeof file.text === 'function' ? await file.text() : '';
-      setUploadedKeyContent(text || `-----BEGIN OPENSSH PRIVATE KEY----- (${file.name})`);
+      setUploadedKeyContent(text);
+      if (text.trim()) {
+        const check = await validateAndInspectPrivateKeyPem(text);
+        if (!check.valid) {
+          setConnectErrorMsg(check.error ?? 'Invalid private key format');
+        } else if (check.fingerprint) {
+          setGeneratedFp(check.fingerprint);
+        }
+      }
     } catch {
-      setUploadedKeyContent(`-----BEGIN OPENSSH PRIVATE KEY----- (${file.name})`);
+      setUploadedKeyContent('');
     }
   };
 
@@ -451,18 +547,18 @@ webssh:~$ `);
       return;
     }
     setConnectErrorMsg('');
-    const hostVal = connectHost.trim() || 'caleston-lp10';
-    const userVal = connectUser.trim() || 'bob';
+    const hostVal = connectHost.trim() || '127.0.0.1';
+    const userVal = connectUser.trim() || 'ubuntu';
     const portVal = connectPort.trim() || '22';
+    const portNum = Number.parseInt(portVal, 10) || 22;
     const label = `${userVal}@${hostVal}`;
     const tabTitle = `Terminal 1 (${label})`;
 
-    // Save connected host cleanly into HostRegistry
     hostRegistry.upsert({
       id: `host-${hostVal}-${portVal}`,
       alias: hostVal,
       host: hostVal,
-      port: Number.parseInt(portVal, 10) || 22,
+      port: portNum,
       user: userVal,
       folder: 'Connected',
       tags: [authMethod === 'Password' ? 'password' : 'key-400'],
@@ -474,30 +570,149 @@ webssh:~$ `);
     setConnectedUser(userVal);
     setConnectedHost(hostVal);
     setSessionTabLabel(tabTitle);
-    setTabs((prev) =>
-      prev.map((t) => (t.id === activeTabId ? { ...t, title: tabTitle, connected: true } : t))
-    );
-    setConnectionState('connected');
-    setConnectModalOpen(false);
-    setActiveScreen('workspace');
-    const authDetail =
-      authMethod === 'Private Key (.pem / id_rsa)'
-        ? `Private Key ${uploadedKeyFileName || 'id_ed25519'} [chmod ${keyPermissionMode}]`
-        : authMethod;
-    const msg = `Connected to ${label}:${portVal} (${authDetail})`;
-    setTerminalLines((prev) => [...prev, msg]);
-    writeToXterm(`
-${msg}
-webssh:~$ `);
+
+    void (async () => {
+      if (authMethod === 'Private Key (.pem / id_rsa)' && uploadedKeyContent.trim()) {
+        const keyCheck = await validateAndInspectPrivateKeyPem(uploadedKeyContent);
+        if (!keyCheck.valid) {
+          setConnectErrorMsg(keyCheck.error ?? 'Invalid private key PEM format.');
+          return;
+        }
+      }
+
+      liveSessionRef.current?.close();
+      const protocolAuthMethod =
+        authMethod === 'Password'
+          ? 'password'
+          : authMethod === 'Private Key (.pem / id_rsa)'
+            ? 'private_key'
+            : 'remote_signer';
+
+      const client = new LiveGatewaySessionClient({
+        gatewayUrl,
+        host: hostVal,
+        port: portNum,
+        user: userVal,
+        authMethod: protocolAuthMethod,
+        password: connectPassword,
+        privateKeyPem: authMethod === 'Private Key (.pem / id_rsa)' ? uploadedKeyContent : undefined,
+        publicKey: authMethod === 'Argon2id Ed25519 Key' ? generatedPubKey : undefined,
+        keyFingerprint: generatedFp,
+        cols,
+        rows,
+        onPtyData: (_channel, data) => {
+          try {
+            xtermAdapterRef.current?.writeBytes(data);
+          } catch {
+            // ignore
+          }
+          const rawText = new TextDecoder().decode(data);
+          const cleaned = rawText
+            .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+            .replace(/\r/g, '')
+            .split('\n')
+            .map((l) => l.trimEnd())
+            .filter((l) => l.length > 0);
+          if (cleaned.length > 0) {
+            setTerminalLines((prev) => [...prev.slice(-200), ...cleaned]);
+          }
+        },
+        onHostKeyPrompt: async (prompt) => {
+          const v = knownHosts.verify(
+            prompt.host,
+            prompt.port,
+            prompt.algorithm,
+            prompt.fingerprint,
+            prompt.publicKeyBase64
+          );
+          if (v.status === 'trusted') {
+            return true;
+          }
+          if (v.status === 'mismatch') {
+            setPendingHostKeyPrompt({
+              host: prompt.host,
+              port: prompt.port,
+              algorithm: prompt.algorithm,
+              fingerprint: prompt.fingerprint,
+              publicKeyBase64: prompt.publicKeyBase64,
+              expectedFingerprint: v.expectedFingerprint
+            });
+            setHostKeyModal('mismatch');
+            return new Promise<boolean>((resolve) => {
+              hostKeyDecisionResolverRef.current = resolve;
+            });
+          }
+          knownHosts.trustNewHost(
+            prompt.host,
+            prompt.port,
+            prompt.algorithm,
+            prompt.fingerprint,
+            prompt.publicKeyBase64
+          );
+          return true;
+        },
+        onSignRequest: async (req) => {
+          const allKeys = vault.listKeys();
+          if (allKeys[0]) {
+            const resp = await vault.signChallenge(
+              allKeys[0].id,
+              base64ToBytes(req.dataBase64)
+            );
+            return bytesToBase64(resp.rawWebCryptoSignature);
+          }
+          return '';
+        },
+        onStateChange: (st) => {
+          if (st === 'disconnected') {
+            setConnectionState('disconnected');
+          }
+        }
+      });
+
+      try {
+        const meta = await client.connect();
+        liveSessionRef.current = client;
+        setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
+        setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
+        setTabs((prev) =>
+          prev.map((t) => (t.id === activeTabId ? { ...t, title: tabTitle, connected: true } : t))
+        );
+        setConnectionState('connected');
+        setConnectModalOpen(false);
+        setActiveScreen('workspace');
+        const authDetail =
+          authMethod === 'Private Key (.pem / id_rsa)'
+            ? `Private Key ${uploadedKeyFileName || 'id_ed25519'} [chmod ${keyPermissionMode}]`
+            : authMethod;
+        const msg = `Connected to ${label}:${portVal} (${authDetail} · ${meta.serverVersion || 'SSH-2.0'})`;
+        setTerminalLines((prev) => [...prev, msg]);
+        writeToXterm(`${String.fromCharCode(13, 10)}${msg}${String.fromCharCode(13, 10)}`);
+        if (meta.sftpReady) {
+          void refreshSftpDirectory('~', client);
+          void loadRemoteFileIntoEditor('README.md', client);
+        }
+      } catch (err) {
+        liveSessionRef.current = null;
+        setConnectionState('disconnected');
+        const errMsg = err instanceof Error ? err.message : String(err);
+        setConnectErrorMsg(errMsg);
+        setTerminalLines((prev) => [...prev, `[SSH Connection Error] ${errMsg}`]);
+      }
+    })();
   };
 
-  const appendCommandBlock = (command: string, outputLines: string[], exitCode = 0): void => {
+  const appendCommandBlock = (
+    command: string,
+    outputLines: string[],
+    exitCode = 0,
+    durationMs = 12
+  ): void => {
     const entry: CommandBlockEntry = {
       id: `block-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       command,
       outputLines,
-      timestamp: '08:15:10',
-      durationMs: 28,
+      timestamp: new Date().toISOString().slice(11, 19),
+      durationMs,
       exitCode,
       collapsed: false
     };
@@ -547,9 +762,7 @@ webssh:~$ `);
         'Available local commands: connect <user@host>, pubkey, font <size>, clear, vault, split, features, telemetry, tunnels, playbooks';
       setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, helpMsg]);
       appendCommandBlock(trimmed, [helpMsg], 0);
-      writeToXterm(`
-${helpMsg}
-webssh:~$ `);
+      writeToXterm(`${String.fromCharCode(13, 10)}${helpMsg}${String.fromCharCode(13, 10)}webssh:~$ `);
       return;
     }
 
@@ -558,9 +771,7 @@ webssh:~$ `);
       const out = [`Ed25519 Public Key: ${generatedPubKey}`, `Copy helper: ${authorizedKeysSnippet}`];
       setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, ...out]);
       appendCommandBlock(trimmed, out, 0);
-      writeToXterm(`
-Ed25519 Public Key: ${generatedPubKey}
-webssh:~$ `);
+      writeToXterm(`${String.fromCharCode(13, 10)}Ed25519 Public Key: ${generatedPubKey}${String.fromCharCode(13, 10)}webssh:~$ `);
       return;
     }
 
@@ -572,9 +783,7 @@ webssh:~$ `);
         const msg = `Terminal font size set to ${clamped}px.`;
         setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
         appendCommandBlock(trimmed, [msg], 0);
-        writeToXterm(`
-${msg}
-webssh:~$ `);
+        writeToXterm(`${String.fromCharCode(13, 10)}${msg}${String.fromCharCode(13, 10)}webssh:~$ `);
       } else {
         const msg = 'Usage: font <size> (11-32)';
         setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
@@ -649,12 +858,42 @@ webssh:~$ `);
       return;
     }
 
-    const unknownMsg = `Executed remote/shell command: ${trimmed}`;
-    setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, unknownMsg]);
-    appendCommandBlock(trimmed, [unknownMsg], 0);
-    writeToXterm(`
-${unknownMsg}
-webssh:~$ `);
+    const activeClient = liveSessionRef.current;
+    if (activeClient && activeClient.isConnected) {
+      setTerminalLines((prev) => [...prev, `${connectedUser}@${connectedHost}:~$ ${trimmed}`]);
+      if (broadcastInput && splitPanes > 1) {
+        activeClient.sendPtyText(2, trimmed + String.fromCharCode(13));
+      }
+      void activeClient
+        .execCommand(trimmed)
+        .then((res) => {
+          const outText = [res.stdout, res.stderr, res.error]
+            .filter((part) => Boolean(part && part.trim().length > 0))
+            .join(String.fromCharCode(10));
+          const outLines = outText
+            ? outText
+                .replace(/\r/g, '')
+                .split(String.fromCharCode(10))
+                .filter((line) => line.length > 0)
+            : [`(exit ${res.exitCode ?? 0})`];
+          setTerminalLines((prev) => [...prev, ...outLines]);
+          appendCommandBlock(trimmed, outLines, res.exitCode ?? (res.ok ? 0 : 1), res.durationMs ?? 10);
+          writeToXterm(
+            `${String.fromCharCode(13, 10)}${outLines.join(String.fromCharCode(13, 10))}${String.fromCharCode(13, 10)}`
+          );
+        })
+        .catch((err) => {
+          const errLine = `Remote execution failed: ${err instanceof Error ? err.message : String(err)}`;
+          setTerminalLines((prev) => [...prev, errLine]);
+          appendCommandBlock(trimmed, [errLine], 1, 0);
+        });
+      return;
+    }
+
+    const offlineMsg = `Not connected to an SSH server. Click 'New Connection' or run 'connect <user@host>' to execute '${trimmed}' on a remote host.`;
+    setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, offlineMsg]);
+    appendCommandBlock(trimmed, [offlineMsg], 1, 0);
+    writeToXterm(`${String.fromCharCode(13, 10)}${offlineMsg}${String.fromCharCode(13, 10)}webssh:~$ `);
   };
 
   const handleTerminalKeyDown = (e: KeyboardEvent): void => {
@@ -746,6 +985,7 @@ webssh:~$ `);
           if (!disposed) {
             setCols(c);
             setRows(r);
+            liveSessionRef.current?.resizeChannel(1, c, r);
           }
         }
       });
@@ -2285,20 +2525,51 @@ webssh:~$ `);
                     onClick={() => {
                       const lPort = Number.parseInt(newTunnelLocalPort, 10) || 8080;
                       const rPort = Number.parseInt(newTunnelRemotePort, 10) || 80;
-                      setTunnels((prev) => [
-                        ...prev,
-                        {
-                          id: `tunnel-${Date.now()}`,
-                          name: `Custom Tunnel :${lPort}->:${rPort}`,
-                          type: 'L',
-                          bindAddress: '127.0.0.1',
-                          localPort: lPort,
-                          remoteHost: '127.0.0.1',
-                          remotePort: rPort,
-                          active: true,
-                          bytesTransferred: 0
-                        }
-                      ]);
+                      const tunId = `tunnel-${Date.now()}`;
+                      const activeClient = liveSessionRef.current;
+                      if (activeClient && activeClient.isConnected) {
+                        void activeClient
+                          .tunnelOp({
+                            op: 'start',
+                            tunnelId: tunId,
+                            forwardType: 'L',
+                            bindAddress: '127.0.0.1',
+                            localPort: lPort,
+                            remoteHost: '127.0.0.1',
+                            remotePort: rPort
+                          })
+                          .then((res) => {
+                            setTunnels((prev) => [
+                              ...prev,
+                              {
+                                id: tunId,
+                                name: `Custom Tunnel :${lPort}->:${rPort}`,
+                                type: 'L',
+                                bindAddress: res.boundAddress || '127.0.0.1',
+                                localPort: lPort,
+                                remoteHost: '127.0.0.1',
+                                remotePort: rPort,
+                                active: Boolean(res.ok && res.active),
+                                bytesTransferred: 0
+                              }
+                            ]);
+                          });
+                      } else {
+                        setTunnels((prev) => [
+                          ...prev,
+                          {
+                            id: tunId,
+                            name: `Custom Tunnel :${lPort}->:${rPort}`,
+                            type: 'L',
+                            bindAddress: '127.0.0.1',
+                            localPort: lPort,
+                            remoteHost: '127.0.0.1',
+                            remotePort: rPort,
+                            active: true,
+                            bytesTransferred: 0
+                          }
+                        ]);
+                      }
                     }}
                   >
                     + Add Tunnel
@@ -2325,19 +2596,22 @@ webssh:~$ `);
                       <Button
                         variant="default"
                         testId={`toggle-tunnel-${t.id}`}
-                        onClick={() =>
+                        onClick={() => {
+                          if (t.active && liveSessionRef.current?.isConnected) {
+                            void liveSessionRef.current.tunnelOp({ op: 'stop', tunnelId: t.id });
+                          }
                           setTunnels((prev) =>
                             prev.map((item) => (item.id === t.id ? { ...item, active: !item.active } : item))
-                          )
-                        }
+                          );
+                        }}
                       >
                         {t.active ? 'Pause Tunnel' : 'Start Tunnel'}
                       </Button>
                       <Button
                         variant="primary"
-                        onClick={() => setWebPreviewPort(t.localPort)}
+                        onClick={() => setWebPreviewPort(t.remotePort || t.localPort)}
                       >
-                        Preview :{t.localPort}
+                        Preview :{t.remotePort || t.localPort}
                       </Button>
                     </div>
                   </Card>
@@ -2345,16 +2619,51 @@ webssh:~$ `);
               </div>
 
               <Card testId="remote-web-preview-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
                   <h2>One-Click Web Preview — Remote localhost:{webPreviewPort}</h2>
-                  <Badge tone="success">SSH HTTP Proxy Tunnel Active</Badge>
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+                    <Badge tone={connectionState === 'connected' ? 'success' : 'neutral'}>
+                      {connectionState === 'connected' ? 'SSH Direct-TCPIP Ready' : 'Disconnected'}
+                    </Badge>
+                    <Button
+                      variant="primary"
+                      testId="probe-http-preview-btn"
+                      onClick={() => {
+                        const activeClient = liveSessionRef.current;
+                        if (!activeClient || !activeClient.isConnected) {
+                          setTunnelPreviewOutput(
+                            `Cannot probe 127.0.0.1:${webPreviewPort}: Not connected to an SSH host.`
+                          );
+                          return;
+                        }
+                        void activeClient
+                          .tunnelOp({
+                            op: 'http_preview',
+                            remoteHost: '127.0.0.1',
+                            remotePort: webPreviewPort,
+                            httpPath: '/'
+                          })
+                          .then((res) => {
+                            if (res.ok) {
+                              setTunnelPreviewOutput(
+                                `HTTP/1.1 ${res.statusText || res.statusCode || 200}${String.fromCharCode(10)}${res.bodyPreview || ''}`
+                              );
+                            } else {
+                              setTunnelPreviewOutput(
+                                `Tunnel HTTP Probe Failed on 127.0.0.1:${webPreviewPort}: ${res.error || 'Connection refused'}`
+                              );
+                            }
+                          });
+                      }}
+                    >
+                      Probe HTTP Preview
+                    </Button>
+                  </div>
                 </div>
                 <p>
-                  Proxying remote <code>http://127.0.0.1:{webPreviewPort}</code> over multiplexed SSH channel #4:
+                  Proxying remote <code>http://127.0.0.1:{webPreviewPort}</code> over SSH <code>direct-tcpip</code> channel:
                 </p>
-                <pre>
-                  HTTP/1.1 200 OK · Service on 127.0.0.1:{webPreviewPort} (Grafana / Prometheus / Dev Server Ready)
-                </pre>
+                <pre data-testid="tunnel-preview-output">{tunnelPreviewOutput}</pre>
               </Card>
             </div>
           ) : null}
@@ -2890,8 +3199,30 @@ webssh:~$ `);
                     variant="primary"
                     testId="apply-chmod-btn"
                     onClick={() => {
-                      setChmodTargetFile('/etc/nginx/nginx.conf');
-                      setTransferStatus(`Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`);
+                      const activeClient = liveSessionRef.current;
+                      if (activeClient && activeClient.isConnected) {
+                        void activeClient
+                          .sftpOp({
+                            op: 'chmod',
+                            path: chmodTargetFile,
+                            mode: chmodFormatted.octal
+                          })
+                          .then((res) => {
+                            if (res.ok) {
+                              setTransferStatus(
+                                `Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`
+                              );
+                              void refreshSftpDirectory(sftpCurrentPath, activeClient);
+                            } else {
+                              setTransferStatus(`chmod failed on ${chmodTargetFile}: ${res.error ?? 'Unknown error'}`);
+                            }
+                          });
+                      } else {
+                        setChmodTargetFile('/etc/nginx/nginx.conf');
+                        setTransferStatus(
+                          `Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`
+                        );
+                      }
                     }}
                   >
                     Apply chmod {chmodFormatted.octal}
@@ -2963,8 +3294,24 @@ webssh:~$ `);
           {activeScreen === 'editor' ? (
             <div className="webssh-panel-content" data-testid="screen-editor">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                <h1>Remote File Editor — /etc/nginx/nginx.conf</h1>
-                <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                <h1>Remote File Editor — {editorFilePath}</h1>
+                <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input
+                    type="text"
+                    className="ui-input"
+                    aria-label="Remote file path"
+                    value={editorFilePath}
+                    onInput={(e) => setEditorFilePath((e.target as HTMLInputElement).value)}
+                    data-testid="editor-filepath-input"
+                    style={{ width: '200px' }}
+                  />
+                  <Button
+                    variant="default"
+                    testId="load-remote-file-btn"
+                    onClick={() => void loadRemoteFileIntoEditor(editorFilePath)}
+                  >
+                    Load from Host
+                  </Button>
                   <Button
                     variant="default"
                     testId="toggle-diff-viewer-btn"
@@ -2974,7 +3321,30 @@ webssh:~$ `);
                   </Button>
                   <Button
                     variant="primary"
-                    onClick={() => setEditorSaved(true)}
+                    onClick={() => {
+                      const activeClient = liveSessionRef.current;
+                      if (activeClient && activeClient.isConnected) {
+                        const encoded = bytesToBase64(new TextEncoder().encode(editorContent));
+                        void activeClient
+                          .sftpOp({
+                            op: 'write_file',
+                            path: editorFilePath,
+                            dataBase64: encoded
+                          })
+                          .then((res) => {
+                            if (res.ok) {
+                              setEditorOriginalContent(editorContent);
+                              setEditorSaved(true);
+                              setTransferStatus(`Saved ${editorFilePath} over SFTP`);
+                              void refreshSftpDirectory(sftpCurrentPath, activeClient);
+                            } else {
+                              setTransferStatus(`Save failed: ${res.error ?? 'Unknown error'}`);
+                            }
+                          });
+                      } else {
+                        setEditorSaved(true);
+                      }
+                    }}
                     testId="save-remote-file-btn"
                   >
                     Save to host {editorSaved ? '(Saved)' : '(Unsaved*)'}
@@ -3171,6 +3541,32 @@ webssh:~$ `);
                   </Button>
                 </div>
               </Card>
+              <Card testId="settings-asset-cache-card">
+                <h2>Application Asset Cache Recovery</h2>
+                <p>
+                  Purge Service Worker and static bundle caches without clearing your saved SSH hosts, non-extractable Key Vault keys, or user preferences.
+                </p>
+                <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Button
+                    variant="default"
+                    testId="settings-repair-cache-btn"
+                    onClick={() => {
+                      void repairApplicationAssetCaches().then((res) => {
+                        setCacheRepairStatus(
+                          `Cleared ${res.deletedCaches.length} asset cache(s) and unregistered ${res.unregisteredServiceWorkers} service worker(s). Saved hosts, keys, and settings preserved.`
+                        );
+                      });
+                    }}
+                  >
+                    Repair Application Asset Cache
+                  </Button>
+                  {cacheRepairStatus ? (
+                    <Badge tone="success" testId="settings-repair-cache-status">
+                      {cacheRepairStatus}
+                    </Badge>
+                  ) : null}
+                </div>
+              </Card>
             </div>
           ) : null}
 
@@ -3190,7 +3586,7 @@ webssh:~$ `);
         <footer className="webssh-statusbar" role="contentinfo" data-testid="status-bar">
           <span>
             {connectionState === 'connected'
-              ? `Connected: ${sessionTabLabel} · Cipher: chacha20-poly1305@openssh.com`
+              ? `Connected: ${sessionTabLabel} · Cipher: ${negotiatedCipher}${negotiatedServerVersion ? ` · ${negotiatedServerVersion}` : ''}`
               : 'Status: Disconnected · Ready for SSH connection'}
           </span>
           <span>
@@ -3207,6 +3603,26 @@ webssh:~$ `);
         testId="connect-modal"
       >
         <form onSubmit={handleConnectSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <div>
+            <label htmlFor="connect-gateway-input">SSH Gateway WebSocket URL</label>
+            <input
+              id="connect-gateway-input"
+              type="text"
+              className="ui-input"
+              placeholder="ws://127.0.0.1:8080/ws"
+              value={gatewayUrl}
+              onInput={(e) => {
+                const val = (e.target as HTMLInputElement).value;
+                setGatewayUrl(val);
+                try {
+                  globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                } catch {
+                  // ignore
+                }
+              }}
+              data-testid="gateway-url-input"
+            />
+          </div>
           <div>
             <label htmlFor="connect-host-input">Host (IP or domain)</label>
             <input
@@ -3399,18 +3815,33 @@ webssh:~$ `);
         open={hostKeyModal !== 'none'}
         danger={hostKeyModal === 'mismatch'}
         title={hostKeyModal === 'mismatch' ? 'WARNING: REMOTE HOST KEY CHANGED' : 'Verify Unknown Host Key (TOFU)'}
-        onClose={() => setHostKeyModal('none')}
+        onClose={() => {
+          setHostKeyModal('none');
+          if (hostKeyDecisionResolverRef.current) {
+            hostKeyDecisionResolverRef.current(false);
+            hostKeyDecisionResolverRef.current = null;
+          }
+        }}
         testId="hostkey-modal"
       >
         <p>
-          Host: <strong>{connectHost || 'localhost'}:{connectPort || '22'}</strong>
+          Host:{' '}
+          <strong>
+            {pendingHostKeyPrompt?.host || connectHost || 'localhost'}:
+            {pendingHostKeyPrompt?.port || connectPort || '22'}
+          </strong>
         </p>
         <p>
-          SHA-256 Fingerprint: <code>{generatedFp}</code>
+          SHA-256 Fingerprint:{' '}
+          <code data-testid="hostkey-modal-fingerprint">
+            {pendingHostKeyPrompt?.fingerprint || generatedFp}
+          </code>
         </p>
         {hostKeyModal === 'mismatch' ? (
           <p>
-            The host key does not match your pinned fingerprint. This could indicate a man-in-the-middle attack. Connection is blocked unless you explicitly override.
+            The host key does not match your pinned fingerprint (
+            <code>{pendingHostKeyPrompt?.expectedFingerprint || 'pinned-key'}</code>). This could indicate a
+            man-in-the-middle attack. Connection is blocked unless you explicitly override.
           </p>
         ) : (
           <p>Trust on first use (TOFU) will pin this SHA-256 fingerprint in your browser store.</p>
@@ -3418,12 +3849,40 @@ webssh:~$ `);
         <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-3)' }}>
           <Button
             variant={hostKeyModal === 'mismatch' ? 'danger' : 'primary'}
-            onClick={() => setHostKeyModal('none')}
+            onClick={() => {
+              if (pendingHostKeyPrompt) {
+                knownHosts.revokeHost(pendingHostKeyPrompt.host, pendingHostKeyPrompt.port);
+                knownHosts.trustNewHost(
+                  pendingHostKeyPrompt.host,
+                  pendingHostKeyPrompt.port,
+                  pendingHostKeyPrompt.algorithm,
+                  pendingHostKeyPrompt.fingerprint,
+                  pendingHostKeyPrompt.publicKeyBase64
+                );
+              }
+              setHostKeyModal('none');
+              setPendingHostKeyPrompt(null);
+              if (hostKeyDecisionResolverRef.current) {
+                hostKeyDecisionResolverRef.current(true);
+                hostKeyDecisionResolverRef.current = null;
+              }
+            }}
             testId="hostkey-confirm-btn"
           >
             {hostKeyModal === 'mismatch' ? 'Explicit Override & Pin New Key' : 'Trust & Pin Host Key'}
           </Button>
-          <Button variant="default" onClick={() => setHostKeyModal('none')}>
+          <Button
+            variant="default"
+            testId="hostkey-reject-btn"
+            onClick={() => {
+              setHostKeyModal('none');
+              setPendingHostKeyPrompt(null);
+              if (hostKeyDecisionResolverRef.current) {
+                hostKeyDecisionResolverRef.current(false);
+                hostKeyDecisionResolverRef.current = null;
+              }
+            }}
+          >
             Disconnect
           </Button>
         </div>
