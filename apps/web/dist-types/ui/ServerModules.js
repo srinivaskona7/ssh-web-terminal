@@ -5,7 +5,7 @@ import { discoverServer } from '../discovery/capabilities.js';
 import { buildPlan, evaluateRecipe, redactValues, validateValues, withDefaults } from '../recipes/engine.js';
 import { listRecipes, searchRecipes } from '../recipes/catalog.js';
 import { jobStore } from '../jobs/job-store.js';
-import { monitorJob, startCommandJob, startRecipeJob } from '../jobs/job-manager.js';
+import { cancelAndConfirm, monitorJob, startCommandJob, startRecipeJob, verifyJob } from '../jobs/job-manager.js';
 import { isActiveJobState, isValidJobId } from '../jobs/types.js';
 import { DockerClient } from '../containers/docker-client.js';
 import { KubernetesClient } from '../kubernetes/kubectl-client.js';
@@ -15,6 +15,14 @@ import { buildDeploymentPlan, detectProject } from '../projects/projects.js';
 import { controlService, listProcesses, listServices, powerAction, sampleMetrics, serviceLogs } from '../control/server-control.js';
 function errorText(err) {
     return err instanceof Error ? err.message : String(err);
+}
+/** Adapt the workspace session to the detached-job runner contract. */
+function jobSessionFor(session, executeAsRoot = false) {
+    return {
+        execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
+        executeAsRoot,
+        isAttached: () => session.isConnected()
+    };
 }
 function useAsync(load, deps) {
     const [result, setResult] = useState({ state: load ? 'loading' : 'idle' });
@@ -69,8 +77,13 @@ function CapabilityGrid({ caps }) {
         ['Kernel', caps.os.kernel || 'unknown'],
         ['Architecture', caps.os.arch || 'unknown'],
         ['CPU', `${caps.cpu.cores || '?'} cores${caps.cpu.model ? ` · ${caps.cpu.model}` : ''}`],
-        ['Memory', `${caps.memory.totalMiB} MiB total · ${caps.memory.availableMiB} MiB available`],
-        ['Swap', `${caps.memory.swapMiB} MiB`],
+        [
+            'Memory',
+            caps.memory.totalMiB > 0
+                ? `${caps.memory.totalMiB} MiB total · ${caps.memory.availableMiB} MiB available`
+                : 'not reported'
+        ],
+        ['Swap', caps.memory.totalMiB > 0 ? `${caps.memory.swapMiB} MiB` : 'not reported'],
         ['User', `${caps.user.name} (uid ${caps.user.uid})`],
         ['Home', caps.user.home || 'unknown'],
         ['Shell', caps.user.shell || 'unknown'],
@@ -264,6 +277,7 @@ function RecipeDetail({ recipe, caps, session, onJob }) {
     const [busy, setBusy] = useState(false);
     const [message, setMessage] = useState(null);
     const [error, setError] = useState(null);
+    const [lastJob, setLastJob] = useState(null);
     useEffect(() => {
         setValues(withDefaults(recipe));
         setPlan(null);
@@ -307,15 +321,49 @@ function RecipeDetail({ recipe, caps, session, onJob }) {
                 }
             });
             onJob(job);
+            setLastJob(job);
             setMessage(job.state === 'failed'
                 ? `Job could not start: ${job.error ?? 'unknown error'}`
                 : `Job ${job.id} started. Track it under Activity.`);
-            void monitorJob(job, {
-                execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
-                isAttached: () => session.isConnected()
-            }, {
-                onUpdate: (updated) => onJob(updated)
+            void monitorJob(job, jobSessionFor(session, recipe.privileges === 'sudo'), {
+                onUpdate: (updated) => {
+                    onJob(updated);
+                    setLastJob(updated);
+                }
             }).catch(() => undefined);
+        }
+        catch (err) {
+            setError(errorText(err));
+        }
+        finally {
+            setBusy(false);
+        }
+    };
+    /**
+     * Verification runs the recipe's `verify` steps as the logged-in user and
+     * records the outcome on the job. It is a separate, explicit action so a
+     * passing install never implies a passing check.
+     */
+    const runVerification = async () => {
+        if (!lastJob)
+            return;
+        if (!session.execStream) {
+            setError('This transport cannot stream exec output, so verification steps cannot run.');
+            return;
+        }
+        setBusy(true);
+        setError(null);
+        try {
+            const verified = await verifyJob(lastJob, recipe, {
+                capabilities: caps,
+                execStream: (command, options) => session.execStream(command, options),
+                ...(session.writeFile ? { writeFile: session.writeFile } : {})
+            });
+            setLastJob(verified);
+            onJob(verified);
+            setMessage(verified.verification?.ok
+                ? `Verification passed: ${verified.verification.detail ?? ''}`.trim()
+                : `Verification failed: ${verified.verification?.detail ?? 'no detail'}`);
         }
         catch (err) {
             setError(errorText(err));
@@ -328,7 +376,7 @@ function RecipeDetail({ recipe, caps, session, onJob }) {
                         ? `Services: ${recipe.provides.services.join(', ')}. `
                         : '', recipe.provides?.ports?.length ? `Ports: ${recipe.provides.ports.join(', ')}.` : ''] })) : null, _jsx("h4", { children: "Variables" }), basicFields.length === 0 && advancedFields.length === 0 ? (_jsx("p", { className: "ws-mod-muted", children: "This recipe needs no variables." })) : null, _jsxs("div", { className: "ws-mod-form", children: [basicFields.map((field) => (_jsx(RecipeFieldControl, { recipe: recipe, field: field, value: values[field.id], onChange: (value) => setValues((prev) => ({ ...prev, [field.id]: value })) }, field.id))), advancedFields.length > 0 ? (_jsx(Button, { variant: "ghost", onClick: () => setShowAdvanced((prev) => !prev), children: showAdvanced ? 'Hide advanced variables' : `Advanced variables (${advancedFields.length})` })) : null, showAdvanced
                         ? advancedFields.map((field) => (_jsx(RecipeFieldControl, { recipe: recipe, field: field, value: values[field.id], onChange: (value) => setValues((prev) => ({ ...prev, [field.id]: value })) }, field.id)))
-                        : null] }), errors.length > 0 ? (_jsx("ul", { className: "ws-mod-error-list", children: errors.map((err) => (_jsx("li", { children: err.message }, err.field))) })) : null, _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { onClick: preview, disabled: busy, testId: "recipe-preview", children: "Preview plan" }), _jsx(Button, { variant: "primary", onClick: () => void install(), disabled: busy || !plan?.canExecute, testId: "recipe-install", children: busy ? 'Starting…' : 'Install' })] }), message ? _jsx("p", { className: "ws-mod-success", children: message }) : null, error ? _jsx(ErrorNote, { message: error }) : null, plan ? (_jsxs("div", { className: "ws-mod-plan", children: [_jsx("h4", { children: "Plan" }), _jsxs("ul", { className: "ws-mod-issues", children: [plan.issues.map((issue, index) => (_jsxs("li", { className: `ws-mod-issue ws-mod-issue--${issue.level}`, children: [_jsx(Badge, { tone: issue.level === 'blocking' ? 'danger' : 'warning', children: issue.level }), ' ', issue.message] }, `${issue.code}-${index}`))), plan.issues.length === 0 ? _jsx("li", { className: "ws-mod-muted", children: "No issues found." }) : null] }), _jsxs("table", { className: "ws-mod-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Step" }), _jsx("th", { children: "Command" })] }) }), _jsx("tbody", { children: plan.steps.map((step) => (_jsxs("tr", { children: [_jsx("td", { children: step.title }), _jsx("td", { children: _jsx("code", { children: step.kind === 'exec'
+                        : null] }), errors.length > 0 ? (_jsx("ul", { className: "ws-mod-error-list", children: errors.map((err) => (_jsx("li", { children: err.message }, err.field))) })) : null, _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { onClick: preview, disabled: busy, testId: "recipe-preview", children: "Preview plan" }), _jsx(Button, { variant: "primary", onClick: () => void install(), disabled: busy || !plan?.canExecute, testId: "recipe-install", children: busy ? 'Starting…' : 'Install' }), lastJob ? (_jsx(Button, { onClick: () => void runVerification(), disabled: busy || !lastJob || session.execStream === undefined, testId: "recipe-verify", children: "Run verification" })) : null] }), message ? _jsx("p", { className: "ws-mod-success", children: message }) : null, error ? _jsx(ErrorNote, { message: error }) : null, plan ? (_jsxs("div", { className: "ws-mod-plan", children: [_jsx("h4", { children: "Plan" }), _jsxs("ul", { className: "ws-mod-issues", children: [plan.issues.map((issue, index) => (_jsxs("li", { className: `ws-mod-issue ws-mod-issue--${issue.level}`, children: [_jsx(Badge, { tone: issue.level === 'blocking' ? 'danger' : 'warning', children: issue.level }), ' ', issue.message] }, `${issue.code}-${index}`))), plan.issues.length === 0 ? _jsx("li", { className: "ws-mod-muted", children: "No issues found." }) : null] }), _jsxs("table", { className: "ws-mod-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Step" }), _jsx("th", { children: "Command" })] }) }), _jsx("tbody", { children: plan.steps.map((step) => (_jsxs("tr", { children: [_jsx("td", { children: step.title }), _jsx("td", { children: _jsx("code", { children: step.kind === 'exec'
                                                     ? (step.resolvedArgv ?? step.argv).join(' ')
                                                     : `write ${step.path}` }) })] }, step.id))) })] }), plan.steps.some((step) => step.kind === 'exec' && step.asRoot) ? (_jsx("p", { className: "ws-mod-muted", children: "Steps marked as root run through `sudo -n`. If sudo needs a password the plan is blocked rather than storing your password." })) : null] })) : null] }));
 }
@@ -499,11 +547,22 @@ export function ActivityPanel({ ctx }) {
             return;
         setError(null);
         try {
-            const final = await monitorJob(job, {
-                execCommand: (command, timeoutMs) => ctx.session.exec(command, { timeoutMs }),
-                isAttached: () => ctx.session.isConnected()
-            }, { onUpdate: update, timeoutMs: 300_000 });
+            const final = await monitorJob(job, jobSessionFor(ctx.session), {
+                onUpdate: update,
+                timeoutMs: 300_000
+            });
             update(final);
+        }
+        catch (err) {
+            setError(errorText(err));
+        }
+    };
+    const cancel = async (job) => {
+        if (!ctx.session)
+            return;
+        setError(null);
+        try {
+            update(await cancelAndConfirm(job, jobSessionFor(ctx.session)));
         }
         catch (err) {
             setError(errorText(err));
@@ -513,7 +572,7 @@ export function ActivityPanel({ ctx }) {
                                                     ? 'success'
                                                     : step.status === 'failed'
                                                         ? 'danger'
-                                                        : 'neutral', children: step.status }), ' ', step.title, step.exitCode !== undefined ? ` (exit ${step.exitCode})` : ''] }, step.id))) }), isActiveJobState(selected.state) && ctx.session ? (_jsx(Button, { variant: "primary", onClick: () => void reattach(selected), children: "Reattach and follow" })) : null] })) : (_jsx(EmptyState, { title: "Select a job", description: "Choose a job to see its steps and result." })) })] }))] }));
+                                                        : 'neutral', children: step.status }), ' ', step.title, step.exitCode !== undefined ? ` (exit ${step.exitCode})` : ''] }, step.id))) }), isActiveJobState(selected.state) && ctx.session ? (_jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { variant: "primary", onClick: () => void reattach(selected), children: "Reattach and follow" }), _jsx(Button, { variant: "danger", onClick: () => void cancel(selected), children: "Cancel job" })] })) : null] })) : (_jsx(EmptyState, { title: "Select a job", description: "Choose a job to see its steps and result." })) })] }))] }));
 }
 /* ------------------------------------------------------------------ */
 /* Deployments: Git review, project detection, reviewed deploy plan    */
@@ -539,6 +598,8 @@ export function DeploymentsPanel({ ctx }) {
     const [message, setMessage] = useState(null);
     const [job, setJob] = useState(null);
     const [jobLog, setJobLog] = useState('');
+    const monitorAbort = useRef(null);
+    const logSeq = useRef(0);
     if (!session)
         return _jsx(RequiresSession, { what: "Deployments and Git" });
     const gitClient = () => new GitClient(session, directory.trim());
@@ -657,11 +718,7 @@ export function DeploymentsPanel({ ctx }) {
                     port: session.port,
                     transport: session.transport
                 },
-                session: {
-                    execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
-                    executeAsRoot: serviceName.trim().length > 0,
-                    isAttached: () => session.isConnected()
-                }
+                session: jobSessionFor(session, serviceName.trim().length > 0)
             });
             setJob(started);
             if (started.state === 'failed') {
@@ -669,17 +726,22 @@ export function DeploymentsPanel({ ctx }) {
                 return;
             }
             setMessage(`Deployment job ${started.id} started`);
-            const finished = await monitorJob(started, {
-                execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
-                isAttached: () => session.isConnected()
-            }, {
+            const controller = new AbortController();
+            monitorAbort.current = controller;
+            const finished = await monitorJob(started, jobSessionFor(session, serviceName.trim().length > 0), {
+                signal: controller.signal,
                 onUpdate: (current) => {
                     setJob(current);
                     void refreshJobLog(current);
                 }
+            }).finally(() => {
+                monitorAbort.current = null;
             });
             setJob(finished);
             await refreshJobLog(finished);
+            if (finished.state === 'detached') {
+                setMessage(`Stopped following job ${finished.id}. It keeps running on the server; reattach from Activity.`);
+            }
         }
         catch (err) {
             setError(errorText(err));
@@ -691,21 +753,24 @@ export function DeploymentsPanel({ ctx }) {
     const refreshJobLog = async (current) => {
         if (!isValidJobId(current.id))
             return;
+        // Polls can overlap; only the newest read may update the view.
+        const seq = ++logSeq.current;
         try {
             const result = await session.exec(`tail -n 200 "$HOME/.webssh/jobs/${current.id}/stdout.log" 2>/dev/null || true`);
-            setJobLog(result.stdout);
+            if (seq === logSeq.current)
+                setJobLog(result.stdout);
         }
         catch {
             // Log tail is best-effort; the job state remains authoritative.
         }
     };
-    return (_jsxs("section", { className: "ws-mod", "data-testid": "screen-deployments", children: [_jsx("header", { className: "ws-mod-head", children: _jsxs("div", { children: [_jsx("h1", { children: "Deployments" }), _jsx("p", { className: "ws-mod-muted", children: "Inspect a project, review Git changes, then run a reviewed build and deploy plan on the connected server. Deployment runs as a durable job in the background." })] }) }), busy ? _jsx(Loading, { label: "Working" }) : null, error ? _jsx(ErrorNote, { message: error }) : null, message ? _jsx("p", { className: "ws-mod-success", children: message }) : null, _jsxs("div", { className: "ws-mod-filters", children: [_jsx("input", { className: "ui-input", "aria-label": "Project directory", placeholder: "~/app", value: directory, onInput: (e) => setDirectory(e.target.value), style: { flex: 1, minWidth: '220px' } }), _jsx(Button, { variant: "primary", onClick: () => void detect(), testId: "deploy-detect", children: "Detect project" })] }), project ? (_jsxs("div", { className: "ws-mod-detail", children: [_jsxs("header", { className: "ws-mod-detail-head", children: [_jsx("strong", { children: project.type }), _jsxs(Badge, { tone: project.type === 'unknown' ? 'warning' : 'success', children: [project.manifests.length, " manifest", project.manifests.length === 1 ? '' : 's'] })] }), _jsx("p", { className: "ws-mod-muted", children: project.directory }), project.manifests.length > 0 ? (_jsx("div", { className: "ws-mod-chips", children: project.manifests.map((m) => (_jsx(Badge, { tone: "neutral", children: m }, m))) })) : null, project.notes.length > 0 ? (_jsx("ul", { className: "ws-mod-warnings", children: project.notes.map((note) => (_jsx("li", { children: note }, note))) })) : null] })) : null, git ? (_jsxs("div", { className: "ws-mod-detail", children: [_jsxs("header", { className: "ws-mod-detail-head", children: [_jsxs("strong", { children: ["Git \u00B7 ", git.branch] }), _jsx(Badge, { tone: git.clean ? 'success' : 'warning', children: git.clean ? 'clean' : `${git.files.length} changed` })] }), _jsxs("p", { className: "ws-mod-muted", children: [git.upstream ? `upstream ${git.upstream} · ` : '', git.ahead, " ahead \u00B7 ", git.behind, " behind", branches ? ` · branches: ${branches.branches.join(', ')}` : ''] }), git.files.length > 0 ? (_jsxs("table", { className: "ws-mod-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Code" }), _jsx("th", { children: "Path" })] }) }), _jsx("tbody", { children: git.files.map((file) => (_jsxs("tr", { children: [_jsx("td", { children: file.code }), _jsx("td", { children: file.path })] }, file.path))) })] })) : null, _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { variant: "default", onClick: () => void runGitAction('Staged all changes', (c) => c.stage(['-A'])), testId: "git-stage-all", children: "Stage all" }), _jsx(Button, { variant: "default", onClick: () => void runGitAction('Loaded diff', async (c) => setDiff(await c.diff())).then(() => undefined), testId: "git-diff", children: "Show diff" }), _jsx("input", { className: "ui-input", "aria-label": "Commit message", placeholder: "Commit message", value: commitMessage, onInput: (e) => setCommitMessage(e.target.value) }), _jsx(Button, { variant: "primary", onClick: () => void runGitAction('Commit created', (c) => c.commit(commitMessage.trim())), testId: "git-commit", children: "Commit" })] }), diff ? (_jsx("pre", { className: "ws-mod-log", "aria-label": "Git diff", children: diff })) : null, log.length > 0 ? (_jsxs("table", { className: "ws-mod-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Commit" }), _jsx("th", { children: "Author" }), _jsx("th", { children: "Date" }), _jsx("th", { children: "Subject" })] }) }), _jsx("tbody", { children: log.map((entry) => (_jsxs("tr", { children: [_jsx("td", { children: entry.shortHash }), _jsx("td", { children: entry.author }), _jsx("td", { children: entry.date }), _jsx("td", { children: entry.subject })] }, entry.hash))) })] })) : null] })) : null, _jsxs("div", { className: "ws-mod-detail", children: [_jsx("header", { className: "ws-mod-detail-head", children: _jsx("strong", { children: "Deployment options" }) }), _jsxs("div", { className: "ws-mod-form", children: [_jsxs("label", { className: "ws-mod-check", children: [_jsx("input", { type: "checkbox", checked: installDependencies, onChange: (e) => setInstallDependencies(e.target.checked) }), "Install dependencies before building"] }), _jsx("input", { className: "ui-input", "aria-label": "Build command", placeholder: "Build command (leave empty to skip)", value: buildCommand, onInput: (e) => setBuildCommand(e.target.value) }), _jsx("input", { className: "ui-input", "aria-label": "Start command", placeholder: "Start command (optional)", value: startCommand, onInput: (e) => setStartCommand(e.target.value) }), _jsx("input", { className: "ui-input", "aria-label": "Systemd service name", placeholder: "Restart systemd service (requires sudo -n)", value: serviceName, onInput: (e) => setServiceName(e.target.value) }), _jsx("input", { className: "ui-input", "aria-label": "Compose file", placeholder: "Compose file (e.g. compose.yaml)", value: composeFile, onInput: (e) => setComposeFile(e.target.value) }), _jsx("input", { className: "ui-input", "aria-label": "Health check URL", placeholder: "Health check URL (optional)", value: healthUrl, onInput: (e) => setHealthUrl(e.target.value) }), _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { variant: "default", onClick: preview, testId: "deploy-preview", children: "Preview plan" }), _jsx(Button, { variant: "primary", onClick: () => void deploy(), disabled: !plan || busy, testId: "deploy-run", children: "Run deployment" })] })] })] }), plan ? (_jsxs("div", { className: "ws-mod-plan", children: [_jsx("strong", { children: "Plan" }), _jsxs("p", { className: "ws-mod-muted", children: ["Rollback: ", plan.rollback === 'supported' ? 'supported' : plan.rollback === 'limited' ? 'limited — external state may not reverse' : 'not available'] }), _jsxs("table", { className: "ws-mod-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Step" }), _jsx("th", { children: "Command" }), _jsx("th", { children: "Impact" })] }) }), _jsx("tbody", { children: plan.steps.map((step) => (_jsxs("tr", { children: [_jsx("td", { children: step.title }), _jsx("td", { children: _jsx("code", { children: step.command }) }), _jsx("td", { children: step.impact })] }, step.id))) })] }), plan.notes.length > 0 ? (_jsx("ul", { className: "ws-mod-warnings", children: plan.notes.map((note) => (_jsx("li", { children: note }, note))) })) : null] })) : null, job ? (_jsxs("div", { className: "ws-mod-detail", children: [_jsxs("header", { className: "ws-mod-detail-head", children: [_jsxs("strong", { children: ["Job ", job.id] }), _jsx(Badge, { tone: job.state === 'succeeded'
+    return (_jsxs("section", { className: "ws-mod", "data-testid": "screen-deployments", children: [_jsx("header", { className: "ws-mod-head", children: _jsxs("div", { children: [_jsx("h1", { children: "Deployments" }), _jsx("p", { className: "ws-mod-muted", children: "Inspect a project, review Git changes, then run a reviewed build and deploy plan on the connected server. Deployment runs as a durable job in the background." })] }) }), busy ? _jsx(Loading, { label: "Working" }) : null, error ? _jsx(ErrorNote, { message: error }) : null, message ? _jsx("p", { className: "ws-mod-success", children: message }) : null, _jsxs("div", { className: "ws-mod-filters", children: [_jsx("input", { className: "ui-input", "aria-label": "Project directory", placeholder: "~/app", value: directory, onInput: (e) => setDirectory(e.target.value), style: { flex: 1, minWidth: '220px' } }), _jsx(Button, { variant: "primary", onClick: () => void detect(), testId: "deploy-detect", children: "Detect project" })] }), project ? (_jsxs("div", { className: "ws-mod-detail", children: [_jsxs("header", { className: "ws-mod-detail-head", children: [_jsx("strong", { children: project.type }), _jsxs(Badge, { tone: project.type === 'unknown' ? 'warning' : 'success', children: [project.manifests.length, " manifest", project.manifests.length === 1 ? '' : 's'] })] }), _jsx("p", { className: "ws-mod-muted", children: project.directory }), project.manifests.length > 0 ? (_jsx("div", { className: "ws-mod-chips", children: project.manifests.map((m) => (_jsx(Badge, { tone: "neutral", children: m }, m))) })) : null, project.notes.length > 0 ? (_jsx("ul", { className: "ws-mod-warnings", children: project.notes.map((note) => (_jsx("li", { children: note }, note))) })) : null] })) : null, git ? (_jsxs("div", { className: "ws-mod-detail", children: [_jsxs("header", { className: "ws-mod-detail-head", children: [_jsxs("strong", { children: ["Git \u00B7 ", git.branch] }), _jsx(Badge, { tone: git.clean ? 'success' : 'warning', children: git.clean ? 'clean' : `${git.files.length} changed` })] }), _jsxs("p", { className: "ws-mod-muted", children: [git.upstream ? `upstream ${git.upstream} · ` : '', git.ahead, " ahead \u00B7 ", git.behind, " behind", branches ? ` · branches: ${branches.branches.join(', ')}` : ''] }), git.files.length > 0 ? (_jsxs("table", { className: "ws-mod-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Code" }), _jsx("th", { children: "Path" })] }) }), _jsx("tbody", { children: git.files.map((file) => (_jsxs("tr", { children: [_jsx("td", { children: file.code }), _jsx("td", { children: file.path })] }, file.path))) })] })) : null, _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { variant: "default", onClick: () => void runGitAction('Staged all changes', (c) => c.stage([])), testId: "git-stage-all", children: "Stage all" }), _jsx(Button, { variant: "default", onClick: () => void runGitAction('Loaded diff', async (c) => setDiff(await c.diff())).then(() => undefined), testId: "git-diff", children: "Show diff" }), _jsx("input", { className: "ui-input", "aria-label": "Commit message", placeholder: "Commit message", value: commitMessage, onInput: (e) => setCommitMessage(e.target.value) }), _jsx(Button, { variant: "primary", onClick: () => void runGitAction('Commit created', (c) => c.commit(commitMessage.trim())), testId: "git-commit", children: "Commit" })] }), diff ? (_jsx("pre", { className: "ws-mod-log", "aria-label": "Git diff", children: diff })) : null, log.length > 0 ? (_jsxs("table", { className: "ws-mod-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Commit" }), _jsx("th", { children: "Author" }), _jsx("th", { children: "Date" }), _jsx("th", { children: "Subject" })] }) }), _jsx("tbody", { children: log.map((entry) => (_jsxs("tr", { children: [_jsx("td", { children: entry.shortHash }), _jsx("td", { children: entry.author }), _jsx("td", { children: entry.date }), _jsx("td", { children: entry.subject })] }, entry.hash))) })] })) : null] })) : null, _jsxs("div", { className: "ws-mod-detail", children: [_jsx("header", { className: "ws-mod-detail-head", children: _jsx("strong", { children: "Deployment options" }) }), _jsxs("div", { className: "ws-mod-form", children: [_jsxs("label", { className: "ws-mod-check", children: [_jsx("input", { type: "checkbox", checked: installDependencies, onChange: (e) => setInstallDependencies(e.target.checked) }), "Install dependencies before building"] }), _jsx("input", { className: "ui-input", "aria-label": "Build command", placeholder: "Build command (leave empty to skip)", value: buildCommand, onInput: (e) => setBuildCommand(e.target.value) }), _jsx("input", { className: "ui-input", "aria-label": "Start command", placeholder: "Start command (optional)", value: startCommand, onInput: (e) => setStartCommand(e.target.value) }), _jsx("input", { className: "ui-input", "aria-label": "Systemd service name", placeholder: "Restart systemd service (requires sudo -n)", value: serviceName, onInput: (e) => setServiceName(e.target.value) }), _jsx("input", { className: "ui-input", "aria-label": "Compose file", placeholder: "Compose file (e.g. compose.yaml)", value: composeFile, onInput: (e) => setComposeFile(e.target.value) }), _jsx("input", { className: "ui-input", "aria-label": "Health check URL", placeholder: "Health check URL (optional)", value: healthUrl, onInput: (e) => setHealthUrl(e.target.value) }), _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { variant: "default", onClick: preview, testId: "deploy-preview", children: "Preview plan" }), _jsx(Button, { variant: "primary", onClick: () => void deploy(), disabled: !plan || busy, testId: "deploy-run", children: "Run deployment" })] })] })] }), plan ? (_jsxs("div", { className: "ws-mod-plan", children: [_jsx("strong", { children: "Plan" }), _jsxs("p", { className: "ws-mod-muted", children: ["Rollback: ", plan.rollback === 'supported' ? 'supported' : plan.rollback === 'limited' ? 'limited — external state may not reverse' : 'not available'] }), _jsxs("table", { className: "ws-mod-table", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { children: "Step" }), _jsx("th", { children: "Command" }), _jsx("th", { children: "Impact" })] }) }), _jsx("tbody", { children: plan.steps.map((step) => (_jsxs("tr", { children: [_jsx("td", { children: step.title }), _jsx("td", { children: _jsx("code", { children: step.command }) }), _jsx("td", { children: step.impact })] }, step.id))) })] }), plan.notes.length > 0 ? (_jsx("ul", { className: "ws-mod-warnings", children: plan.notes.map((note) => (_jsx("li", { children: note }, note))) })) : null] })) : null, job ? (_jsxs("div", { className: "ws-mod-detail", children: [_jsxs("header", { className: "ws-mod-detail-head", children: [_jsxs("strong", { children: ["Job ", job.id] }), _jsx(Badge, { tone: job.state === 'succeeded'
                                     ? 'success'
                                     : job.state === 'failed'
                                         ? 'danger'
                                         : job.state === 'detached'
                                             ? 'warning'
-                                            : 'neutral', children: job.state })] }), _jsx("ul", { className: "ws-mod-steps", children: job.steps.map((step) => (_jsxs("li", { children: [step.status, " \u00B7 ", step.title] }, step.id))) }), job.error ? _jsx(ErrorNote, { message: job.error }) : null, jobLog ? (_jsx("pre", { className: "ws-mod-log", "aria-label": "Deployment log", children: jobLog })) : null] })) : null] }));
+                                            : 'neutral', children: job.state })] }), monitorAbort.current ? (_jsx(Button, { onClick: () => monitorAbort.current?.abort(), testId: "deploy-stop-following", children: "Stop following" })) : null, _jsx("ul", { className: "ws-mod-steps", children: job.steps.map((step) => (_jsxs("li", { children: [step.status, " \u00B7 ", step.title] }, step.id))) }), job.error ? _jsx(ErrorNote, { message: job.error }) : null, jobLog ? (_jsx("pre", { className: "ws-mod-log", "aria-label": "Deployment log", children: jobLog })) : null] })) : null] }));
 }
 /* ------------------------------------------------------------------ */
 /* Discovery helper used by App                                        */

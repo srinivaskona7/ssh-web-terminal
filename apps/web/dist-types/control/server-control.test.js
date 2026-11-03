@@ -19,7 +19,9 @@ describe('metrics probe', () => {
     it('computes CPU and network deltas from two samples', () => {
         const stdout = [
             '@@CTL:cpu 100 900|200 950',
-            '@@CTL:net 1000 2000|1400 2800',
+            // Counters are bytes; over a 0.4 s window these deltas are exactly
+            // 409600 B (1000 KiB/s) and 819200 B (2000 KiB/s).
+            '@@CTL:net 1000000 2000000|1409600 2819200',
             '@@CTL:load 0.10 0.20 0.30',
             '@@CTL:mem 8000 2000 5500|swap 0',
             '@@CTL:uptime 3600.42',

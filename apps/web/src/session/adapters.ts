@@ -38,6 +38,8 @@ export interface WorkspaceRemoteSession extends RemoteSession {
   writeFile?(path: string, data: Uint8Array): Promise<void>;
   /** Probe the SFTP subsystem without performing an operation. */
   probeSftp?(): Promise<boolean>;
+  /** Streaming exec, exposed for recipe verification. Absent on plain execCommand clients. */
+  execStream?(command: string, options?: RemoteExecOptions): Promise<RemoteExecResult>;
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -81,6 +83,10 @@ export function createRemoteSession(
     isConnected: () => options.isConnected?.() ?? true,
     exec
   };
+
+  if (client.execStream) {
+    session.execStream = (command, execOptions) => exec(command, execOptions);
+  }
 
   if (client.sftpOp) {
     const sftpOp = client.sftpOp.bind(client);

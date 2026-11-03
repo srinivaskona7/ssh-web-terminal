@@ -134,7 +134,11 @@ export class FakeSftpServer {
         const path = new TextDecoder().decode(readString());
         const resolved =
           path === '.' || path === '~' || path === '' ? '/home/user' : path;
-        this.reply(SftpPacketType.NAME, id, concat(u32(1), str(resolved), str(resolved)));
+        this.reply(
+          SftpPacketType.NAME,
+          id,
+          concat(u32(1), str(resolved), str(resolved), attrs(0, 0o040755))
+        );
         return;
       }
       case SftpPacketType.OPENDIR: {

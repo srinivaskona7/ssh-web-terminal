@@ -31,6 +31,9 @@ export function createRemoteSession(client, options) {
         isConnected: () => options.isConnected?.() ?? true,
         exec
     };
+    if (client.execStream) {
+        session.execStream = (command, execOptions) => exec(command, execOptions);
+    }
     if (client.sftpOp) {
         const sftpOp = client.sftpOp.bind(client);
         session.writeFile = async (path, data) => {

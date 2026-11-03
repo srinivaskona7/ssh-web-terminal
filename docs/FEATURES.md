@@ -44,6 +44,8 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Capability | Module | Status | Proof / prerequisite |
 |---|---|---|---|
 | SFTP v3 client (list, stat, read, atomic write) | `apps/web/src/transport/sftp-client.ts` | Verified | `sftp-client.test.ts` |
+| `~` / `~/` expansion across every SFTP operation | `apps/web/src/transport/sftp-client.ts` (`resolvePath`) | Verified | `sftp-client.test.ts` |
+| Atomic write keeps the target file mode | `apps/web/src/transport/sftp-client.ts` (`writeFile`) | Verified | `sftp-client.test.ts` |
 | Resumable `.webssh-part` uploads | `apps/web/src/transport/sftp-client.ts` | Verified | `sftp-client.test.ts` |
 | Transfer queue and bounded concurrency | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
 | StorageGuard memory/local caps | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
@@ -59,7 +61,8 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Versioned recipe schema and shell escaping | `apps/web/src/recipes/engine.ts`, `types.ts` | Verified | `engine.test.ts` |
 | Recipe preflight and plan preview | `apps/web/src/recipes/engine.ts` | Verified | `engine.test.ts` |
 | Durable detached jobs (`setsid`, markers) | `apps/web/src/jobs/remote-job-runner.ts` | Verified | `jobs.test.ts` |
-| Job monitor / cancel / reattach | `apps/web/src/jobs/job-manager.ts` | Verified | `jobs.test.ts` |
+| Job monitor / cancel / reattach | `apps/web/src/jobs/job-manager.ts` | Verified | `jobs.test.ts`; Activity panel calls `cancelAndConfirm` |
+| Post-install recipe verification from job markers | `apps/web/src/jobs/job-manager.ts` (`verifyJob`), Recipes panel | Verified | `jobs.test.ts`; needs streaming exec (`execStream`) on the transport |
 | Command-step jobs for builds and deploys | `apps/web/src/jobs/job-manager.ts` (`startCommandJob`) | Implemented | shares the detached runner; needs a real host |
 
 ## Operations
@@ -89,7 +92,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 
 ## Test suite reference
 
-- Vitest: `npm test` at the repo root (currently 18 files / 100 tests).
+- Vitest: `npm test` at the repo root (currently 18 files / 106 tests).
 - Go: `npm run test:go` (gateway packages).
 - Playwright: `npm run test:e2e` (cross-browser, full-screen, accessibility).
 - Token invariant: `npm run lint:tokens`.

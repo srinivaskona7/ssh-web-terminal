@@ -50,6 +50,16 @@ const MANIFESTS = [
   'nginx.conf'
 ];
 
+/**
+ * Quote a directory for `cd`, keeping `~` expandable by the shell. Quoting the
+ * whole path would send a literal `~/app`, which does not exist.
+ */
+export function shellDirectory(dir: string): string {
+  if (dir === '~') return '"$HOME"';
+  if (dir.startsWith('~/')) return `"$HOME"/${posixQuote(dir.slice(2))}`;
+  return posixQuote(dir);
+}
+
 export async function detectProject(
   session: RemoteSession,
   directory: string
@@ -60,7 +70,7 @@ export async function detectProject(
   }
   const checks = MANIFESTS.map((file) => `[ -e ${posixQuote(file)} ] && echo ${posixQuote(file)}`).join('; ');
   const result = await session.exec(
-    `cd ${posixQuote(dir)} 2>/dev/null && { ${checks}; } || exit 1`,
+    `cd ${shellDirectory(dir)} 2>/dev/null && { ${checks}; } || exit 1`,
     { timeoutMs: 20_000 }
   );
   if (result.exitCode !== 0) {
@@ -159,7 +169,7 @@ export function buildDeploymentPlan(
   project: DetectedProject,
   options: DeploymentOptions
 ): DeploymentPlan {
-  const dir = posixQuote(project.directory);
+  const dir = shellDirectory(project.directory);
   const steps: DeploymentStep[] = [];
   const notes: string[] = [];
 
@@ -223,7 +233,7 @@ export function buildDeploymentPlan(
         url: options.healthUrl,
         command:
           `code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 ${posixQuote(options.healthUrl)}); ` +
-          `echo "health: $code"; case "$code" in 2*) exit 0;; *) exit 1;; esac`
+          `echo "health: $code"; case "$code" in 2*) true;; *) false;; esac`
       }
     : undefined;
 

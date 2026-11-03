@@ -17,7 +17,6 @@ import {
 import {
   buildPlan,
   evaluateRecipe,
-  posixQuote,
   redactValues,
   validateValues,
   withDefaults
@@ -25,7 +24,15 @@ import {
 import { listRecipes, searchRecipes } from '../recipes/catalog.js';
 import type { Recipe, RecipeField, RecipeFieldValueMap, RecipePlan } from '../recipes/types.js';
 import { jobStore } from '../jobs/job-store.js';
-import { monitorJob, startCommandJob, startRecipeJob, type CommandJobStep } from '../jobs/job-manager.js';
+import {
+  cancelAndConfirm,
+  monitorJob,
+  startCommandJob,
+  startRecipeJob,
+  verifyJob,
+  type CommandJobStep
+} from '../jobs/job-manager.js';
+import type { JobSession } from '../jobs/remote-job-runner.js';
 import { isActiveJobState, isValidJobId, type JobRecord, type JobState } from '../jobs/types.js';
 import { DockerClient, type ContainerSummary } from '../containers/docker-client.js';
 import { KubernetesClient, type PodSummary } from '../kubernetes/kubectl-client.js';
@@ -67,6 +74,15 @@ type Async<T> =
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Adapt the workspace session to the detached-job runner contract. */
+function jobSessionFor(session: WorkspaceRemoteSession, executeAsRoot = false): JobSession {
+  return {
+    execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
+    executeAsRoot,
+    isAttached: () => session.isConnected()
+  };
 }
 
 function useAsync<T>(load: (() => Promise<T>) | null, deps: unknown[]): Async<T> {
@@ -132,8 +148,13 @@ function CapabilityGrid({ caps }: { caps: ServerCapabilities }): JSX.Element {
     ['Kernel', caps.os.kernel || 'unknown'],
     ['Architecture', caps.os.arch || 'unknown'],
     ['CPU', `${caps.cpu.cores || '?'} cores${caps.cpu.model ? ` · ${caps.cpu.model}` : ''}`],
-    ['Memory', `${caps.memory.totalMiB} MiB total · ${caps.memory.availableMiB} MiB available`],
-    ['Swap', `${caps.memory.swapMiB} MiB`],
+    [
+      'Memory',
+      caps.memory.totalMiB > 0
+        ? `${caps.memory.totalMiB} MiB total · ${caps.memory.availableMiB} MiB available`
+        : 'not reported'
+    ],
+    ['Swap', caps.memory.totalMiB > 0 ? `${caps.memory.swapMiB} MiB` : 'not reported'],
     ['User', `${caps.user.name} (uid ${caps.user.uid})`],
     ['Home', caps.user.home || 'unknown'],
     ['Shell', caps.user.shell || 'unknown'],
@@ -757,6 +778,7 @@ function RecipeDetail({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastJob, setLastJob] = useState<JobRecord | null>(null);
 
   useEffect(() => {
     setValues(withDefaults(recipe));
@@ -802,17 +824,51 @@ function RecipeDetail({
         }
       });
       onJob(job);
+      setLastJob(job);
       setMessage(
         job.state === 'failed'
           ? `Job could not start: ${job.error ?? 'unknown error'}`
           : `Job ${job.id} started. Track it under Activity.`
       );
-      void monitorJob(job, {
-        execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
-        isAttached: () => session.isConnected()
-      }, {
-        onUpdate: (updated) => onJob(updated)
+      void monitorJob(job, jobSessionFor(session, recipe.privileges === 'sudo'), {
+        onUpdate: (updated) => {
+          onJob(updated);
+          setLastJob(updated);
+        }
       }).catch(() => undefined);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Verification runs the recipe's `verify` steps as the logged-in user and
+   * records the outcome on the job. It is a separate, explicit action so a
+   * passing install never implies a passing check.
+   */
+  const runVerification = async () => {
+    if (!lastJob) return;
+    if (!session.execStream) {
+      setError('This transport cannot stream exec output, so verification steps cannot run.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const verified = await verifyJob(lastJob, recipe, {
+        capabilities: caps,
+        execStream: (command, options) => session.execStream!(command, options),
+        ...(session.writeFile ? { writeFile: session.writeFile } : {})
+      });
+      setLastJob(verified);
+      onJob(verified);
+      setMessage(
+        verified.verification?.ok
+          ? `Verification passed: ${verified.verification.detail ?? ''}`.trim()
+          : `Verification failed: ${verified.verification?.detail ?? 'no detail'}`
+      );
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -918,6 +974,15 @@ function RecipeDetail({
         >
           {busy ? 'Starting…' : 'Install'}
         </Button>
+        {lastJob ? (
+          <Button
+            onClick={() => void runVerification()}
+            disabled={busy || !lastJob || session.execStream === undefined}
+            testId="recipe-verify"
+          >
+            Run verification
+          </Button>
+        ) : null}
       </div>
 
       {message ? <p className="ws-mod-success">{message}</p> : null}
@@ -1501,15 +1566,21 @@ export function ActivityPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
     if (!ctx.session) return;
     setError(null);
     try {
-      const final = await monitorJob(
-        job,
-        {
-          execCommand: (command, timeoutMs) => ctx.session!.exec(command, { timeoutMs }),
-          isAttached: () => ctx.session!.isConnected()
-        },
-        { onUpdate: update, timeoutMs: 300_000 }
-      );
+      const final = await monitorJob(job, jobSessionFor(ctx.session), {
+        onUpdate: update,
+        timeoutMs: 300_000
+      });
       update(final);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  };
+
+  const cancel = async (job: JobRecord) => {
+    if (!ctx.session) return;
+    setError(null);
+    try {
+      update(await cancelAndConfirm(job, jobSessionFor(ctx.session)));
     } catch (err) {
       setError(errorText(err));
     }
@@ -1599,9 +1670,14 @@ export function ActivityPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
                   ))}
                 </ol>
                 {isActiveJobState(selected.state) && ctx.session ? (
-                  <Button variant="primary" onClick={() => void reattach(selected)}>
-                    Reattach and follow
-                  </Button>
+                  <div className="ws-mod-actions">
+                    <Button variant="primary" onClick={() => void reattach(selected)}>
+                      Reattach and follow
+                    </Button>
+                    <Button variant="danger" onClick={() => void cancel(selected)}>
+                      Cancel job
+                    </Button>
+                  </div>
                 ) : null}
               </div>
             ) : (
@@ -1640,6 +1716,8 @@ export function DeploymentsPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
   const [message, setMessage] = useState<string | null>(null);
   const [job, setJob] = useState<JobRecord | null>(null);
   const [jobLog, setJobLog] = useState('');
+  const monitorAbort = useRef<AbortController | null>(null);
+  const logSeq = useRef(0);
 
   if (!session) return <RequiresSession what="Deployments and Git" />;
 
@@ -1761,11 +1839,7 @@ export function DeploymentsPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
           port: session.port,
           transport: session.transport
         },
-        session: {
-          execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
-          executeAsRoot: serviceName.trim().length > 0,
-          isAttached: () => session.isConnected()
-        }
+        session: jobSessionFor(session, serviceName.trim().length > 0)
       });
       setJob(started);
       if (started.state === 'failed') {
@@ -1773,17 +1847,28 @@ export function DeploymentsPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
         return;
       }
       setMessage(`Deployment job ${started.id} started`);
-      const finished = await monitorJob(started, {
-        execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
-        isAttached: () => session.isConnected()
-      }, {
-        onUpdate: (current) => {
-          setJob(current);
-          void refreshJobLog(current);
+      const controller = new AbortController();
+      monitorAbort.current = controller;
+      const finished = await monitorJob(
+        started,
+        jobSessionFor(session, serviceName.trim().length > 0),
+        {
+          signal: controller.signal,
+          onUpdate: (current) => {
+            setJob(current);
+            void refreshJobLog(current);
+          }
         }
+      ).finally(() => {
+        monitorAbort.current = null;
       });
       setJob(finished);
       await refreshJobLog(finished);
+      if (finished.state === 'detached') {
+        setMessage(
+          `Stopped following job ${finished.id}. It keeps running on the server; reattach from Activity.`
+        );
+      }
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -1793,11 +1878,13 @@ export function DeploymentsPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
 
   const refreshJobLog = async (current: JobRecord): Promise<void> => {
     if (!isValidJobId(current.id)) return;
+    // Polls can overlap; only the newest read may update the view.
+    const seq = ++logSeq.current;
     try {
       const result = await session.exec(
         `tail -n 200 "$HOME/.webssh/jobs/${current.id}/stdout.log" 2>/dev/null || true`
       );
-      setJobLog(result.stdout);
+      if (seq === logSeq.current) setJobLog(result.stdout);
     } catch {
       // Log tail is best-effort; the job state remains authoritative.
     }
@@ -1895,7 +1982,7 @@ export function DeploymentsPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
           <div className="ws-mod-actions">
             <Button
               variant="default"
-              onClick={() => void runGitAction('Staged all changes', (c) => c.stage(['-A']))}
+              onClick={() => void runGitAction('Staged all changes', (c) => c.stage([]))}
               testId="git-stage-all"
             >
               Stage all
@@ -2074,6 +2161,11 @@ export function DeploymentsPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
               {job.state}
             </Badge>
           </header>
+          {monitorAbort.current ? (
+            <Button onClick={() => monitorAbort.current?.abort()} testId="deploy-stop-following">
+              Stop following
+            </Button>
+          ) : null}
           <ul className="ws-mod-steps">
             {job.steps.map((step) => (
               <li key={step.id}>

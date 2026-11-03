@@ -141,6 +141,13 @@ export declare class SftpClient {
     private dispatch;
     private request;
     private throwStatus;
+    private homePromise;
+    /**
+     * Expand `~` and `~/…` against the server's home directory. Shell expansion
+     * never happens here, so a path typed as `~/app` would otherwise be sent
+     * literally and fail.
+     */
+    resolvePath(path: string): Promise<string>;
     /** Realpath + STAT. Returns attributes. */
     stat(path: string): Promise<SftpAttributes>;
     lstat(path: string): Promise<SftpAttributes>;

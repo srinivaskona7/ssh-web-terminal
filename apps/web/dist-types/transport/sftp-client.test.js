@@ -47,6 +47,54 @@ describe('SFTP v3 client', () => {
         // No temporary sibling survives.
         expect([...server.files.keys()].some((p) => p.includes('.webssh-tmp-'))).toBe(false);
     });
+    it('preserves the target mode when writing atomically', async () => {
+        const { client, server } = makeClient();
+        await client.init();
+        server.files.set('/home/user/secret.env', {
+            data: new TextEncoder().encode('A=1'),
+            mode: 0o640
+        });
+        await client.writeFile('/home/user/secret.env', new TextEncoder().encode('A=2'));
+        expect(server.files.get('/home/user/secret.env').mode).toBe(0o640);
+    });
+    it('expands a leading ~ against the remote home directory', async () => {
+        const { client, server } = makeClient();
+        await client.init();
+        server.files.set('/home/user/notes.txt', { data: new TextEncoder().encode('hello'), mode: 0o600 });
+        const stat = await client.stat('~/notes.txt');
+        expect(stat.size).toBe(5);
+        await client.writeFile('~/new.txt', new TextEncoder().encode('x'));
+        expect(new TextDecoder().decode(server.files.get('/home/user/new.txt').data)).toBe('x');
+        server.dirs.add('/home/user/sub');
+        server.files.set('/home/user/sub/a.txt', { data: new Uint8Array(), mode: 0o644 });
+        const entries = await client.list('~/sub');
+        expect(entries.map((e) => e.path)).toEqual(['~/sub/a.txt']);
+        await client.rename('~/new.txt', '~/renamed.txt');
+        expect(server.files.has('/home/user/renamed.txt')).toBe(true);
+        expect(server.files.has('/home/user/new.txt')).toBe(false);
+    });
+    it('applies ~ expansion to read, remove and chmod too', async () => {
+        const { client, server } = makeClient();
+        await client.init();
+        server.files.set('/home/user/job.sh', { data: new TextEncoder().encode('run'), mode: 0o644 });
+        expect(new TextDecoder().decode(await client.readFile('~/job.sh'))).toBe('run');
+        await client.chmod('~/job.sh', 0o700);
+        expect((await client.lstat('~/job.sh')).permissions).toBe(0o700);
+        await client.remove('~/job.sh');
+        expect(server.files.has('/home/user/job.sh')).toBe(false);
+    });
+    it('expands ~ for directory creation and resumable uploads', async () => {
+        const { client, server } = makeClient();
+        await client.init();
+        await client.mkdir('~/uploads');
+        expect(server.dirs.has('/home/user/uploads')).toBe(true);
+        const session = await client.startUpload('~/uploads/blob.bin');
+        await session.write(new TextEncoder().encode('abc'));
+        expect(await session.commit()).toBe(3);
+        expect(new TextDecoder().decode(server.files.get('/home/user/uploads/blob.bin').data)).toBe('abc');
+        await client.rmdir('~/uploads');
+        expect(server.dirs.has('/home/user/uploads')).toBe(false);
+    });
     it('maps protocol errors to typed SftpError', async () => {
         const { client } = makeClient();
         await client.init();

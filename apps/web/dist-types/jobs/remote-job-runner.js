@@ -1,9 +1,13 @@
 import { posixQuote } from '../recipes/engine.js';
-import { isValidJobId, jobDirectory } from './types.js';
-function dir(id) {
-    if (!isValidJobId(id))
-        throw new Error(`Invalid job id "${id}"`);
-    return jobDirectory(id);
+import { jobDirectory } from './types.js';
+/**
+ * Quote the job directory so the shell expands `$HOME`. Quoting the whole
+ * path would create a literal `$HOME` directory instead.
+ */
+function shellDir(id) {
+    // jobDirectory already rejects anything outside [A-Za-z0-9-], so the
+    // remainder needs no further quoting.
+    return `"$HOME"/${jobDirectory(id).replace(/^\$HOME\//, '')}`;
 }
 function base64OfUtf8(text) {
     const bytes = new TextEncoder().encode(text);
@@ -15,8 +19,7 @@ function base64OfUtf8(text) {
     return btoa(binary);
 }
 export function buildStartCommand(id, script) {
-    const d = dir(id);
-    const quotedDir = posixQuote(d);
+    const quotedDir = shellDir(id);
     const b64 = posixQuote(base64OfUtf8(script));
     return [
         `mkdir -p ${quotedDir} && chmod 700 ${quotedDir}`,
@@ -31,8 +34,7 @@ export function buildStartCommand(id, script) {
  * which is also its process-group id, so `kill -TERM -$pid` reaches children.
  */
 export function buildLaunchCommand(id) {
-    const d = dir(id);
-    const quotedDir = posixQuote(d);
+    const quotedDir = shellDir(id);
     return (`cd ${quotedDir}; ` +
         `setsid sh -c 'sh run.sh > stdout.log 2> stderr.log; echo $? > exit.code' ` +
         `> /dev/null 2>&1 & echo $! > remote.pid; cat remote.pid`);
@@ -53,8 +55,7 @@ export async function startDetachedJob(session, id, script) {
     return { pid };
 }
 export function buildPollCommand(id) {
-    const d = dir(id);
-    const quotedDir = posixQuote(d);
+    const quotedDir = shellDir(id);
     return [
         `cd ${quotedDir} 2>/dev/null || { echo "@@MISSING"; exit 0; }`,
         `if [ -f exit.code ]; then printf '@@EXIT:%s\\n' "$(cat exit.code)"; else echo "@@RUNNING"; fi`,
@@ -88,8 +89,7 @@ export async function pollDetachedJob(session, id) {
     return parsePollOutput(result.stdout);
 }
 export function buildCancelCommand(id) {
-    const d = dir(id);
-    const quotedDir = posixQuote(d);
+    const quotedDir = shellDir(id);
     return [
         `pid=$(cat ${quotedDir}/remote.pid 2>/dev/null || cat ${quotedDir}/pid 2>/dev/null || true)`,
         'if [ -z "$pid" ]; then echo "@@NOPID"; exit 0; fi',
@@ -111,6 +111,6 @@ export async function requestCancelDetachedJob(session, id) {
 }
 export function buildTailCommand(id, stream) {
     const file = stream === 'stdout' ? 'stdout.log' : 'stderr.log';
-    return `tail -c 131072 ${posixQuote(`${dir(id)}/${file}`)} 2>/dev/null || true`;
+    return `tail -c 131072 ${`"$HOME"/${posixQuote(`${jobDirectory(id).replace(/^\$HOME\//, '')}/${file}`)}`} 2>/dev/null || true`;
 }
 //# sourceMappingURL=remote-job-runner.js.map

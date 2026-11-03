@@ -637,11 +637,15 @@ export function App(): JSX.Element {
     try {
       if (!overwrite) {
         const current = await activeClient.sftpOp({ op: 'read_file', path: editorFilePath });
-        if (
-          current.ok &&
-          current.dataBase64 !== undefined &&
-          new TextDecoder().decode(base64ToBytes(current.dataBase64)) !== editorOriginalContent
-        ) {
+        // Fail closed: if the file cannot be re-read, a blind write could
+        // silently destroy another operator's change.
+        if (!current.ok || current.dataBase64 === undefined) {
+          setEditorError(
+            `Not saved: could not re-read ${editorFilePath} to check for conflicts (${current.error ?? 'unknown error'}). Retry, or use "Overwrite with my version" if you accept the risk.`
+          );
+          return;
+        }
+        if (new TextDecoder().decode(base64ToBytes(current.dataBase64)) !== editorOriginalContent) {
           setEditorConflict(
             `${editorFilePath} changed on the server since you opened it. Saving now would overwrite those changes.`
           );
@@ -2110,7 +2114,7 @@ export function App(): JSX.Element {
                       setOpenMenu(null);
                     }}
                   >
-                    <span>{ideMode ? 'Disable IDE Mode' : 'Enable IDE Mode (50 Features)'}</span>
+                    <span>{ideMode ? 'Disable IDE Mode' : 'Enable IDE Mode'}</span>
                   </button>
                   <button
                     type="button"
@@ -2188,7 +2192,7 @@ export function App(): JSX.Element {
       {connectionState !== 'connected' && connectionState !== 'disconnected' ? (
         <div className="webssh-banner" role="status" data-testid="reconnect-banner">
           <span>
-            {connectionState === 'reconnecting' && 'Reconnecting (attempt 3, backoff 2.1s)…'}
+            {connectionState === 'reconnecting' && 'Reconnecting…'}
             {connectionState === 'offline' && 'Offline — queuing input locally (64 KiB cap)'}
             {connectionState === 'resumed' && 'Session resumed from gateway ring buffer'}
           </span>
@@ -2323,7 +2327,7 @@ export function App(): JSX.Element {
               }}
               testId="enable-ide-mode-btn"
             >
-              {ideMode ? 'IDE Enabled (All Features)' : 'Open IDE (All Features)'}
+              {ideMode ? 'IDE Mode: ON' : 'Open IDE'}
             </Button>
 
             {ideMode ? (
@@ -2433,43 +2437,42 @@ export function App(): JSX.Element {
                     onClick={() => terminalViewRef.current?.focus()}
                     onKeyDown={handleTerminalKeyDown}
                   >
-                    {/* Progressive 5-Color ASCII Banner (Lime -> Yellow -> Orange -> Coral -> Pink, Zero Copyrights) */}
                     <div className="webssh-ascii-banner" data-testid="terminal-ascii-banner">
-                      <div className="webssh-ascii-welcome-line" data-testid="terminal-welcome-banner-text">
-                        Welcome to the WebSSH Studio Interactive Terminal.
+                        <div className="webssh-ascii-welcome-line" data-testid="terminal-welcome-banner-text">
+                          Welcome to the WebSSH Studio Interactive Terminal.
+                        </div>
+                        <pre className="webssh-ascii-art" aria-label="WEBSSH STUDIO ASCII Art">
+                          <span className="webssh-logo-col-1">{'██╗    ██╗███████╗'}</span>
+                          <span className="webssh-logo-col-2">{'██████╗ ███████╗'}</span>
+                          <span className="webssh-logo-col-3">{'███████╗██╗  ██╗'}</span>
+                          <span className="webssh-logo-col-4">{' ███████╗████████╗'}</span>
+                          <span className="webssh-logo-col-5">{'██╗   ██╗██████╗ '}</span>
+                          {String.fromCharCode(10)}
+                          <span className="webssh-logo-col-1">{'██║    ██║██╔════╝'}</span>
+                          <span className="webssh-logo-col-2">{'██╔══██╗██╔════╝'}</span>
+                          <span className="webssh-logo-col-3">{'██╔════╝██║  ██║'}</span>
+                          <span className="webssh-logo-col-4">{' ██╔════╝╚══██╔══╝'}</span>
+                          <span className="webssh-logo-col-5">{'██║   ██║██╔══██╗'}</span>
+                          {String.fromCharCode(10)}
+                          <span className="webssh-logo-col-1">{'██║ █╗ ██║█████╗  '}</span>
+                          <span className="webssh-logo-col-2">{'██████╔╝███████╗'}</span>
+                          <span className="webssh-logo-col-3">{'███████╗███████║'}</span>
+                          <span className="webssh-logo-col-4">{' ███████╗   ██║   '}</span>
+                          <span className="webssh-logo-col-5">{'██║   ██║██║  ██║'}</span>
+                          {String.fromCharCode(10)}
+                          <span className="webssh-logo-col-1">{'██║███╗██║██╔══╝  '}</span>
+                          <span className="webssh-logo-col-2">{'██╔══██╗╚════██║'}</span>
+                          <span className="webssh-logo-col-3">{'╚════██║██╔══██║'}</span>
+                          <span className="webssh-logo-col-4">{' ╚════██║   ██║   '}</span>
+                          <span className="webssh-logo-col-5">{'██║   ██║██║  ██║'}</span>
+                          {String.fromCharCode(10)}
+                          <span className="webssh-logo-col-1">{'╚███╔███╔╝███████╗'}</span>
+                          <span className="webssh-logo-col-2">{'██████╔╝███████║'}</span>
+                          <span className="webssh-logo-col-3">{'███████║██║  ██║'}</span>
+                          <span className="webssh-logo-col-4">{' ███████║   ██║   '}</span>
+                          <span className="webssh-logo-col-5">{'╚██████╔╝██████╔╝'}</span>
+                        </pre>
                       </div>
-                      <pre className="webssh-ascii-art" aria-label="WEBSSH STUDIO ASCII Art">
-                        <span className="webssh-logo-col-1">{'██╗    ██╗███████╗'}</span>
-                        <span className="webssh-logo-col-2">{'██████╗ ███████╗'}</span>
-                        <span className="webssh-logo-col-3">{'███████╗██╗  ██╗'}</span>
-                        <span className="webssh-logo-col-4">{' ███████╗████████╗'}</span>
-                        <span className="webssh-logo-col-5">{'██╗   ██╗██████╗ '}</span>
-                        {String.fromCharCode(10)}
-                        <span className="webssh-logo-col-1">{'██║    ██║██╔════╝'}</span>
-                        <span className="webssh-logo-col-2">{'██╔══██╗██╔════╝'}</span>
-                        <span className="webssh-logo-col-3">{'██╔════╝██║  ██║'}</span>
-                        <span className="webssh-logo-col-4">{' ██╔════╝╚══██╔══╝'}</span>
-                        <span className="webssh-logo-col-5">{'██║   ██║██╔══██╗'}</span>
-                        {String.fromCharCode(10)}
-                        <span className="webssh-logo-col-1">{'██║ █╗ ██║█████╗  '}</span>
-                        <span className="webssh-logo-col-2">{'██████╔╝███████╗'}</span>
-                        <span className="webssh-logo-col-3">{'███████╗███████║'}</span>
-                        <span className="webssh-logo-col-4">{' ███████╗   ██║   '}</span>
-                        <span className="webssh-logo-col-5">{'██║   ██║██║  ██║'}</span>
-                        {String.fromCharCode(10)}
-                        <span className="webssh-logo-col-1">{'██║███╗██║██╔══╝  '}</span>
-                        <span className="webssh-logo-col-2">{'██╔══██╗╚════██║'}</span>
-                        <span className="webssh-logo-col-3">{'╚════██║██╔══██║'}</span>
-                        <span className="webssh-logo-col-4">{' ╚════██║   ██║   '}</span>
-                        <span className="webssh-logo-col-5">{'██║   ██║██║  ██║'}</span>
-                        {String.fromCharCode(10)}
-                        <span className="webssh-logo-col-1">{'╚███╔███╔╝███████╗'}</span>
-                        <span className="webssh-logo-col-2">{'██████╔╝███████║'}</span>
-                        <span className="webssh-logo-col-3">{'███████║██║  ██║'}</span>
-                        <span className="webssh-logo-col-4">{' ███████║   ██║   '}</span>
-                        <span className="webssh-logo-col-5">{'╚██████╔╝██████╔╝'}</span>
-                      </pre>
-                    </div>
 
                     {terminalLines.map((line, i) => (
                       <div key={i}>{redactSecretsInText(line, redactionMode)}</div>
@@ -2651,6 +2654,14 @@ export function App(): JSX.Element {
                             remotePort: rPort
                           })
                           .then((res) => {
+                            if (!res.ok || !res.active) {
+                              // Never show a tunnel card for a forward that
+                              // the server did not actually open.
+                              setTunnelPreviewOutput(
+                                `Tunnel not started: ${res.error ?? 'the transport refused the forward'}`
+                              );
+                              return;
+                            }
                             setTunnels((prev) => [
                               ...prev,
                               {
@@ -2661,10 +2672,15 @@ export function App(): JSX.Element {
                                 localPort: lPort,
                                 remoteHost: '127.0.0.1',
                                 remotePort: rPort,
-                                active: Boolean(res.ok && res.active),
+                                active: true,
                                 bytesTransferred: 0
                               }
                             ]);
+                          })
+                          .catch((err: unknown) => {
+                            setTunnelPreviewOutput(
+                              `Tunnel not started: ${err instanceof Error ? err.message : String(err)}`
+                            );
                           });
                       } else {
                         setTunnelPreviewOutput(
@@ -2821,7 +2837,7 @@ export function App(): JSX.Element {
                       setActiveScreen('features');
                     }}
                   >
-                    Open IDE (All 50 Features)
+                    Open IDE
                   </Button>
                 </div>
               </div>

@@ -7,6 +7,8 @@
  */
 import { posixQuote } from '../recipes/engine.js';
 const METRICS_MARK = '@@CTL';
+/** Seconds the probe sleeps between its two counter reads. */
+export const NETWORK_SAMPLE_SECONDS = 0.4;
 /**
  * One script, one connection round trip. `sleep` gives a real CPU/network delta
  * instead of a lifetime average that never moves.
@@ -17,12 +19,12 @@ export function buildMetricsScript() {
         'read_cpu() { awk \'/^cpu /{print $2+$3+$4+$7+$8, $5}\' /proc/stat; }',
         'read_net() { awk -F\'[: ]+\' \'/^ *eth|^ *en|^ *wl/{rx+=$3; tx+=$11} END{print rx+0, tx+0}\' /proc/net/dev; }',
         'cpu1=$(read_cpu); net1=$(read_net)',
-        'sleep 0.4',
+        `sleep ${NETWORK_SAMPLE_SECONDS}`,
         'cpu2=$(read_cpu); net2=$(read_net)',
         `printf '${METRICS_MARK}:cpu %s\\n' "$cpu1|$cpu2"`,
         `printf '${METRICS_MARK}:net %s\\n' "$net1|$net2"`,
         `printf '${METRICS_MARK}:load %s\\n' "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || uptime | sed 's/.*load average: //')"`,
-        `printf '${METRICS_MARK}:mem %s\\n' "$(free -k 2>/dev/null | awk '/^Mem:/{print $2, $3, $7} /^Swap:/{print "swap", $3}' | tr '\\n' '|')"`,
+        `printf '${METRICS_MARK}:mem %s\\n' "$(free -m 2>/dev/null | awk '/^Mem:/{print $2, $3, $7} /^Swap:/{print "swap", $3}' | tr '\\n' '|')"`,
         `printf '${METRICS_MARK}:uptime %s\\n' "$(cut -d' ' -f1 /proc/uptime 2>/dev/null || echo '')"`,
         `printf '${METRICS_MARK}:reboot %s\\n' "$([ -f /var/run/reboot-required ] && echo yes || echo no)"`,
         `printf '${METRICS_MARK}:df %s\\n' "$(df -Pk 2>/dev/null | awk 'NR>1 && $2>0 {print $6" "$2" "$3" "$4}' | tr '\\n' '|')"`,
@@ -63,7 +65,11 @@ export function parseMetricsOutput(stdout, collectedAt = Date.now()) {
         const rx = (after[0] ?? 0) - (before[0] ?? 0);
         const tx = (after[1] ?? 0) - (before[1] ?? 0);
         if (Number.isFinite(rx) && Number.isFinite(tx) && rx >= 0 && tx >= 0) {
-            network = { rxKiBps: Math.round(rx / 0.4), txKiBps: Math.round(tx / 0.4) };
+            // Counters are bytes; the sample window is 0.4 s (NETWORK_SAMPLE_SECONDS).
+            network = {
+                rxKiBps: Math.round(rx / (NETWORK_SAMPLE_SECONDS * 1024)),
+                txKiBps: Math.round(tx / (NETWORK_SAMPLE_SECONDS * 1024))
+            };
         }
     }
     let loadAverage = null;

@@ -18,6 +18,11 @@ export interface DetectedProject {
     unitFiles: string[];
     notes: string[];
 }
+/**
+ * Quote a directory for `cd`, keeping `~` expandable by the shell. Quoting the
+ * whole path would send a literal `~/app`, which does not exist.
+ */
+export declare function shellDirectory(dir: string): string;
 export declare function detectProject(session: RemoteSession, directory: string): Promise<DetectedProject>;
 export interface DeploymentStep {
     id: string;

@@ -3,7 +3,7 @@
  * Go gateway) into the single `RemoteSession` contract used by the workspace
  * modules (discovery, recipes, containers, Kubernetes, automation).
  */
-import type { RemoteExecOptions, RemoteSession } from './remote-session.js';
+import type { RemoteExecOptions, RemoteExecResult, RemoteSession } from './remote-session.js';
 /** The subset of the relay client this adapter needs. */
 export interface RelayLikeClient {
     execStream?(command: string, options?: RemoteExecOptions): Promise<{
@@ -37,6 +37,8 @@ export interface WorkspaceRemoteSession extends RemoteSession {
     writeFile?(path: string, data: Uint8Array): Promise<void>;
     /** Probe the SFTP subsystem without performing an operation. */
     probeSftp?(): Promise<boolean>;
+    /** Streaming exec, exposed for recipe verification. Absent on plain execCommand clients. */
+    execStream?(command: string, options?: RemoteExecOptions): Promise<RemoteExecResult>;
 }
 export declare function createRemoteSession(client: RelayLikeClient, options: AdapterOptions): WorkspaceRemoteSession;
 //# sourceMappingURL=adapters.d.ts.map

@@ -1,5 +1,5 @@
 import { posixQuote } from '../recipes/engine.js';
-import { isValidJobId, jobDirectory } from './types.js';
+import { jobDirectory } from './types.js';
 
 /**
  * Detached remote execution.
@@ -27,9 +27,14 @@ export interface DetachedStatus {
   stderrTail: string;
 }
 
-function dir(id: string): string {
-  if (!isValidJobId(id)) throw new Error(`Invalid job id "${id}"`);
-  return jobDirectory(id);
+/**
+ * Quote the job directory so the shell expands `$HOME`. Quoting the whole
+ * path would create a literal `$HOME` directory instead.
+ */
+function shellDir(id: string): string {
+  // jobDirectory already rejects anything outside [A-Za-z0-9-], so the
+  // remainder needs no further quoting.
+  return `"$HOME"/${jobDirectory(id).replace(/^\$HOME\//, '')}`;
 }
 
 function base64OfUtf8(text: string): string {
@@ -43,8 +48,7 @@ function base64OfUtf8(text: string): string {
 }
 
 export function buildStartCommand(id: string, script: string): string {
-  const d = dir(id);
-  const quotedDir = posixQuote(d);
+  const quotedDir = shellDir(id);
   const b64 = posixQuote(base64OfUtf8(script));
   return [
     `mkdir -p ${quotedDir} && chmod 700 ${quotedDir}`,
@@ -60,8 +64,7 @@ export function buildStartCommand(id: string, script: string): string {
  * which is also its process-group id, so `kill -TERM -$pid` reaches children.
  */
 export function buildLaunchCommand(id: string): string {
-  const d = dir(id);
-  const quotedDir = posixQuote(d);
+  const quotedDir = shellDir(id);
   return (
     `cd ${quotedDir}; ` +
     `setsid sh -c 'sh run.sh > stdout.log 2> stderr.log; echo $? > exit.code' ` +
@@ -94,8 +97,7 @@ export async function startDetachedJob(
 }
 
 export function buildPollCommand(id: string): string {
-  const d = dir(id);
-  const quotedDir = posixQuote(d);
+  const quotedDir = shellDir(id);
   return [
     `cd ${quotedDir} 2>/dev/null || { echo "@@MISSING"; exit 0; }`,
     `if [ -f exit.code ]; then printf '@@EXIT:%s\\n' "$(cat exit.code)"; else echo "@@RUNNING"; fi`,
@@ -135,8 +137,7 @@ export async function pollDetachedJob(
 }
 
 export function buildCancelCommand(id: string): string {
-  const d = dir(id);
-  const quotedDir = posixQuote(d);
+  const quotedDir = shellDir(id);
   return [
     `pid=$(cat ${quotedDir}/remote.pid 2>/dev/null || cat ${quotedDir}/pid 2>/dev/null || true)`,
     'if [ -z "$pid" ]; then echo "@@NOPID"; exit 0; fi',
@@ -163,5 +164,5 @@ export async function requestCancelDetachedJob(
 
 export function buildTailCommand(id: string, stream: 'stdout' | 'stderr'): string {
   const file = stream === 'stdout' ? 'stdout.log' : 'stderr.log';
-  return `tail -c 131072 ${posixQuote(`${dir(id)}/${file}`)} 2>/dev/null || true`;
+  return `tail -c 131072 ${`"$HOME"/${posixQuote(`${jobDirectory(id).replace(/^\$HOME\//, '')}/${file}`)}`} 2>/dev/null || true`;
 }

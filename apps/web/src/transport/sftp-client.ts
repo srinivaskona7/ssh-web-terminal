@@ -448,14 +448,36 @@ export class SftpClient {
     throw new SftpError(code, `${action}: ${message || SftpStatus[code] || `status ${code}`}`);
   }
 
+  private homePromise: Promise<string> | null = null;
+
+  /**
+   * Expand `~` and `~/…` against the server's home directory. Shell expansion
+   * never happens here, so a path typed as `~/app` would otherwise be sent
+   * literally and fail.
+   */
+  async resolvePath(path: string): Promise<string> {
+    const trimmed = path.trim();
+    if (trimmed !== '~' && !trimmed.startsWith('~/')) return path;
+    if (!this.homePromise) {
+      this.homePromise = this.realpath('.').catch((err: unknown) => {
+        this.homePromise = null;
+        throw err;
+      });
+    }
+    const home = await this.homePromise;
+    return trimmed === '~' ? home : joinRemotePath(home, trimmed.slice(2));
+  }
+
   /** Realpath + STAT. Returns attributes. */
   async stat(path: string): Promise<SftpAttributes> {
-    const response = await this.request(SftpPacketType.STAT, sshString(path));
+    const resolved = await this.resolvePath(path);
+    const response = await this.request(SftpPacketType.STAT, sshString(resolved));
     return this.parseAttrsResponse(response, `stat ${path}`);
   }
 
   async lstat(path: string): Promise<SftpAttributes> {
-    const response = await this.request(SftpPacketType.LSTAT, sshString(path));
+    const resolved = await this.resolvePath(path);
+    const response = await this.request(SftpPacketType.LSTAT, sshString(resolved));
     return this.parseAttrsResponse(response, `lstat ${path}`);
   }
 
@@ -488,7 +510,8 @@ export class SftpClient {
   }
 
   async list(path: string): Promise<SftpEntry[]> {
-    const dir = path === '~' ? '.' : path;
+    const displayBase = path === '~' || path.startsWith('~/') ? path.replace(/\/+$/, '') : null;
+    const dir = path === '~' ? '.' : await this.resolvePath(path);
     const handle = await this.openDirectory(dir);
     const entries: SftpEntry[] = [];
     try {
@@ -513,7 +536,7 @@ export class SftpClient {
           const mode = attrs.permissions ?? 0;
           entries.push({
             name,
-            path: joinRemotePath(dir === '.' ? '~' : dir, name),
+            path: joinRemotePath(displayBase ?? (dir === '.' ? '~' : dir), name),
             isDir: (mode & 0o170000) === 0o040000,
             isSymlink: (mode & 0o170000) === 0o120000,
             size: attrs.size ?? 0,
@@ -536,30 +559,45 @@ export class SftpClient {
   }
 
   async mkdir(path: string, permissions?: number): Promise<void> {
-    const payload = concatBytes(sshString(path), encodeAttrs({ permissions }));
+    const resolved = await this.resolvePath(path);
+    const payload = concatBytes(sshString(resolved), encodeAttrs({ permissions }));
     const response = await this.request(SftpPacketType.MKDIR, payload);
     if (response[0] === SftpPacketType.STATUS) {
       const reader = new Reader(response.subarray(1));
       const code = reader.uint32();
-      // `mkdir -p` semantics: an existing directory is not an error.
-      if (code === SftpStatus.OK || code === SftpStatus.FAILURE) return;
+      if (code === SftpStatus.OK) return;
+      // SSH_FX_FAILURE is what a v3 server returns for "already exists". Only
+      // treat it as success when the path really is a directory; otherwise a
+      // permission error would be silently swallowed.
+      if (code === SftpStatus.FAILURE) {
+        try {
+          const attrs = await this.stat(path);
+          if (((attrs.permissions ?? 0) & 0o170000) === 0o040000) return;
+        } catch {
+          // Not a readable directory — report the original failure below.
+        }
+      }
       throw new SftpError(code, `mkdir ${path}: ${reader.remaining >= 4 ? reader.string() : SftpStatus[code]}`);
     }
     throw new SftpError(SftpStatus.BAD_MESSAGE, 'mkdir: unexpected response');
   }
 
   async remove(path: string): Promise<void> {
-    await this.expectOk(await this.request(SftpPacketType.REMOVE, sshString(path)), `remove ${path}`);
+    const resolved = await this.resolvePath(path);
+    await this.expectOk(await this.request(SftpPacketType.REMOVE, sshString(resolved)), `remove ${path}`);
   }
 
   async rmdir(path: string): Promise<void> {
-    await this.expectOk(await this.request(SftpPacketType.RMDIR, sshString(path)), `rmdir ${path}`);
+    const resolved = await this.resolvePath(path);
+    await this.expectOk(await this.request(SftpPacketType.RMDIR, sshString(resolved)), `rmdir ${path}`);
   }
 
   async rename(fromPath: string, toPath: string): Promise<void> {
+    const from = await this.resolvePath(fromPath);
+    const to = await this.resolvePath(toPath);
     const response = await this.request(
       SftpPacketType.RENAME,
-      concatBytes(sshString(fromPath), sshString(toPath))
+      concatBytes(sshString(from), sshString(to))
     );
     await this.expectOk(response, `rename ${fromPath} -> ${toPath}`);
   }
@@ -581,12 +619,14 @@ export class SftpClient {
   }
 
   async chmod(path: string, mode: number): Promise<void> {
-    const payload = concatBytes(sshString(path), encodeAttrs({ permissions: mode }));
+    const resolved = await this.resolvePath(path);
+    const payload = concatBytes(sshString(resolved), encodeAttrs({ permissions: mode }));
     await this.expectOk(await this.request(SftpPacketType.SETSTAT, payload), `chmod ${path}`);
   }
 
   /** Read a whole file with a hard byte budget. */
   async readFile(path: string, options: ReadFileOptions = {}): Promise<Uint8Array> {
+    path = await this.resolvePath(path);
     const maxBytes = options.maxBytes ?? SFTP_MAX_READ_FILE_BYTES;
     const attrs = await this.stat(path);
     if ((attrs.size ?? 0) > maxBytes) {
@@ -639,10 +679,21 @@ export class SftpClient {
    * into place, so a failed write never truncates the target.
    */
   async writeFile(path: string, data: Uint8Array, options: WriteFileOptions = {}): Promise<number> {
+    path = await this.resolvePath(path);
     const atomic = options.atomic !== false;
     const target = atomic
       ? `${path}.webssh-tmp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       : path;
+    // A renamed temp file would otherwise land with the umask's mode (0644),
+    // silently widening or narrowing a 0600 secret. Carry the original mode.
+    let permissions = options.permissions;
+    if (atomic && permissions === undefined) {
+      try {
+        permissions = (await this.stat(path)).permissions;
+      } catch (err) {
+        if (!(err instanceof SftpError) || !err.isNotFound) throw err;
+      }
+    }
     try {
       const handle = await this.openFile(
         target,
@@ -663,8 +714,8 @@ export class SftpClient {
       } finally {
         await this.closeHandle(handle).catch(() => undefined);
       }
-      if (options.permissions !== undefined) {
-        await this.chmod(target, options.permissions);
+      if (permissions !== undefined) {
+        await this.chmod(target, permissions);
       }
       if (atomic) {
         await this.rename(target, path);
@@ -684,6 +735,7 @@ export class SftpClient {
    * never left half-written.
    */
   async startUpload(path: string, options: { permissions?: number } = {}): Promise<SftpUploadSession> {
+    path = await this.resolvePath(path);
     const partPath = `${path}.webssh-part`;
     let offset = 0;
     try {

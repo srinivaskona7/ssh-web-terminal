@@ -3,8 +3,38 @@ import { addCronEntry, buildAutomationScript, parseCrontab, removeCronEntry, val
 import { getAutomationTemplate } from '../automation/templates.js';
 import { buildDeploymentPlan, detectProject } from '../projects/projects.js';
 import { buildCancelCommand, buildPollCommand, buildStartCommand, parsePollOutput } from './remote-job-runner.js';
-import { buildRecipeScript as buildRecipeJobScript, parseJobMarkers } from './job-manager.js';
+import { buildRecipeScript as buildRecipeJobScript, cancelAndConfirm, parseJobMarkers, verifyJob } from './job-manager.js';
 import { createJobId, isValidJobId, jobDirectory } from './types.js';
+function jobRecord(id) {
+    return {
+        id,
+        kind: 'verify',
+        title: 'Demo job',
+        server: { host: 'example.test', port: 22, user: 'ops', transport: 'cloudflare-relay' },
+        state: 'running',
+        createdAt: 0,
+        updatedAt: 0,
+        steps: [],
+        variables: {},
+        attached: true
+    };
+}
+function verifyRecipe() {
+    return {
+        id: 'demo',
+        version: '1',
+        name: 'Demo',
+        category: 'development',
+        description: 'Demo recipe',
+        license: 'MIT',
+        versionInstalled: '1',
+        support: {},
+        privileges: 'user',
+        fields: [],
+        rollback: 'none',
+        verify: [{ id: 'check', title: 'Check install', kind: 'exec', argv: ['true'] }]
+    };
+}
 describe('durable job model', () => {
     it('creates and validates job ids', () => {
         const id = createJobId(1700000000000, () => 0.5);
@@ -17,10 +47,59 @@ describe('durable job model', () => {
         const id = createJobId(1, () => 0.1);
         const setup = buildStartCommand(id, 'echo hi');
         expect(setup).toContain('base64 -d');
-        expect(setup).toContain(`$HOME/.webssh/jobs/${id}`);
+        expect(setup).toContain(`"$HOME"/.webssh/jobs/${id}`);
         expect(() => buildStartCommand('../../x', 'echo')).toThrow();
         expect(buildPollCommand(id)).toContain('@@EXIT');
         expect(buildCancelCommand(id)).toContain('kill -TERM');
+    });
+    it('confirms cancellation only once the remote process has exited', async () => {
+        const commands = [];
+        let polls = 0;
+        const session = {
+            execCommand: async (command) => {
+                commands.push(command);
+                if (command.includes('kill -TERM')) {
+                    return { stdout: '@@SIGNALLED\n', stderr: '', exitCode: 0 };
+                }
+                polls += 1;
+                return polls === 1
+                    ? { stdout: '@@RUNNING\n@@OUT\n', stderr: '', exitCode: 0 }
+                    : { stdout: '@@EXIT:143\n@@OUT\n', stderr: '', exitCode: 0 };
+            }
+        };
+        const confirmed = await cancelAndConfirm(jobRecord('job-cancel'), session, 5_000);
+        expect(confirmed.state).toBe('cancelled');
+        expect(confirmed.exitCode).toBe(143);
+        expect(commands.some((c) => c.includes('kill -TERM'))).toBe(true);
+    });
+    it('reports a lost job when no remote pid was recorded', async () => {
+        const session = {
+            execCommand: async () => ({ stdout: '@@NOPID\n', stderr: '', exitCode: 0 })
+        };
+        const lost = await cancelAndConfirm(jobRecord('job-lost'), session, 1_000);
+        expect(lost.state).toBe('lost');
+        expect(lost.error).toMatch(/cannot confirm cancellation/i);
+    });
+    it('records an explicit verification result from the verify steps', async () => {
+        const executed = [];
+        const session = {
+            execStream: async (command) => {
+                executed.push(command);
+                return { stdout: '', stderr: '', exitCode: 0 };
+            }
+        };
+        const verified = await verifyJob(jobRecord('job-verify'), verifyRecipe(), session);
+        expect(executed).toHaveLength(1);
+        expect(verified.verification).toMatchObject({ ran: true, ok: true });
+        expect(verified.state).toBe('succeeded');
+    });
+    it('marks verification failed when a verify step exits non-zero', async () => {
+        const session = {
+            execStream: async () => ({ stdout: '', stderr: 'not installed', exitCode: 3 })
+        };
+        const verified = await verifyJob(jobRecord('job-verify-bad'), verifyRecipe(), session);
+        expect(verified.verification).toMatchObject({ ran: true, ok: false });
+        expect(verified.state).toBe('verification_failed');
     });
     it('parses poll output into running/exited states', () => {
         expect(parsePollOutput('@@RUNNING\n@@OUT\npartial\n@@ERR\n')).toMatchObject({

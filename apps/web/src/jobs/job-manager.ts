@@ -118,11 +118,14 @@ export function buildCommandScript(steps: CommandJobStep[]): string {
   const lines: string[] = ['#!/bin/sh', 'set -u'];
   for (const step of steps) {
     lines.push(`printf '%s\\n' ${posixQuote(`${STEP_MARK}:${step.id}:${step.title}`)}`);
+    // A step may be a compound command (`cd x && a; b`). Without the subshell,
+    // `||` would only guard the last command in the list.
+    const grouped = `( ${step.command} )`;
     if (step.allowFailure) {
-      lines.push(`${step.command} || true`);
+      lines.push(`${grouped} || true`);
     } else {
       lines.push(
-        `${step.command} || { code=$?; printf '%s\\n' ${posixQuote(`${STEP_FAIL_MARK}:${step.id}:`)}"$code"; exit "$code"; }`
+        `${grouped} || { code=$?; printf '%s\\n' ${posixQuote(`${STEP_FAIL_MARK}:${step.id}:`)}"$code"; exit "$code"; }`
       );
     }
     lines.push(`printf '%s\\n' ${posixQuote(`${STEP_OK_MARK}:${step.id}`)}`);

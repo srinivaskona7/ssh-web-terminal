@@ -67,7 +67,8 @@ export class GitClient {
       files: [],
       clean: true
     };
-    for (const part of parts) {
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i] ?? '';
       if (!part) continue;
       if (part.startsWith('## ')) {
         const header = part.slice(3);
@@ -81,11 +82,16 @@ export class GitClient {
         if (behind) status.behind = Number.parseInt(behind[1]!, 10);
         continue;
       }
-      // Porcelain v1 -z: "XY path" where the code is the first two chars.
+      // Porcelain v1 -z: "XY path". Renames and copies are followed by a
+      // second NUL-separated field holding the original path; without skipping
+      // it, that path is parsed as a phantom file entry.
       const index = part[0] ?? ' ';
       const worktree = part[1] ?? ' ';
       const path = part.slice(3);
       status.files.push({ path, code: `${index}${worktree}`, index, worktree });
+      if (index === 'R' || index === 'C' || worktree === 'R' || worktree === 'C') {
+        i += 1;
+      }
     }
     status.clean = status.files.length === 0;
     return status;

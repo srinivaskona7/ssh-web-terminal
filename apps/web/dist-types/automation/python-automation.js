@@ -146,21 +146,31 @@ export class PythonAutomation {
         this.session = session;
     }
     async detect() {
-        const result = await this.session.exec('command -v python3 >/dev/null 2>&1 && python3 --version && python3 -c "import venv, ensurepip" >/dev/null 2>&1; echo "venv:$?"', { timeoutMs: 20_000 });
+        const result = await this.session.exec([
+            'command -v python3 >/dev/null 2>&1 || { echo "python3:missing"; exit 0; }',
+            'echo "version:$(python3 --version 2>&1)"',
+            'if python3 -c "import venv, ensurepip" >/dev/null 2>&1; then echo "venv:yes"; else echo "venv:no"; fi',
+            'echo "path:$(command -v python3)"',
+            'if python3 -m pip --version >/dev/null 2>&1; then echo "pip:yes"; else echo "pip:no"; fi'
+        ].join('; '), { timeoutMs: 20_000 });
         if (result.exitCode !== 0 && !result.stdout.trim())
             return null;
-        const lines = result.stdout.trim().split(/\r?\n/);
-        const version = (lines[0] ?? '').replace(/^Python\s+/, '');
-        const venvCode = Number.parseInt((lines[1] ?? '').replace('venv:', ''), 10);
-        const pathResult = await this.session.exec('command -v python3', { timeoutMs: 10_000 });
-        const pip = await this.session.exec('python3 -m pip --version', { timeoutMs: 20_000 });
+        const fields = new Map();
+        for (const line of result.stdout.split(/\r?\n/)) {
+            const idx = line.indexOf(':');
+            if (idx > 0)
+                fields.set(line.slice(0, idx).trim(), line.slice(idx + 1).trim());
+        }
+        if (fields.get('python3') === 'missing')
+            return null;
+        const version = (fields.get('version') ?? '').replace(/^Python\s+/, '');
         if (!version)
             return null;
         return {
             version,
-            path: pathResult.stdout.trim(),
-            venvAvailable: venvCode === 0,
-            pipAvailable: pip.exitCode === 0
+            path: fields.get('path') ?? '',
+            venvAvailable: fields.get('venv') === 'yes',
+            pipAvailable: fields.get('pip') === 'yes'
         };
     }
     async createVenv(path) {

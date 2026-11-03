@@ -41,6 +41,8 @@ export interface RemoteService {
     sub: string;
     description: string;
 }
+/** Seconds the probe sleeps between its two counter reads. */
+export declare const NETWORK_SAMPLE_SECONDS = 0.4;
 /**
  * One script, one connection round trip. `sleep` gives a real CPU/network delta
  * instead of a lifetime average that never moves.
