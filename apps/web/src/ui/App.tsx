@@ -4,7 +4,6 @@ import {
   Badge,
   Button,
   Card,
-  ComponentGallery,
   EmptyState,
   Icon,
   Modal,
@@ -167,6 +166,7 @@ function TurnstileWidget({
       if (cancelled || !ref.current || !turnstile || widgetIdRef.current !== null) return;
       widgetIdRef.current = turnstile.render(ref.current, {
         sitekey: siteKey,
+        action: 'ssh_connect',
         callback: (token: string) => onTokenRef.current(token),
         'expired-callback': () => onTokenRef.current(''),
         'error-callback': () => onTokenRef.current('')
@@ -368,6 +368,7 @@ export function App(): JSX.Element {
   const [editorOriginalContent, setEditorOriginalContent] = useState('');
   const [editorContent, setEditorContent] = useState('');
   const [editorSaved, setEditorSaved] = useState(true);
+  const [editorLoadedPath, setEditorLoadedPath] = useState<string | null>(null);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [editorConflict, setEditorConflict] = useState<string | null>(null);
@@ -620,6 +621,7 @@ export function App(): JSX.Element {
       const res = await sessionClient.sftpOp({ op: 'read_file', path: remotePath });
       if (res.ok && res.dataBase64 !== undefined) {
         const text = new TextDecoder().decode(base64ToBytes(res.dataBase64));
+        setEditorLoadedPath(remotePath);
         setEditorFilePath(remotePath);
         setEditorOriginalContent(text);
         setEditorContent(text);
@@ -822,6 +824,7 @@ export function App(): JSX.Element {
         setEditorError(`Save failed: ${res.error ?? 'Unknown error'}`);
         return;
       }
+      setEditorLoadedPath(editorFilePath);
       setEditorOriginalContent(editorContent);
       setEditorSaved(true);
       setEditorConflict(null);
@@ -3846,7 +3849,7 @@ export function App(): JSX.Element {
                     onClick={() => void saveEditorBuffer()}
                     testId="save-remote-file-btn"
                   >
-                    Save to host {editorSaved ? '(Saved)' : '(Unsaved*)'}
+                    Save to host {editorLoadedPath !== editorFilePath ? '(Not loaded)' : editorSaved ? '(Saved)' : '(Unsaved*)'}
                   </Button>
                 </div>
               </div>
@@ -3892,7 +3895,7 @@ export function App(): JSX.Element {
               />
               {showDiffViewer ? (
                 <Card testId="side-by-side-diff-card">
-                  <h2>Side-by-Side Diff vs Remote /etc/nginx/nginx.conf</h2>
+                  <h2>Side-by-Side Diff vs Remote {editorFilePath}</h2>
                   <div className="webssh-diff-grid">
                     <div>
                       <strong>Original Remote File</strong>
@@ -3955,7 +3958,7 @@ export function App(): JSX.Element {
                       <Button
                         variant="primary"
                         onClick={() => {
-                          setTerminalLines((prev) => [...prev, `webssh:~$ ${interpolated}`]);
+                          void executeTerminalCommand(interpolated);
                           setActiveScreen('workspace');
                         }}
                       >
@@ -3966,7 +3969,8 @@ export function App(): JSX.Element {
                 })}
               </div>
               <Card>
-                <h2>Session Replay Scrubber ({scrubberSec.toFixed(1)}s)</h2>
+                <h2>Demo recording preview ({scrubberSec.toFixed(1)}s)</h2>
+                <p>Sample recording — not output from your server.</p>
                 <input
                   type="range"
                   min={0}
@@ -3984,7 +3988,6 @@ export function App(): JSX.Element {
           {activeScreen === 'settings' ? (
             <div className="webssh-panel-content" data-testid="screen-settings">
               <h1>Preferences, Theme Gallery & Keybindings</h1>
-              <ComponentGallery activeTheme={activeTheme} onSelectTheme={(t) => setActiveTheme(t)} />
               <Card>
                 <h2>Theme Selector</h2>
                 <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
