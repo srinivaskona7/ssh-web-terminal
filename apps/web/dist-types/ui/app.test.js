@@ -3,14 +3,13 @@ import { jsx as _jsx } from "preact/jsx-runtime";
 import { describe, expect, it } from 'vitest';
 import { render } from 'preact';
 import axe from 'axe-core';
-import { App, FIFTY_FEATURES_CATALOG } from './App';
+import { App } from './App';
 import { AppErrorBoundary, buildSafeDiagnosticReport, repairApplicationAssetCaches, sanitizeDiagnosticMessage } from './ErrorBoundary';
 describe('App UI Shell Integration Suite (M4-M13)', () => {
     it('starts on clean minimal Welcome screen with zero mock data, exits Zen mode on Escape, supports simple Password & Private Key (chmod 0400) connection, and enables IDE mode on demand', async () => {
         const container = document.createElement('div');
         document.body.appendChild(container);
         render(_jsx(App, {}), container);
-        expect(FIFTY_FEATURES_CATALOG.length).toBe(50);
         // 1. Default screen is Welcome with minimal options and zero mock data
         const welcomeScreen = container.querySelector('[data-testid="screen-welcome"]');
         expect(welcomeScreen).toBeTruthy();
@@ -109,7 +108,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         const disconnectBtn = container.querySelector('[data-testid="disconnect-btn"]');
         disconnectBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        // 6. Enable IDE Mode to unlock all 50 features and full IDE navigation rail
+        // 6. Enable IDE Mode to unlock the full navigation rail
         const enableIdeBtn = container.querySelector('[data-testid="toggle-ide-mode-btn"]');
         enableIdeBtn.click();
         await new Promise((r) => setTimeout(r, 10));
@@ -118,7 +117,8 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         expect(navFeatures).toBeTruthy();
         navFeatures.click();
         await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="screen-features"]')?.textContent).toContain('All 50 Features — Interactive Selector & Workbench');
+        expect(container.querySelector('[data-testid="screen-features"]')?.textContent).toContain('Capability matrix');
+        expect(container.querySelector('[data-testid="capability-table"]')).toBeTruthy();
         document.body.removeChild(container);
     });
     it('exercises IDE Mode & Step 12 Advanced Feature Suite: Smart Shell (ghost autocomplete, safety guard, redaction, command blocks), Telemetry HUD, Port Tunnels, SFTP Chmod (0400), Diff, FIDO2/CA, and Fleet Playbooks', async () => {
@@ -172,7 +172,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         const addTunnelBtn = container.querySelector('[data-testid="add-tunnel-btn"]');
         addTunnelBtn.click();
         await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="screen-tunnels"]')?.textContent).toContain('Custom Tunnel :8080->:80');
+        expect(container.querySelector('[data-testid="screen-tunnels"]')?.textContent).toContain('Tunnel not started: connect to an SSH host first');
         // 5. SFTP Chmod Matrix (defaults to strict 0400 -r-------- for SSH keys) & Editor Side-by-Side Diff
         const navFiles = container.querySelector('[data-testid="nav-files"]');
         navFiles.click();
@@ -189,7 +189,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         const navVault = container.querySelector('[data-testid="nav-vault"]');
         navVault.click();
         await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="fido2-hardware-card"]')?.textContent).toContain('sk-ssh-ed25519@openssh.com');
+        expect(container.querySelector('[data-testid="fido2-hardware-card"]')?.textContent).toContain('Browsers cannot create OpenSSH FIDO2 keys');
         document.body.removeChild(container);
     });
     it('renders AppErrorBoundary fallback with Retry, targeted cache repair, and secret-safe diagnostics while preserving localStorage', async () => {

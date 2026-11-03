@@ -21,7 +21,7 @@ import {
   validateAndInspectPrivateKeyPem
 } from '../vault';
 import { HostRegistry, type HostProfile } from '../hosts';
-import { PreferencesStore, type CursorShape, type LayoutPreset } from '../prefs';
+import { PreferencesStore, type CursorShape, type LayoutPreset, type WorkspacePreset } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
 import {
   BrowserSshRelaySessionClient,
@@ -45,7 +45,6 @@ import {
 } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
 import {
-  DATABASE_TUNNEL_TEMPLATES,
   computeGhostAutocomplete,
   computeSideBySideDiff,
   detectDangerousCommand,
@@ -53,29 +52,43 @@ import {
   redactSecretsInText,
   type ChmodPermissions,
   type CommandBlockEntry,
-  type ListeningPortEntry,
-  type PlaybookHostResult,
-  type RemoteContainerEntry,
-  type RemoteProcessEntry,
-  type ServerVitalsSnapshot,
   type SshCertificateInfo,
   type SshTunnelRule
 } from './advanced-features';
 import { repairApplicationAssetCaches } from './ErrorBoundary';
+import {
+  ActivityPanel,
+  DeploymentsPanel,
+  AutomationsPanel,
+  ContainersPanel,
+  KubernetesPanel,
+  OverviewPanel,
+  SoftwarePanel,
+  runDiscovery,
+  type ModuleContext
+} from './ServerModules';
+import { createRemoteSession, type WorkspaceRemoteSession } from '../session/adapters';
+import { CapabilityMatrixPanel } from './CapabilityMatrixPanel';
+import type { ServerCapabilities } from '../discovery/capabilities';
 
 export type ScreenId =
   | 'workspace'
   | 'features'
-  | 'telemetry'
   | 'tunnels'
-  | 'playbooks'
   | 'welcome'
   | 'vault'
   | 'hosts'
   | 'files'
   | 'editor'
   | 'snippets'
-  | 'settings';
+  | 'settings'
+  | 'overview'
+  | 'software'
+  | 'containers'
+  | 'kubernetes'
+  | 'automations'
+  | 'deployments'
+  | 'activity';
 
 export type ConnectionState =
   | 'disconnected'
@@ -96,68 +109,6 @@ export interface SessionTabItem {
   connected: boolean;
   channelId?: number;
 }
-
-export interface FeatureCatalogItem {
-  id: number;
-  category: 'Connection' | 'Terminal' | 'Files' | 'Customization' | 'Security' | 'Productivity';
-  title: string;
-  description: string;
-  targetScreen: ScreenId;
-  actionLabel: string;
-}
-
-export const FIFTY_FEATURES_CATALOG: readonly FeatureCatalogItem[] = [
-  { id: 1, category: 'Connection', title: 'In-browser key generation (Ed25519 / ECDSA P-256)', description: 'Generate non-extractable WebCrypto SSH key pairs stored in IndexedDB.', targetScreen: 'vault', actionLabel: 'Generate Key in Vault' },
-  { id: 2, category: 'Connection', title: 'Public key export (authorized_keys snippet)', description: 'Copy one-line OpenSSH authorized_keys deployment command.', targetScreen: 'vault', actionLabel: 'Copy Public Key Snippet' },
-  { id: 3, category: 'Connection', title: 'Private key import (OpenSSH/PEM encrypted)', description: 'Import existing keys wrapped with Argon2id + AES-256-GCM.', targetScreen: 'vault', actionLabel: 'Open Key Vault Importer' },
-  { id: 4, category: 'Connection', title: 'One-time key deployment (ssh-copy-id)', description: 'Bootstrap authorized_keys on remote server and switch to key auth.', targetScreen: 'workspace', actionLabel: 'Deploy Public Key' },
-  { id: 5, category: 'Connection', title: 'Saved host profiles (tags, folders, favorites)', description: 'Organize SSH hosts with folders, tags, and search filter.', targetScreen: 'hosts', actionLabel: 'Open Saved Hosts' },
-  { id: 6, category: 'Connection', title: 'Automatic reconnect (exponential backoff + jitter)', description: 'Resilient WebSocket transport with ±25% jitter and 64 KiB input queue.', targetScreen: 'settings', actionLabel: 'Simulate Reconnect' },
-  { id: 7, category: 'Connection', title: 'Persistent sessions with 4 MiB ring buffer replay', description: 'Resume detached sessions cleanly from the Go gateway ring buffer.', targetScreen: 'settings', actionLabel: 'Simulate Session Resume' },
-  { id: 8, category: 'Connection', title: 'ProxyJump chains (multi-hop bastion dialing)', description: 'Dial target hosts through one or more SSH bastion hops.', targetScreen: 'hosts', actionLabel: 'Inspect ProxyJump Chains' },
-  { id: 9, category: 'Terminal', title: 'GPU-accelerated @xterm/xterm rendering (WebGL -> Canvas -> DOM)', description: '60fps terminal viewport with automatic context-loss fallback.', targetScreen: 'workspace', actionLabel: 'Focus Terminal Engine' },
-  { id: 10, category: 'Terminal', title: 'Split panes (horizontal & vertical binary tree)', description: 'Split terminal workspace side-by-side or stacked.', targetScreen: 'workspace', actionLabel: 'Split Terminal Pane' },
-  { id: 11, category: 'Terminal', title: 'macOS / VS Code capsule tabs (add, close, switch)', description: 'Multi-session capsule tab strip with status indicators.', targetScreen: 'workspace', actionLabel: 'Create New Tab' },
-  { id: 12, category: 'Terminal', title: 'Scrollback search and caps (10k default, 100k max)', description: 'Search terminal output buffer with regex and case-sensitivity.', targetScreen: 'workspace', actionLabel: 'Search Terminal Buffer' },
-  { id: 13, category: 'Terminal', title: 'Immersive full-screen mode (F11 / hover overlay / 100dvh)', description: 'Zero-chrome terminal with top 6px hover reveal bar.', targetScreen: 'workspace', actionLabel: 'Toggle Full Screen' },
-  { id: 14, category: 'Terminal', title: 'Full Unicode 11 support (wide CJK, emoji, IME)', description: 'Accurate grapheme width measurement for international scripts.', targetScreen: 'workspace', actionLabel: 'Print Unicode 11 Demo' },
-  { id: 15, category: 'Terminal', title: 'Rich ANSI 24-bit TrueColor & OSC 8 hyperlinks', description: 'Render 16M colors and clickable terminal links.', targetScreen: 'workspace', actionLabel: 'Print ANSI TrueColor Demo' },
-  { id: 16, category: 'Terminal', title: 'Safe bracketed paste with multi-line warning', description: 'Inspect multi-line clipboard payloads before sending to shell.', targetScreen: 'workspace', actionLabel: 'Test Safe Paste Guard' },
-  { id: 17, category: 'Terminal', title: 'Connection status bar (cipher, signer, font metrics)', description: 'Live footer showing connection status, cipher, and typography.', targetScreen: 'workspace', actionLabel: 'Inspect Status Bar' },
-  { id: 18, category: 'Files', title: 'Drag-and-drop file upload', description: 'Drop local files directly onto the SFTP pane to upload.', targetScreen: 'files', actionLabel: 'Open SFTP Dropzone' },
-  { id: 19, category: 'Files', title: 'Recursive folder upload', description: 'Create remote directory trees before streaming child files.', targetScreen: 'files', actionLabel: 'Simulate Folder Upload' },
-  { id: 20, category: 'Files', title: 'Chunked resumable transfers (256 KiB + SHA-256 .part)', description: 'Resume interrupted uploads from byte offset with hash verification.', targetScreen: 'files', actionLabel: 'Run 256 KiB Chunked Transfer' },
-  { id: 21, category: 'Files', title: 'Streaming downloads (FileSystemWritableFileStream)', description: 'Zero-memory-bloat direct-to-disk file downloads.', targetScreen: 'files', actionLabel: 'Trigger Streaming Download' },
-  { id: 22, category: 'Files', title: 'Dual-pane SFTP browser (sort & filter)', description: 'Directory-first sorting and live filename filter.', targetScreen: 'files', actionLabel: 'Open SFTP Browser' },
-  { id: 23, category: 'Files', title: 'Transfer queue (pause, resume, cancel, concurrency)', description: 'Manage active SFTP jobs with bounded concurrency.', targetScreen: 'files', actionLabel: 'Inspect Transfer Queue' },
-  { id: 24, category: 'Files', title: 'StorageGuard quota & memory meter', description: 'Enforce 256 MiB storage cap with 80% warning and 95% hard stop.', targetScreen: 'files', actionLabel: 'Check StorageGuard Meter' },
-  { id: 25, category: 'Files', title: 'Remote file editor (atomic SFTP save)', description: 'Edit remote configuration files in-browser and save atomically.', targetScreen: 'editor', actionLabel: 'Open Remote File Editor' },
-  { id: 26, category: 'Files', title: 'Streaming folder download (ZIP / ZIP64 writer)', description: 'Stream entire remote directories as an uncompressed ZIP archive.', targetScreen: 'files', actionLabel: 'Download Folder as ZIP' },
-  { id: 27, category: 'Customization', title: '9 Built-in Theme Presets (Dark, Light, High-Contrast, Dracula, Nord…)', description: 'Switch themes instantaneously with zero layout shift.', targetScreen: 'settings', actionLabel: 'Open Theme Switcher' },
-  { id: 28, category: 'Customization', title: 'Custom 16-color ANSI theme editor + WCAG contrast check', description: 'Design custom palettes verified against WCAG 2.1 AA.', targetScreen: 'settings', actionLabel: 'Validate Custom Theme Contrast' },
-  { id: 29, category: 'Customization', title: 'Font family selector (SF Mono, JetBrains Mono, Fira Code, Menlo, Monaco)', description: 'Switch terminal programming fonts from the quick bar.', targetScreen: 'workspace', actionLabel: 'Cycle Font Family' },
-  { id: 30, category: 'Customization', title: 'Typography controls (+20% 17px default, A-/A+ stepper)', description: 'Scale terminal font size between 11px and 32px.', targetScreen: 'workspace', actionLabel: 'Adjust Font Size' },
-  { id: 31, category: 'Customization', title: 'Layout presets (sidebar-left, sidebar-right, compact, zen)', description: 'Customize workspace dock and sidebar orientation.', targetScreen: 'settings', actionLabel: 'Toggle Sidebar Orientation' },
-  { id: 32, category: 'Customization', title: 'Cursor shape (block, bar, underline) & blink options', description: 'Customize terminal cursor geometry and blink animation.', targetScreen: 'settings', actionLabel: 'Cycle Cursor Shape' },
-  { id: 33, category: 'Customization', title: 'Per-host preference overrides', description: 'Automatically apply distinct themes or font sizes per SSH host.', targetScreen: 'hosts', actionLabel: 'Configure Host Overrides' },
-  { id: 34, category: 'Customization', title: 'Portable preferences (v1->v2 schema migration & JSON export)', description: 'Export and import validated user preferences JSON.', targetScreen: 'settings', actionLabel: 'Export Preferences JSON' },
-  { id: 35, category: 'Security', title: 'Host key verification (TOFU pinning & red mismatch blocker)', description: 'Pin SHA-256 host fingerprints and block MITM key changes.', targetScreen: 'hosts', actionLabel: 'Trigger Host Key Mismatch Modal' },
-  { id: 36, category: 'Security', title: 'Passphrase-locked Argon2id + AES-256-GCM Key Vault', description: 'Wrap private metadata with memory-hard Argon2id KDF.', targetScreen: 'vault', actionLabel: 'Open Argon2id Vault' },
-  { id: 37, category: 'Security', title: 'Vault auto-lock (idle timer & Cmd+Shift+L shortcut)', description: 'Zeroize unlocked session state on idle or manual lock.', targetScreen: 'vault', actionLabel: 'Toggle Vault Lock' },
-  { id: 38, category: 'Security', title: 'Hardened web posture (strict CSP, zero CDN, self-hosted assets)', description: 'Enforce default-src self and zero third-party requests.', targetScreen: 'settings', actionLabel: 'Verify CSP Posture' },
-  { id: 39, category: 'Security', title: 'OIDC gateway authentication & strict Origin check', description: 'Validate bearer JWTs and WebSocket Origin headers at gateway.', targetScreen: 'settings', actionLabel: 'Inspect Gateway Auth Policy' },
-  { id: 40, category: 'Security', title: 'SSRF Destination policy guard (blocks loopback, 169.254.169.254, RFC1918)', description: 'Prevent connections to cloud metadata and internal networks.', targetScreen: 'settings', actionLabel: 'Run SSRF Policy Check' },
-  { id: 41, category: 'Security', title: 'Remote-signer challenge authentication', description: 'Sign SSH auth challenges in-browser without exposing private keys.', targetScreen: 'workspace', actionLabel: 'Open Remote Signer Modal' },
-  { id: 42, category: 'Security', title: 'Metadata-only structured JSON audit trail', description: 'Log connection lifecycle events without PTY or key material.', targetScreen: 'settings', actionLabel: 'View Audit Trail' },
-  { id: 43, category: 'Productivity', title: 'Command Palette (Cmd/Ctrl+K fuzzy launcher)', description: 'Fuzzy-search and run any workspace, host, or theme action.', targetScreen: 'workspace', actionLabel: 'Open Command Palette' },
-  { id: 44, category: 'Productivity', title: 'Snippet library with {{variable}} interpolation', description: 'Parameterized operational commands with instant execution.', targetScreen: 'snippets', actionLabel: 'Open Snippet Library' },
-  { id: 45, category: 'Productivity', title: 'Broadcast input across split panes', description: 'Send keystrokes simultaneously to all panes in the active tab.', targetScreen: 'workspace', actionLabel: 'Toggle Broadcast Input' },
-  { id: 46, category: 'Productivity', title: 'Asciicast v2 session recording & timeline scrubber', description: 'Record PTY sessions with 64 MiB cap and scrub playback.', targetScreen: 'snippets', actionLabel: 'Open Session Scrubber' },
-  { id: 47, category: 'Productivity', title: 'Custom keybindings with conflict detector', description: 'Rebind keyboard shortcuts and detect duplicate bindings.', targetScreen: 'settings', actionLabel: 'Inspect Keybindings' },
-  { id: 48, category: 'Productivity', title: '~/.ssh/config parser & importer (Host, HostName, User, Port, ProxyJump)', description: 'Bulk-import OpenSSH config blocks into Saved Hosts.', targetScreen: 'hosts', actionLabel: 'Import ~/.ssh/config' },
-  { id: 49, category: 'Productivity', title: 'Installable PWA (manifest.webmanifest + offline Service Worker)', description: 'Run WebSSH Studio as a standalone desktop/mobile app.', targetScreen: 'settings', actionLabel: 'Check PWA Status' },
-  { id: 50, category: 'Productivity', title: 'Command-completion notifications (OSC 133 & BEL)', description: 'Alert when long-running background commands finish.', targetScreen: 'workspace', actionLabel: 'Simulate OSC 133 Completion' }
-];
 
 export function App(): JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -226,6 +177,10 @@ export function App(): JSX.Element {
     return (THEME_IDS as readonly string[]).includes(stored) ? (stored as ThemeId) : 'dark';
   });
   const [layoutPreset, setLayoutPreset] = useState<LayoutPreset>(() => prefsStore.get().layoutPreset);
+  const [workspacePreset, setWorkspacePreset] = useState<WorkspacePreset>(
+    () => prefsStore.get().workspacePreset
+  );
+  const [railWidth, setRailWidth] = useState<number>(() => prefsStore.get().railWidthPx);
   const [cursorShape, setCursorShape] = useState<CursorShape>(() => prefsStore.get().surface.cursorShape);
   const [zenMode, setZenMode] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -236,8 +191,38 @@ export function App(): JSX.Element {
   // 3. Fresh Default State (Zero Pre-Populated Mock Data)
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [sessionTabLabel, setSessionTabLabel] = useState<string>('Terminal 1');
-  const [connectedUser, setConnectedUser] = useState<string>('bob');
-  const [connectedHost, setConnectedHost] = useState<string>('caleston-lp10');
+  const [connectedUser, setConnectedUser] = useState<string>('');
+  const [connectedHost, setConnectedHost] = useState<string>('');
+  const [remoteSession, setRemoteSession] = useState<WorkspaceRemoteSession | null>(null);
+  const [capabilities, setCapabilities] = useState<ServerCapabilities | null>(null);
+  const [discoveryBusy, setDiscoveryBusy] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+
+  const discoverForSession = async (
+    session: WorkspaceRemoteSession | null
+  ): Promise<ServerCapabilities | null> => {
+    if (!session) return null;
+    setDiscoveryBusy(true);
+    setDiscoveryError(null);
+    try {
+      const result = await runDiscovery(session);
+      setCapabilities(result);
+      return result;
+    } catch (err) {
+      setDiscoveryError(err instanceof Error ? err.message : String(err));
+      return null;
+    } finally {
+      setDiscoveryBusy(false);
+    }
+  };
+
+  const moduleContext: ModuleContext = {
+    session: remoteSession,
+    capabilities,
+    onDiscover: () => discoverForSession(remoteSession),
+    discoveryBusy,
+    discoveryError
+  };
   const [pendingInputBytes, setPendingInputBytes] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState('');
@@ -249,7 +234,7 @@ export function App(): JSX.Element {
   const [generatedPubKey, setGeneratedPubKey] = useState(
     'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWebSSHStudioBrowserNonExtractableKey webssh@browser'
   );
-  const [generatedFp, setGeneratedFp] = useState('SHA256:k9XmP2vR7wL4qN8sT1yB6cF3hJ5mZ0pQ9vW2xR4tY8u');
+  const [generatedFp, setGeneratedFp] = useState('');
   const [vaultLocked, setVaultLocked] = useState(false);
   const [fileFilter, setFileFilter] = useState('');
   const [transferStatus, setTransferStatus] = useState<string>('Disconnected — Connect to an SSH host to browse SFTP files');
@@ -262,6 +247,11 @@ export function App(): JSX.Element {
   const [editorContent, setEditorContent] = useState('');
   const [editorSaved, setEditorSaved] = useState(true);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
+  const [editorError, setEditorError] = useState<string | null>(null);
+  const [editorConflict, setEditorConflict] = useState<string | null>(null);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [renameTarget, setRenameTarget] = useState<{ path: string; name: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ path: string; name: string } | null>(null);
   const [transportMode, setTransportMode] = useState<TransportBackendMode>(() =>
     resolveTransportBackendMode()
   );
@@ -319,20 +309,7 @@ export function App(): JSX.Element {
   const [dangerousCommandPending, setDangerousCommandPending] = useState<{ command: string; reason: string } | null>(null);
   const [commandBlocks, setCommandBlocks] = useState<CommandBlockEntry[]>([]);
 
-  const [vitals, setVitals] = useState<ServerVitalsSnapshot>({
-    cpuPercent: 0,
-    ramUsedGiB: 0,
-    ramTotalGiB: 0,
-    diskIoMbps: 0,
-    netRxMbps: 0,
-    netTxMbps: 0,
-    loadAvg: [0, 0, 0]
-  });
-
   const [processFilter, setProcessFilter] = useState<string>('');
-  const [processes, setProcesses] = useState<RemoteProcessEntry[]>([]);
-  const [containers, setContainers] = useState<RemoteContainerEntry[]>([]);
-  const [listeningPorts, setListeningPorts] = useState<ListeningPortEntry[]>([]);
 
   const [tunnels, setTunnels] = useState<SshTunnelRule[]>([]);
   const [webPreviewPort, setWebPreviewPort] = useState<number>(3000);
@@ -354,11 +331,9 @@ export function App(): JSX.Element {
 
   const [tailLogLines, setTailLogLines] = useState<string[]>([]);
   const [tailFilter, setTailFilter] = useState<string>('');
-  const [tailPaused, setTailPaused] = useState<boolean>(false);
+  const [tailFilePath, setTailFilePath] = useState<string>('/var/log/nginx/error.log');
   const [relayStatus, setRelayStatus] = useState<string>('Ready to relay files between two connected SSH hosts');
 
-  const [fido2Enrolled, setFido2Enrolled] = useState<boolean>(false);
-  const [fido2KeyLine, setFido2KeyLine] = useState<string>('');
   const [sshCertInfo] = useState<SshCertificateInfo>({
     keyId: 'none',
     certType: 'user',
@@ -369,16 +344,8 @@ export function App(): JSX.Element {
     extensions: ['permit-pty', 'permit-port-forwarding']
   });
 
-  const [playbookScript, setPlaybookScript] = useState<string>('uptime && uname -a');
-  const [playbookResults, setPlaybookResults] = useState<PlaybookHostResult[]>([]);
 
   // 50-Feature Explorer & Workbench State
-  const [featureCategory, setFeatureCategory] = useState<string>('All');
-  const [featureQuery, setFeatureQuery] = useState<string>('');
-  const [selectedFeatureId, setSelectedFeatureId] = useState<number>(1);
-  const [lastExecutedFeatureMsg, setLastExecutedFeatureMsg] = useState<string>(
-    'Select any of the 50 features below to inspect and run it live.'
-  );
 
   const [terminalLines, setTerminalLines] = useState<string[]>([
     'WebSSH Studio v1.0.0',
@@ -390,7 +357,7 @@ export function App(): JSX.Element {
   const currentInputRef = useRef<string>('');
   const [history, setHistory] = useState<string[]>([]);
   const historyRef = useRef<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState<number>(-1);
+  const [, setHistoryIndex] = useState<number>(-1);
   const historyIndexRef = useRef<number>(-1);
   const [copiedSnippet, setCopiedSnippet] = useState<boolean>(false);
 
@@ -487,6 +454,8 @@ export function App(): JSX.Element {
     if (!sessionClient || !sessionClient.isConnected) {
       return;
     }
+    setEditorError(null);
+    setEditorConflict(null);
     try {
       const res = await sessionClient.sftpOp({ op: 'read_file', path: remotePath });
       if (res.ok && res.dataBase64 !== undefined) {
@@ -495,9 +464,207 @@ export function App(): JSX.Element {
         setEditorOriginalContent(text);
         setEditorContent(text);
         setEditorSaved(true);
+      } else {
+        setEditorError(res.error ?? `Could not read ${remotePath}`);
       }
-    } catch {
-      // Ignore if file does not exist yet
+    } catch (err) {
+      setEditorError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const validEntryName = (name: string): boolean =>
+    name.trim().length > 0 && name !== '.' && name !== '..' && !name.includes('/') && !/[\u0000-\u001f]/.test(name);
+
+  const sftpPathFor = (name: string): string =>
+    `${sftpCurrentPath.replace(/\/$/, '')}/${name.trim()}`;
+
+  const runSftpAction = async (
+    label: string,
+    request: () => Promise<{ ok: boolean; error?: string }>
+  ): Promise<void> => {
+    const activeClient = liveSessionRef.current;
+    if (!activeClient || !activeClient.isConnected) {
+      setTransferStatus(`${label} not applied: the SSH session is disconnected.`);
+      return;
+    }
+    try {
+      const res = await request();
+      if (!res.ok) {
+        setTransferStatus(`${label} failed: ${res.error ?? 'Unknown error'}`);
+        return;
+      }
+      setTransferStatus(`${label} succeeded.`);
+      void refreshSftpDirectory(sftpCurrentPath, activeClient, true);
+    } catch (err) {
+      setTransferStatus(`${label} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const createFolder = async (): Promise<void> => {
+    const activeClient = liveSessionRef.current;
+    if (!validEntryName(newFolderName)) {
+      setTransferStatus('Folder name must be a single path segment without control characters.');
+      return;
+    }
+    if (!activeClient) return;
+    await runSftpAction(`Create folder ${newFolderName.trim()}`, () =>
+      activeClient.sftpOp({ op: 'mkdir', path: sftpPathFor(newFolderName) })
+    );
+    setNewFolderName('');
+  };
+
+  const renameEntry = async (): Promise<void> => {
+    const activeClient = liveSessionRef.current;
+    if (!renameTarget || !validEntryName(renameTarget.name)) {
+      setTransferStatus('New name must be a single path segment without control characters.');
+      return;
+    }
+    if (!activeClient) return;
+    await runSftpAction(`Rename ${renameTarget.path}`, () =>
+      activeClient.sftpOp({
+        op: 'rename',
+        path: renameTarget.path,
+        targetPath: sftpPathFor(renameTarget.name)
+      })
+    );
+    setRenameTarget(null);
+  };
+
+  const deleteEntry = async (): Promise<void> => {
+    const activeClient = liveSessionRef.current;
+    if (!deleteTarget || !activeClient) return;
+    await runSftpAction(`Delete ${deleteTarget.path}`, () =>
+      activeClient.sftpOp({ op: 'remove', path: deleteTarget.path })
+    );
+    setDeleteTarget(null);
+  };
+
+  const uploadLocalFile = async (file: File): Promise<void> => {
+    const activeClient = liveSessionRef.current;
+    if (!activeClient || !activeClient.isConnected) {
+      setTransferStatus('Upload not started: the SSH session is disconnected.');
+      return;
+    }
+    if (file.size > 64 * 1024 * 1024) {
+      setTransferStatus('Upload refused: files over 64 MiB are not uploaded from this panel.');
+      return;
+    }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.byteLength; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      }
+      const target = `${sftpCurrentPath.replace(/\/$/, '')}/${file.name}`;
+      setTransferStatus(`Uploading ${file.name} (${bytes.byteLength} bytes)…`);
+      const res = await activeClient.sftpOp({
+        op: 'write_file',
+        path: target,
+        dataBase64: btoa(binary)
+      });
+      if (!res.ok) {
+        setTransferStatus(`Upload failed: ${res.error ?? 'Unknown error'}`);
+        return;
+      }
+      setTransferStatus(`Uploaded ${file.name} to ${target} (${bytes.byteLength} bytes)`);
+      void refreshSftpDirectory(sftpCurrentPath, activeClient, true);
+    } catch (err) {
+      setTransferStatus(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const downloadRemoteFile = async (remotePath: string): Promise<void> => {
+    const activeClient = liveSessionRef.current;
+    if (!activeClient || !activeClient.isConnected) {
+      setTransferStatus('Download not started: the SSH session is disconnected.');
+      return;
+    }
+    try {
+      const res = await activeClient.sftpOp({ op: 'read_file', path: remotePath });
+      if (!res.ok || res.dataBase64 === undefined) {
+        setTransferStatus(`Download failed: ${res.error ?? 'No data returned'}`);
+        return;
+      }
+      const bytes = base64ToBytes(res.dataBase64);
+      const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = remotePath.split('/').pop() || 'download.bin';
+      a.click();
+      URL.revokeObjectURL(url);
+      setTransferStatus(`Downloaded ${remotePath} (${bytes.byteLength} bytes)`);
+    } catch (err) {
+      setTransferStatus(`Download failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const readRemoteLog = async (): Promise<void> => {
+    const activeClient = liveSessionRef.current;
+    if (!activeClient || !activeClient.isConnected) {
+      setTransferStatus('Cannot read logs: the SSH session is disconnected.');
+      return;
+    }
+    const path = tailFilePath.trim();
+    if (!path.startsWith('/') || /[\u0000-\u001f]/.test(path)) {
+      setTransferStatus('Log path must be an absolute path without control characters.');
+      return;
+    }
+    try {
+      const quoted = `'${path.replace(/'/g, `'\\''`)}'`;
+      const res = await activeClient.execCommand(`tail -n 200 -- ${quoted} 2>&1`, 20_000);
+      setTailLogLines(res.stdout.split(/\r?\n/));
+      if (res.exitCode !== 0) {
+        setTransferStatus(`Reading ${path} exited with code ${res.exitCode}; output shown as returned`);
+      }
+    } catch (err) {
+      setTransferStatus(`Reading ${path} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  /**
+   * Save the editor buffer. Refuses when the remote file changed since it was
+   * loaded, and never reports success unless the write actually succeeded.
+   */
+  const saveEditorBuffer = async (overwrite = false): Promise<void> => {
+    const activeClient = liveSessionRef.current;
+    if (!activeClient || !activeClient.isConnected) {
+      setEditorError('Not saved: the SSH session is disconnected. Reconnect before saving.');
+      return;
+    }
+    setEditorError(null);
+    try {
+      if (!overwrite) {
+        const current = await activeClient.sftpOp({ op: 'read_file', path: editorFilePath });
+        if (
+          current.ok &&
+          current.dataBase64 !== undefined &&
+          new TextDecoder().decode(base64ToBytes(current.dataBase64)) !== editorOriginalContent
+        ) {
+          setEditorConflict(
+            `${editorFilePath} changed on the server since you opened it. Saving now would overwrite those changes.`
+          );
+          return;
+        }
+      }
+      const encoded = bytesToBase64(new TextEncoder().encode(editorContent));
+      const res = await activeClient.sftpOp({
+        op: 'write_file',
+        path: editorFilePath,
+        dataBase64: encoded
+      });
+      if (!res.ok) {
+        setEditorError(`Save failed: ${res.error ?? 'Unknown error'}`);
+        return;
+      }
+      setEditorOriginalContent(editorContent);
+      setEditorSaved(true);
+      setEditorConflict(null);
+      setTransferStatus(`Saved ${editorFilePath} over SFTP`);
+      void refreshSftpDirectory(sftpCurrentPath, activeClient);
+    } catch (err) {
+      setEditorError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -831,6 +998,17 @@ export function App(): JSX.Element {
         setConnectionState('connected');
         setConnectModalOpen(false);
         setActiveScreen('workspace');
+        const workspaceSession = createRemoteSession(client, {
+          transport: transportMode === 'cloudflare-relay' ? 'cloudflare-relay' : 'go-gateway',
+          host: hostVal,
+          user: userVal,
+          port: portNum,
+          isConnected: () => client.isConnected
+        });
+        setRemoteSession(workspaceSession);
+        setCapabilities(null);
+        setDiscoveryError(null);
+        void discoverForSession(workspaceSession);
         const authDetail =
           authMethod === 'Private Key (.pem / id_rsa)'
             ? `Private Key ${uploadedKeyFileName || 'id_ed25519'} [chmod ${keyPermissionMode}]`
@@ -916,7 +1094,7 @@ export function App(): JSX.Element {
 
     if (cmd === 'help') {
       const helpMsg =
-        'Available local commands: connect <user@host>, pubkey, font <size>, clear, vault, split, features, telemetry, tunnels, playbooks';
+        'Available local commands: connect <user@host>, pubkey, font <size>, clear, vault, split, features, telemetry, tunnels';
       setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, helpMsg]);
       appendCommandBlock(trimmed, [helpMsg], 0);
       writeToXterm(`${String.fromCharCode(13, 10)}${helpMsg}${String.fromCharCode(13, 10)}webssh:~$ `);
@@ -976,7 +1154,9 @@ export function App(): JSX.Element {
     }
 
     if (cmd === 'vault') {
-      const msg = `Argon2id Vault Fingerprint: ${generatedFp}`;
+      const msg = generatedFp
+        ? `Argon2id Vault Fingerprint: ${generatedFp}`
+        : 'Argon2id vault has no key yet — generate one in the vault to see its fingerprint.';
       setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
       appendCommandBlock(trimmed, [msg], 0);
       setActiveScreen('vault');
@@ -998,20 +1178,14 @@ export function App(): JSX.Element {
     }
 
     if (cmd === 'telemetry') {
-      appendCommandBlock(trimmed, ['Opened Server Observability & DevOps HUD.'], 0);
-      setActiveScreen('telemetry');
+      appendCommandBlock(trimmed, ['Opened Servers → Live control.'], 0);
+      setActiveScreen('overview');
       return;
     }
 
     if (cmd === 'tunnels') {
       appendCommandBlock(trimmed, ['Opened Port Forwarding & Network Tunneling Studio.'], 0);
       setActiveScreen('tunnels');
-      return;
-    }
-
-    if (cmd === 'playbooks') {
-      appendCommandBlock(trimmed, ['Opened Multi-Host Playbook & Fleet Runner.'], 0);
-      setActiveScreen('playbooks');
       return;
     }
 
@@ -1311,102 +1485,6 @@ export function App(): JSX.Element {
     }
   };
 
-  const handleRunFeature = (feature: FeatureCatalogItem): void => {
-    setSelectedFeatureId(feature.id);
-    setLastExecutedFeatureMsg(`Activated Feature #${feature.id}: ${feature.title}`);
-
-    switch (feature.id) {
-      case 1:
-        void handleGenerateKey();
-        setActiveScreen('vault');
-        break;
-      case 2:
-      case 4:
-        copyToClipboard(authorizedKeysSnippet);
-        setTerminalLines((prev) => [
-          ...prev,
-          `[Feature #${feature.id}] Deployed public key snippet: ${authorizedKeysSnippet}`
-        ]);
-        setActiveScreen('workspace');
-        break;
-      case 6:
-        setConnectionState('reconnecting');
-        setPendingInputBytes(128);
-        break;
-      case 7:
-        setConnectionState('resumed');
-        setPendingInputBytes(0);
-        break;
-      case 10:
-        setSplitPanes((n) => (n === 1 ? 2 : 1));
-        setActiveScreen('workspace');
-        break;
-      case 11:
-        handleAddTab();
-        break;
-      case 13:
-        toggleFullscreen();
-        break;
-      case 14:
-        setTerminalLines((prev) => [
-          ...prev,
-          'Unicode 11 Wide/Emoji Check: [日本語のテキスト] [한국어] [🚀🔒⚡🌐]'
-        ]);
-        setActiveScreen('workspace');
-        break;
-      case 15:
-        setTerminalLines((prev) => [
-          ...prev,
-          'ANSI 24-bit TrueColor & OSC 8 Link: https://github.com/srinew/terminal [256-color OK]'
-        ]);
-        setActiveScreen('workspace');
-        break;
-      case 20:
-        setTransferStatus('Uploading release.tar.zst — Chunk 12/20 (256 KiB) · SHA-256 verified (.part)');
-        setActiveScreen('files');
-        break;
-      case 29:
-        setFontFamily((prev) => (prev.includes('SF Mono') ? 'JetBrains Mono' : 'SF Mono'));
-        setActiveScreen('workspace');
-        break;
-      case 30:
-        setFontSize((s) => Math.min(32, s + 1));
-        setActiveScreen('workspace');
-        break;
-      case 31:
-        setLayoutPreset((p) => (p === 'sidebar-left' ? 'sidebar-right' : 'sidebar-left'));
-        break;
-      case 32:
-        setCursorShape((c) => (c === 'block' ? 'bar' : c === 'bar' ? 'underline' : 'block'));
-        setActiveScreen('workspace');
-        break;
-      case 35:
-        setHostKeyModal('mismatch');
-        break;
-      case 41:
-        setConnectModalOpen(true);
-        break;
-      case 43:
-        setPaletteOpen(true);
-        break;
-      case 45:
-        setBroadcastInput((b) => !b);
-        setSplitPanes(2);
-        setActiveScreen('workspace');
-        break;
-      case 50:
-        setTerminalLines((prev) => [
-          ...prev,
-          '[OSC 133;D;0] Background command completed in 12.4s (exit code 0)'
-        ]);
-        setActiveScreen('workspace');
-        break;
-      default:
-        setActiveScreen(feature.targetScreen);
-        break;
-    }
-  };
-
   const paletteRegistry = useMemo(() => {
     const reg = new CommandPaletteRegistry();
     reg.register({
@@ -1430,7 +1508,7 @@ export function App(): JSX.Element {
     });
     reg.register({
       id: 'nav.features',
-      title: 'Open 50-Feature Interactive Workbench',
+      title: 'Open capability matrix',
       category: 'Terminal',
       run: () => {
         setActiveScreen('features');
@@ -1481,19 +1559,24 @@ export function App(): JSX.Element {
     [sftpRawEntries, fileFilter]
   );
 
-  const filteredFeatures = useMemo(() => {
-    return FIFTY_FEATURES_CATALOG.filter((f) => {
-      if (featureCategory !== 'All' && f.category !== featureCategory) return false;
-      if (!featureQuery.trim()) return true;
-      const q = featureQuery.toLowerCase();
-      return (
-        f.title.toLowerCase().includes(q) ||
-        f.description.toLowerCase().includes(q) ||
-        f.category.toLowerCase().includes(q) ||
-        String(f.id) === q
-      );
-    });
-  }, [featureCategory, featureQuery]);
+  const applyPreset = (preset: WorkspacePreset): void => {
+    setWorkspacePreset(preset);
+    prefsStore.update({ workspacePreset: preset });
+    if (preset === 'terminal') {
+      setLayoutPreset('sidebar-left');
+      prefsStore.update({ layoutPreset: 'sidebar-left' });
+      setSplitPanes(1);
+      setActiveScreen('workspace');
+    } else if (preset === 'develop') {
+      setLayoutPreset('bottom-files');
+      prefsStore.update({ layoutPreset: 'bottom-files' });
+      setActiveScreen('editor');
+    } else {
+      setLayoutPreset('sidebar-left');
+      prefsStore.update({ layoutPreset: 'sidebar-left' });
+      setActiveScreen('overview');
+    }
+  };
 
   const quotaSnap = storageGuard.snapshot();
 
@@ -2132,7 +2215,12 @@ export function App(): JSX.Element {
         }`.trim()}
       >
         {!isFullscreen && !zenMode ? (
-          <nav className="webssh-rail" aria-label="Workspace navigation">
+          <>
+          <nav
+            className="webssh-rail"
+            aria-label="Workspace navigation"
+            style={{ width: `${railWidth}px` }}
+          >
             <Button
               variant={activeScreen === 'welcome' ? 'primary' : 'ghost'}
               onClick={() => setActiveScreen('welcome')}
@@ -2140,12 +2228,87 @@ export function App(): JSX.Element {
             >
               Welcome
             </Button>
+            <div className="webssh-rail-presets" role="group" aria-label="Workspace preset">
+              {(['terminal', 'develop', 'operate'] as const).map((preset) => (
+                <Button
+                  key={preset}
+                  variant={workspacePreset === preset ? 'primary' : 'ghost'}
+                  onClick={() => applyPreset(preset)}
+                  testId={`preset-${preset}`}
+                >
+                  {preset[0]!.toUpperCase() + preset.slice(1)}
+                </Button>
+              ))}
+            </div>
             <Button
               variant={activeScreen === 'workspace' ? 'primary' : 'ghost'}
               onClick={() => setActiveScreen('workspace')}
               testId="nav-workspace"
             >
               <Icon name="terminal" /> Terminal
+            </Button>
+            <Button
+              variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('overview')}
+              testId="nav-overview"
+            >
+              <Icon name="server" /> Servers
+            </Button>
+            <Button
+              variant={activeScreen === 'files' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('files')}
+              testId="nav-files"
+            >
+              <Icon name="folder" /> Files
+            </Button>
+            <Button
+              variant={activeScreen === 'software' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('software')}
+              testId="nav-software"
+            >
+              Software
+            </Button>
+            <Button
+              variant={activeScreen === 'containers' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('containers')}
+              testId="nav-containers"
+            >
+              Containers
+            </Button>
+            <Button
+              variant={activeScreen === 'kubernetes' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('kubernetes')}
+              testId="nav-kubernetes"
+            >
+              Kubernetes
+            </Button>
+            <Button
+              variant={activeScreen === 'automations' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('automations')}
+              testId="nav-automations"
+            >
+              Automations
+            </Button>
+            <Button
+              variant={activeScreen === 'activity' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('activity')}
+              testId="nav-activity"
+            >
+              Activity
+            </Button>
+            <Button
+              variant={activeScreen === 'deployments' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('deployments')}
+              testId="nav-deployments"
+            >
+              Deployments
+            </Button>
+            <Button
+              variant={activeScreen === 'settings' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('settings')}
+              testId="nav-settings"
+            >
+              <Icon name="settings" /> Settings
             </Button>
             <Button
               variant={ideMode ? 'primary' : 'default'}
@@ -2173,25 +2336,11 @@ export function App(): JSX.Element {
                   Features (50)
                 </Button>
                 <Button
-                  variant={activeScreen === 'telemetry' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('telemetry')}
-                  testId="nav-telemetry"
-                >
-                  Telemetry HUD
-                </Button>
-                <Button
                   variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}
                   onClick={() => setActiveScreen('tunnels')}
                   testId="nav-tunnels"
                 >
                   Port Tunnels
-                </Button>
-                <Button
-                  variant={activeScreen === 'playbooks' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('playbooks')}
-                  testId="nav-playbooks"
-                >
-                  Fleet Playbooks
                 </Button>
                 <Button
                   variant={activeScreen === 'vault' ? 'primary' : 'ghost'}
@@ -2208,13 +2357,6 @@ export function App(): JSX.Element {
                   <Icon name="server" /> Hosts
                 </Button>
                 <Button
-                  variant={activeScreen === 'files' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('files')}
-                  testId="nav-files"
-                >
-                  <Icon name="folder" /> SFTP Files
-                </Button>
-                <Button
                   variant={activeScreen === 'editor' ? 'primary' : 'ghost'}
                   onClick={() => setActiveScreen('editor')}
                   testId="nav-editor"
@@ -2228,16 +2370,51 @@ export function App(): JSX.Element {
                 >
                   Snippets & Replay
                 </Button>
-                <Button
-                  variant={activeScreen === 'settings' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('settings')}
-                  testId="nav-settings"
-                >
-                  <Icon name="settings" /> Settings
-                </Button>
               </div>
             ) : null}
           </nav>
+          <div
+            className="webssh-rail-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize navigation rail"
+            aria-valuenow={railWidth}
+            aria-valuemin={120}
+            aria-valuemax={360}
+            tabIndex={0}
+            onKeyDown={(e) => {
+              const step = e.key === 'ArrowLeft' ? -8 : e.key === 'ArrowRight' ? 8 : 0;
+              if (!step) return;
+              e.preventDefault();
+              setRailWidth((w) => {
+                const next = Math.min(360, Math.max(120, w + step));
+                prefsStore.update({ railWidthPx: next });
+                return next;
+              });
+            }}
+            onPointerDown={(e) => {
+              const startX = e.clientX;
+              const startWidth = railWidth;
+              const target = e.currentTarget as HTMLElement;
+              target.setPointerCapture(e.pointerId);
+              const onMove = (move: PointerEvent): void => {
+                const delta =
+                  layoutPreset === 'sidebar-right' ? startX - move.clientX : move.clientX - startX;
+                setRailWidth(Math.min(360, Math.max(120, startWidth + delta)));
+              };
+              const onUp = (): void => {
+                target.removeEventListener('pointermove', onMove);
+                target.removeEventListener('pointerup', onUp);
+                setRailWidth((w) => {
+                  prefsStore.update({ railWidthPx: w });
+                  return w;
+                });
+              };
+              target.addEventListener('pointermove', onMove);
+              target.addEventListener('pointerup', onUp);
+            }}
+          />
+          </>
         ) : null}
 
         <main className="webssh-main">
@@ -2418,259 +2595,15 @@ export function App(): JSX.Element {
             </div>
           ) : null}
 
-          {activeScreen === 'features' ? (
-            <div className="webssh-panel-content" data-testid="screen-features">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                <h1>All 50 Features — Interactive Selector & Workbench</h1>
-                <Badge tone="success" testId="feature-active-status">
-                  {lastExecutedFeatureMsg}
-                </Badge>
-              </div>
+          {activeScreen === 'overview' ? <OverviewPanel ctx={moduleContext} /> : null}
+          {activeScreen === 'software' ? <SoftwarePanel ctx={moduleContext} /> : null}
+          {activeScreen === 'containers' ? <ContainersPanel ctx={moduleContext} /> : null}
+          {activeScreen === 'kubernetes' ? <KubernetesPanel ctx={moduleContext} /> : null}
+          {activeScreen === 'automations' ? <AutomationsPanel ctx={moduleContext} /> : null}
+          {activeScreen === 'deployments' ? <DeploymentsPanel ctx={moduleContext} /> : null}
+          {activeScreen === 'activity' ? <ActivityPanel ctx={moduleContext} /> : null}
 
-              <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
-                {(['All', 'Connection', 'Terminal', 'Files', 'Customization', 'Security', 'Productivity'] as const).map(
-                  (cat) => (
-                    <Button
-                      key={cat}
-                      variant={featureCategory === cat ? 'primary' : 'default'}
-                      onClick={() => setFeatureCategory(cat)}
-                      testId={`feature-cat-${cat.toLowerCase()}`}
-                    >
-                      {cat}
-                    </Button>
-                  )
-                )}
-                <input
-                  type="search"
-                  className="ui-input"
-                  placeholder="Search all 50 features by name, number, or category…"
-                  aria-label="Search 50 features"
-                  value={featureQuery}
-                  onInput={(e) => setFeatureQuery((e.target as HTMLInputElement).value)}
-                  data-testid="feature-search-input"
-                  style={{ flex: 1, minWidth: '220px' }}
-                />
-              </div>
-
-              <div className="webssh-grid">
-                {filteredFeatures.map((feat) => (
-                  <Card
-                    key={feat.id}
-                    testId={`feature-card-${feat.id}`}
-                    className={selectedFeatureId === feat.id ? 'ui-card--selected' : ''}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <strong>
-                        #{feat.id} · {feat.title}
-                      </strong>
-                      <Badge tone="neutral">{feat.category}</Badge>
-                    </div>
-                    <p>{feat.description}</p>
-                    <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                      <Button
-                        variant="primary"
-                        onClick={() => handleRunFeature(feat)}
-                        testId={`run-feature-${feat.id}`}
-                      >
-                        {feat.actionLabel}
-                      </Button>
-                    </div>
-                  </Card>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {activeScreen === 'telemetry' ? (
-            <div className="webssh-panel-content" data-testid="screen-telemetry">
-              <h1>Server Observability & DevOps HUD (Agentless SSH Probe)</h1>
-              <div className="webssh-hud-strip" data-testid="telemetry-vitals-hud">
-                <div className="webssh-hud-metric">
-                  <span>CPU Load</span>
-                  <strong>{vitals.cpuPercent}%</strong>
-                  <div className="webssh-sparkbar">
-                    <div className="webssh-sparkbar-fill" style={{ width: `${vitals.cpuPercent}%` }} />
-                  </div>
-                </div>
-                <div className="webssh-hud-metric">
-                  <span>RAM Usage</span>
-                  <strong>
-                    {vitals.ramUsedGiB} / {vitals.ramTotalGiB} GiB
-                  </strong>
-                  <div className="webssh-sparkbar">
-                    <div
-                      className="webssh-sparkbar-fill"
-                      style={{ width: `${Math.round((vitals.ramUsedGiB / vitals.ramTotalGiB) * 100)}%` }}
-                    />
-                  </div>
-                </div>
-                <div className="webssh-hud-metric">
-                  <span>Disk I/O</span>
-                  <strong>{vitals.diskIoMbps} MB/s</strong>
-                </div>
-                <div className="webssh-hud-metric">
-                  <span>Network RX / TX</span>
-                  <strong>
-                    ↓ {vitals.netRxMbps} MB/s · ↑ {vitals.netTxMbps} MB/s
-                  </strong>
-                </div>
-                <div className="webssh-hud-metric">
-                  <span>Load Avg (1m/5m/15m)</span>
-                  <strong>{vitals.loadAvg.join(' / ')}</strong>
-                </div>
-              </div>
-
-              <Card>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                  <h2>Interactive Process Manager (htop-in-GUI)</h2>
-                  <input
-                    type="search"
-                    className="ui-input"
-                    placeholder="Filter processes by PID, user, or command…"
-                    aria-label="Filter processes"
-                    value={processFilter}
-                    onInput={(e) => setProcessFilter((e.target as HTMLInputElement).value)}
-                    data-testid="process-filter-input"
-                    style={{ maxWidth: '280px' }}
-                  />
-                </div>
-                <table className="webssh-table" data-testid="process-table">
-                  <thead>
-                    <tr>
-                      <th>PID</th>
-                      <th>User</th>
-                      <th>CPU %</th>
-                      <th>MEM %</th>
-                      <th>Command</th>
-                      <th>Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {processes
-                      .filter(
-                        (p) =>
-                          !processFilter ||
-                          p.command.toLowerCase().includes(processFilter.toLowerCase()) ||
-                          String(p.pid).includes(processFilter)
-                      )
-                      .map((proc) => (
-                        <tr key={proc.pid} data-testid={`proc-row-${proc.pid}`}>
-                          <td>{proc.pid}</td>
-                          <td>{proc.user}</td>
-                          <td>{proc.cpuPercent}%</td>
-                          <td>{proc.memPercent}%</td>
-                          <td>{proc.command}</td>
-                          <td>
-                            <Button
-                              variant="danger"
-                              testId={`kill-proc-${proc.pid}`}
-                              onClick={() =>
-                                setProcesses((prev) => prev.filter((item) => item.pid !== proc.pid))
-                              }
-                            >
-                              SIGTERM
-                            </Button>
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </Card>
-
-              <div className="webssh-grid">
-                <Card>
-                  <h2>Docker & Kubernetes Container Inspector</h2>
-                  {containers.map((c) => (
-                    <div
-                      key={c.id}
-                      data-testid={`container-row-${c.id}`}
-                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-2)' }}
-                    >
-                      <div>
-                        <strong>{c.name}</strong> ({c.runtime})
-                        <div>
-                          <small>
-                            {c.image} · {c.ports}
-                          </small>
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
-                        <Badge tone="success">{c.status}</Badge>
-                        <Button
-                          variant="primary"
-                          testId={`exec-container-${c.id}`}
-                          onClick={() => {
-                            handleAddTab();
-                            setTerminalLines((prev) => [
-                              ...prev,
-                              `webssh:~$ ${c.runtime === 'docker' ? 'docker' : 'kubectl'} exec -it ${c.name} -- /bin/sh`
-                            ]);
-                          }}
-                        >
-                          Exec Shell
-                        </Button>
-                        <Button
-                          variant="default"
-                          onClick={() =>
-                            setContainers((prev) =>
-                              prev.map((item) =>
-                                item.id === c.id ? { ...item, status: 'Restarting' } : item
-                              )
-                            )
-                          }
-                        >
-                          Restart
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
-                </Card>
-
-                <Card>
-                  <h2>Active Listening Ports & Sockets (ss -tulnp)</h2>
-                  <table className="webssh-table" data-testid="listening-ports-table">
-                    <thead>
-                      <tr>
-                        <th>Proto</th>
-                        <th>Bind:Port</th>
-                        <th>Process (PID)</th>
-                        <th>Preview</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {listeningPorts.map((lp) => (
-                        <tr key={lp.port}>
-                          <td>{lp.proto}</td>
-                          <td>
-                            {lp.bindAddress}:{lp.port}
-                          </td>
-                          <td>
-                            {lp.process} ({lp.pid})
-                          </td>
-                          <td>
-                            {lp.webPreviewable ? (
-                              <Button
-                                variant="primary"
-                                testId={`preview-port-${lp.port}`}
-                                onClick={() => {
-                                  setWebPreviewPort(lp.port);
-                                  setActiveScreen('tunnels');
-                                }}
-                              >
-                                Web Preview
-                              </Button>
-                            ) : (
-                              <Badge tone="neutral">TCP Tunnel</Badge>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </Card>
-              </div>
-            </div>
-          ) : null}
+          {activeScreen === 'features' ? <CapabilityMatrixPanel /> : null}
 
           {activeScreen === 'tunnels' ? (
             <div className="webssh-panel-content" data-testid="screen-tunnels">
@@ -2734,20 +2667,9 @@ export function App(): JSX.Element {
                             ]);
                           });
                       } else {
-                        setTunnels((prev) => [
-                          ...prev,
-                          {
-                            id: tunId,
-                            name: `Custom Tunnel :${lPort}->:${rPort}`,
-                            type: 'L',
-                            bindAddress: '127.0.0.1',
-                            localPort: lPort,
-                            remoteHost: '127.0.0.1',
-                            remotePort: rPort,
-                            active: true,
-                            bytesTransferred: 0
-                          }
-                        ]);
+                        setTunnelPreviewOutput(
+                          `Tunnel not started: connect to an SSH host first (${lPort} → ${rPort}).`
+                        );
                       }
                     }}
                   >
@@ -2776,12 +2698,39 @@ export function App(): JSX.Element {
                         variant="default"
                         testId={`toggle-tunnel-${t.id}`}
                         onClick={() => {
-                          if (t.active && liveSessionRef.current?.isConnected) {
-                            void liveSessionRef.current.tunnelOp({ op: 'stop', tunnelId: t.id });
+                          const activeClient = liveSessionRef.current;
+                          if (!activeClient || !activeClient.isConnected) {
+                            setTunnelPreviewOutput(
+                              `Tunnel ${t.id} unchanged: the SSH session is disconnected.`
+                            );
+                            return;
                           }
-                          setTunnels((prev) =>
-                            prev.map((item) => (item.id === t.id ? { ...item, active: !item.active } : item))
-                          );
+                          const nextActive = !t.active;
+                          const request = nextActive
+                            ? activeClient.tunnelOp({
+                                op: 'start',
+                                tunnelId: t.id,
+                                forwardType: t.type === 'R' ? 'R' : t.type === 'D' ? 'D' : 'L',
+                                bindAddress: t.bindAddress,
+                                localPort: t.localPort,
+                                remoteHost: t.remoteHost,
+                                remotePort: t.remotePort
+                              })
+                            : activeClient.tunnelOp({ op: 'stop', tunnelId: t.id });
+                          void request.then((res) => {
+                            setTunnels((prev) =>
+                              prev.map((item) =>
+                                item.id === t.id
+                                  ? { ...item, active: res.ok ? nextActive : item.active }
+                                  : item
+                              )
+                            );
+                            if (!res.ok) {
+                              setTunnelPreviewOutput(
+                                `Tunnel ${t.id} ${nextActive ? 'start' : 'stop'} failed: ${res.error ?? 'unknown error'}`
+                              );
+                            }
+                          });
                         }}
                       >
                         {t.active ? 'Pause Tunnel' : 'Start Tunnel'}
@@ -2844,54 +2793,6 @@ export function App(): JSX.Element {
                 </p>
                 <pre data-testid="tunnel-preview-output">{tunnelPreviewOutput}</pre>
               </Card>
-            </div>
-          ) : null}
-
-          {activeScreen === 'playbooks' ? (
-            <div className="webssh-panel-content" data-testid="screen-playbooks">
-              <h1>Multi-Host Playbook & Fleet Runner</h1>
-              <Card>
-                <label htmlFor="playbook-script-input">Fleet Playbook Command / Script</label>
-                <input
-                  id="playbook-script-input"
-                  type="text"
-                  className="ui-input"
-                  value={playbookScript}
-                  onInput={(e) => setPlaybookScript((e.target as HTMLInputElement).value)}
-                  data-testid="playbook-script-input"
-                />
-                <div style={{ marginTop: 'var(--space-2)' }}>
-                  <Button
-                    variant="primary"
-                    testId="run-playbook-btn"
-                    onClick={() =>
-                      setPlaybookResults((prev) =>
-                        prev.map((r) => ({
-                          ...r,
-                          output: `[Executed "${playbookScript}"] -> ${r.output}`
-                        }))
-                      )
-                    }
-                  >
-                    Run Playbook Across Fleet ({playbookResults.length} Hosts)
-                  </Button>
-                </div>
-              </Card>
-              <div className="webssh-grid" data-testid="playbook-results-grid">
-                {playbookResults.map((res) => (
-                  <Card key={res.hostAlias} testId={`playbook-host-${res.hostAlias}`}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <strong>
-                        {res.hostAlias} ({res.hostAddress})
-                      </strong>
-                      <Badge tone={res.exitCode === 0 ? 'success' : 'danger'}>
-                        exit {res.exitCode} · {res.durationMs}ms
-                      </Badge>
-                    </div>
-                    <pre>{res.output}</pre>
-                  </Card>
-                ))}
-              </div>
             </div>
           ) : null}
 
@@ -3270,7 +3171,9 @@ export function App(): JSX.Element {
                       <strong>prod-ed25519-key</strong>
                       <Badge tone="success">Ed25519 · Non-Extractable</Badge>
                     </div>
-                    <p data-testid="vault-fingerprint">Fingerprint: {generatedFp}</p>
+                    <p data-testid="vault-fingerprint">
+                      Fingerprint: {generatedFp || 'not generated in this session'}
+                    </p>
                     <label htmlFor="pubkey-box">OpenSSH Public Key & authorized_keys snippet</label>
                     <textarea
                       id="pubkey-box"
@@ -3290,37 +3193,26 @@ export function App(): JSX.Element {
                   <Card testId="fido2-hardware-card">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <strong>WebAuthn / FIDO2 Hardware Key (YubiKey / TouchID)</strong>
-                      <Badge tone={fido2Enrolled ? 'success' : 'neutral'}>
-                        {fido2Enrolled ? 'Hardware Bound' : 'Ready to Enroll'}
-                      </Badge>
+                      <Badge tone="neutral">Not available in-browser</Badge>
                     </div>
-                    <p>OpenSSH Hardware Resident Key: <code>sk-ssh-ed25519@openssh.com</code></p>
-                    <input
-                      type="text"
-                      className="ui-input"
-                      readOnly
-                      aria-label="FIDO2 public key"
-                      value={fido2KeyLine}
-                      data-testid="fido2-pubkey-output"
-                    />
-                    <Button
-                      variant="primary"
-                      testId="enroll-fido2-btn"
-                      onClick={() => {
-                        setFido2Enrolled(true);
-                        setFido2KeyLine(
-                          'sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAA EnrolledHardwarePasskey yubikey@webssh'
-                        );
-                      }}
-                    >
-                      Enroll FIDO2 Passkey
-                    </Button>
+                    <p>
+                      Browsers cannot create OpenSSH FIDO2 keys (<code>sk-ssh-ed25519@openssh.com</code>).
+                      Generate one where the hardware key is attached, then register the public key with
+                      the server:
+                    </p>
+                    <pre className="ws-mod-log">{'ssh-keygen -t ed25519-sk -O resident -O application=ssh:webssh'}</pre>
+                    <p className="ws-mod-muted">
+                      Import the resulting public key into Saved Hosts → authorized_keys. This build does
+                      not fake the enrollment.
+                    </p>
                   </Card>
 
                   <Card testId="ssh-ca-cert-card">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <strong>SSH Certificate Authority (CA) Short-Lived Cert</strong>
-                      <Badge tone="success">{sshCertInfo.certType} cert</Badge>
+                      <Badge tone={sshCertInfo.caFingerprint === '—' ? 'neutral' : 'success'}>
+                        {sshCertInfo.caFingerprint === '—' ? 'no certificate loaded' : `${sshCertInfo.certType} cert`}
+                      </Badge>
                     </div>
                     <p>Key ID: <code>{sshCertInfo.keyId}</code></p>
                     <p>Principals: <code>{sshCertInfo.principals.join(', ')}</code></p>
@@ -3341,7 +3233,7 @@ export function App(): JSX.Element {
                     Verify Host Key (TOFU)
                   </Button>
                   <Button variant="danger" onClick={() => setHostKeyModal('mismatch')} testId="trigger-mismatch-modal-btn">
-                    Simulate KEY CHANGED
+                    Preview mismatch dialog
                   </Button>
                 </div>
               </div>
@@ -3426,31 +3318,98 @@ export function App(): JSX.Element {
               />
               <Card>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                  <p>Drop files or folders to upload to /srv/app (resumable .part atomic rename)</p>
-                  <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                    <Button
-                      variant="primary"
-                      onClick={() =>
-                        setTransferStatus('Uploaded release.tar.zst (20/20 chunks · 256 KiB · SHA-256 verified)')
-                      }
-                    >
-                      <Icon name="upload" /> Simulate 256 KiB Upload
-                    </Button>
-                    <Button
-                      variant="default"
-                      onClick={() => setTransferStatus('Streaming /etc/app/config.zip via ZIP64 writer…')}
-                    >
-                      <Icon name="download" /> Download Folder ZIP
-                    </Button>
-                  </div>
+                  <p>Upload a file into {sftpCurrentPath}. Writes go through SFTP, never through the shell.</p>
+                  <label className="ui-button ui-button--primary" style={{ cursor: 'pointer' }}>
+                    <Icon name="upload" /> Upload file
+                    <input
+                      type="file"
+                      data-testid="sftp-upload-input"
+                      style={{ display: 'none' }}
+                      onChange={(e) => {
+                        const input = e.target as HTMLInputElement;
+                        const file = input.files?.[0];
+                        input.value = '';
+                        if (file) void uploadLocalFile(file);
+                      }}
+                    />
+                  </label>
+                </div>
+                <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <input
+                    className="ui-input"
+                    aria-label="New folder name"
+                    placeholder="New folder name"
+                    value={newFolderName}
+                    onInput={(e) => setNewFolderName((e.target as HTMLInputElement).value)}
+                  />
+                  <Button variant="default" onClick={() => void createFolder()} testId="sftp-create-folder">
+                    Create folder
+                  </Button>
                 </div>
                 <ul>
                   {sftpEntries.map((entry) => (
                     <li key={entry.path} data-testid={`sftp-row-${entry.name}`}>
-                      <strong>{entry.isDir ? `[DIR] ${entry.name}` : entry.name}</strong> — {entry.size} bytes ({entry.mode})
+                      <strong>{entry.isDir ? `[DIR] ${entry.name}` : entry.name}</strong> — {entry.size} bytes ({entry.mode}){' '}
+                      {entry.isDir ? null : (
+                        <Button variant="ghost" onClick={() => void downloadRemoteFile(entry.path)}>
+                          Download
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        onClick={() => setRenameTarget({ path: entry.path, name: entry.name })}
+                      >
+                        Rename
+                      </Button>
+                      <Button
+                        variant="danger"
+                        onClick={() => setDeleteTarget({ path: entry.path, name: entry.name })}
+                      >
+                        Delete
+                      </Button>
                     </li>
                   ))}
                 </ul>
+                {renameTarget ? (
+                  <div className="ws-mod-plan" role="group" aria-label="Rename entry">
+                    <strong>Rename {renameTarget.path}</strong>
+                    <input
+                      className="ui-input"
+                      aria-label="New name"
+                      value={renameTarget.name}
+                      onInput={(e) =>
+                        setRenameTarget((prev) =>
+                          prev ? { ...prev, name: (e.target as HTMLInputElement).value } : prev
+                        )
+                      }
+                    />
+                    <div className="ws-mod-actions">
+                      <Button variant="primary" onClick={() => void renameEntry()} testId="sftp-confirm-rename">
+                        Rename
+                      </Button>
+                      <Button variant="ghost" onClick={() => setRenameTarget(null)}>
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                {deleteTarget ? (
+                  <div className="ws-mod-plan" role="alertdialog" aria-label="Confirm delete">
+                    <strong>Delete {deleteTarget.path}?</strong>
+                    <p className="ws-mod-muted">
+                      This removes the entry from the server. Directories are deleted only when empty;
+                      nothing is sent to a trash.
+                    </p>
+                    <div className="ws-mod-actions">
+                      <Button variant="danger" onClick={() => void deleteEntry()} testId="sftp-confirm-delete">
+                        Confirm delete
+                      </Button>
+                      <Button variant="ghost" onClick={() => setDeleteTarget(null)}>
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
               </Card>
 
               <div className="webssh-grid">
@@ -3539,9 +3498,8 @@ export function App(): JSX.Element {
                             }
                           });
                       } else {
-                        setChmodTargetFile('/etc/nginx/nginx.conf');
                         setTransferStatus(
-                          `Applied chmod ${chmodFormatted.octal} (${chmodFormatted.symbolic}) to ${chmodTargetFile}`
+                          `chmod ${chmodFormatted.octal} not applied: the SSH session is disconnected.`
                         );
                       }
                     }}
@@ -3550,56 +3508,36 @@ export function App(): JSX.Element {
                   </Button>
                 </Card>
 
-                <Card testId="server-relay-card">
-                  <h2>Server-to-Server Direct SFTP Relay</h2>
-                  <p data-testid="relay-status-text">{relayStatus}</p>
-                  <Button
-                    variant="primary"
-                    testId="trigger-sftp-relay-btn"
-                    onClick={() =>
-                      setRelayStatus(
-                        'Transferred 5.0 MiB directly: prod-edge-01 → staging-web (SHA-256 verified, 0 local disk usage)'
-                      )
-                    }
-                  >
-                    Relay File Between Hosts
-                  </Button>
-                </Card>
               </div>
 
               <Card testId="live-log-tailer-card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                  <h2>Live Log Tailer (tail -f /var/log/nginx/error.log)</h2>
-                  <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                  <h2>Read a remote log file</h2>
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                    <input
+                      className="ui-input"
+                      aria-label="Remote log path"
+                      placeholder="/var/log/nginx/error.log"
+                      value={tailFilePath}
+                      onInput={(e) => setTailFilePath((e.target as HTMLInputElement).value)}
+                      data-testid="tail-path-input"
+                      style={{ minWidth: '220px' }}
+                    />
                     <input
                       type="search"
                       className="ui-input"
-                      placeholder="Filter log stream (e.g. error, warn)…"
+                      placeholder="Filter lines (e.g. error, warn)…"
                       aria-label="Filter log stream"
                       value={tailFilter}
                       onInput={(e) => setTailFilter((e.target as HTMLInputElement).value)}
                       data-testid="tail-filter-input"
                     />
                     <Button
-                      variant="default"
-                      testId="tail-pause-btn"
-                      onClick={() => setTailPaused((p) => !p)}
-                    >
-                      {tailPaused ? 'Resume Stream' : 'Pause Stream'}
-                    </Button>
-                    <Button
                       variant="primary"
-                      testId="tail-append-btn"
-                      onClick={() => {
-                        if (!tailPaused) {
-                          setTailLogLines((prev) => [
-                            ...prev,
-                            '2026-11-01T08:15:30Z [info] healthcheck 200 OK in 4ms'
-                          ]);
-                        }
-                      }}
+                      testId="tail-read-btn"
+                      onClick={() => void readRemoteLog()}
                     >
-                      Simulate Log Event
+                      Read last 200 lines
                     </Button>
                   </div>
                 </div>
@@ -3642,36 +3580,42 @@ export function App(): JSX.Element {
                   </Button>
                   <Button
                     variant="primary"
-                    onClick={() => {
-                      const activeClient = liveSessionRef.current;
-                      if (activeClient && activeClient.isConnected) {
-                        const encoded = bytesToBase64(new TextEncoder().encode(editorContent));
-                        void activeClient
-                          .sftpOp({
-                            op: 'write_file',
-                            path: editorFilePath,
-                            dataBase64: encoded
-                          })
-                          .then((res) => {
-                            if (res.ok) {
-                              setEditorOriginalContent(editorContent);
-                              setEditorSaved(true);
-                              setTransferStatus(`Saved ${editorFilePath} over SFTP`);
-                              void refreshSftpDirectory(sftpCurrentPath, activeClient);
-                            } else {
-                              setTransferStatus(`Save failed: ${res.error ?? 'Unknown error'}`);
-                            }
-                          });
-                      } else {
-                        setEditorSaved(true);
-                      }
-                    }}
+                    onClick={() => void saveEditorBuffer()}
                     testId="save-remote-file-btn"
                   >
                     Save to host {editorSaved ? '(Saved)' : '(Unsaved*)'}
                   </Button>
                 </div>
               </div>
+              {editorError ? (
+                <p className="ws-mod-error" role="alert" data-testid="editor-error">
+                  {editorError}
+                </p>
+              ) : null}
+              {editorConflict ? (
+                <Card testId="editor-conflict-card">
+                  <p className="ws-mod-warnings">{editorConflict}</p>
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                    <Button
+                      variant="danger"
+                      onClick={() => void saveEditorBuffer(true)}
+                      testId="editor-overwrite-remote"
+                    >
+                      Overwrite with my version
+                    </Button>
+                    <Button
+                      variant="default"
+                      onClick={() => {
+                        setEditorConflict(null);
+                        void loadRemoteFileIntoEditor(editorFilePath);
+                      }}
+                      testId="editor-reload-remote"
+                    >
+                      Discard mine and reload
+                    </Button>
+                  </div>
+                </Card>
+              ) : null}
               <textarea
                 className="ui-input"
                 rows={10}
@@ -3798,13 +3742,13 @@ export function App(): JSX.Element {
                 <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
                   <Button
                     variant={layoutPreset === 'sidebar-left' ? 'primary' : 'default'}
-                    onClick={() => setLayoutPreset('sidebar-left')}
+                    onClick={() => { setLayoutPreset('sidebar-left'); prefsStore.update({ layoutPreset: 'sidebar-left' }); }}
                   >
                     Sidebar Left
                   </Button>
                   <Button
                     variant={layoutPreset === 'sidebar-right' ? 'primary' : 'default'}
-                    onClick={() => setLayoutPreset('sidebar-right')}
+                    onClick={() => { setLayoutPreset('sidebar-right'); prefsStore.update({ layoutPreset: 'sidebar-right' }); }}
                   >
                     Sidebar Right
                   </Button>
@@ -3837,31 +3781,6 @@ export function App(): JSX.Element {
                     </li>
                   ))}
                 </ul>
-              </Card>
-              <Card>
-                <h2>Simulate Reconnect / Resilience States</h2>
-                <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                  <Button
-                    variant="default"
-                    testId="sim-reconnecting-btn"
-                    onClick={() => {
-                      setConnectionState('reconnecting');
-                      setPendingInputBytes(128);
-                    }}
-                  >
-                    Simulate Reconnecting
-                  </Button>
-                  <Button
-                    variant="default"
-                    testId="sim-resumed-btn"
-                    onClick={() => {
-                      setConnectionState('resumed');
-                      setPendingInputBytes(0);
-                    }}
-                  >
-                    Simulate Resumed
-                  </Button>
-                </div>
               </Card>
               <Card testId="settings-asset-cache-card">
                 <h2>Application Asset Cache Recovery</h2>
@@ -4216,7 +4135,7 @@ export function App(): JSX.Element {
         <p>
           SHA-256 Fingerprint:{' '}
           <code data-testid="hostkey-modal-fingerprint">
-            {pendingHostKeyPrompt?.fingerprint || generatedFp}
+            {pendingHostKeyPrompt?.fingerprint || 'not available'}
           </code>
         </p>
         {hostKeyModal === 'mismatch' ? (

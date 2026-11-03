@@ -5,6 +5,13 @@ import {
   p1363ToSshMpint
 } from '../vault/ssh-wire.js';
 import type { ConnectedSessionMetadata, LiveConnectParams } from './transport.js';
+import {
+  SftpClient,
+  SftpError,
+  SftpStatus,
+  type SftpUploadSession
+} from './sftp-client.js';
+
 
 const SSH_MSG_DISCONNECT = 1;
 const SSH_MSG_IGNORE = 2;
@@ -288,13 +295,27 @@ async function parsePemPrivateKeyForSshAuth(pemText: string): Promise<{
 interface RemoteChannelState {
   localId: number;
   remoteId: number;
-  kind: 'pty' | 'exec' | 'direct-tcpip';
+  kind: 'pty' | 'exec' | 'direct-tcpip' | 'sftp';
   stdoutChunks: string[];
   stderrChunks: string[];
   exitCode: number | null;
   startedAt: number;
+  /** Bytes the server has not yet consumed and will accept from us. */
+  remoteWindow: number;
+  /** Outstanding CHANNEL_REQUEST acknowledgements, in send order. */
+  pendingRequests: Array<{
+    type: string;
+    resolve: () => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>;
+  /** Waiters blocked on the remote window opening up. */
+  windowWaiters: Array<() => void>;
   onExecComplete?: (res: Extract<ControlMessage, { type: 'exec_result' }>) => void;
   onDirectTcpComplete?: (rawResponse: string) => void;
+  onData?: (data: Uint8Array) => void;
+  onStderr?: (data: Uint8Array) => void;
+  sftp?: SftpClient;
 }
 
 export interface RelaySessionLoginResult {
@@ -396,15 +417,20 @@ export class BrowserSshRelaySessionClient {
   private channels = new Map<number, RemoteChannelState>();
   private pendingChannelOpen = new Map<
     number,
-    { resolve: (remoteId: number) => void; reject: (err: Error) => void }
+    {
+      resolve: (info: {
+        remoteId: number;
+        remoteWindow: number;
+        remoteMaxPacket: number;
+      }) => void;
+      reject: (err: Error) => void;
+    }
   >();
-  private pendingChannelRequests = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
   private opCounter = 0;
 
   private ptySeq = 0;
   private ringBuffer: Array<{ seq: number; channel: number; data: Uint8Array }> = [];
   private ringBufferBytes = 0;
-  private uploadBuffers = new Map<string, Uint8Array>();
   private activeTunnels = new Map<
     string,
     { remoteHost: string; remotePort: number; localPort: number }
@@ -1024,10 +1050,12 @@ export class BrowserSshRelaySessionClient {
       case SSH_MSG_CHANNEL_OPEN_CONFIRMATION: {
         const localId = reader.readUint32();
         const remoteId = reader.readUint32();
+        const remoteWindow = reader.readUint32();
+        const remoteMaxPacket = reader.readUint32();
         const waiter = this.pendingChannelOpen.get(localId);
         if (waiter) {
           this.pendingChannelOpen.delete(localId);
-          waiter.resolve(remoteId);
+          waiter.resolve({ remoteId, remoteWindow, remoteMaxPacket });
         }
         return;
       }
@@ -1044,22 +1072,45 @@ export class BrowserSshRelaySessionClient {
         return;
       }
 
+      case SSH_MSG_CHANNEL_WINDOW_ADJUST: {
+        const localId = reader.readUint32();
+        const bytesToAdd = reader.readUint32();
+        const ch = this.channels.get(localId);
+        if (!ch) return;
+        ch.remoteWindow += bytesToAdd;
+        const waiters = ch.windowWaiters;
+        ch.windowWaiters = [];
+        for (const wake of waiters) wake();
+        return;
+      }
+
       case SSH_MSG_CHANNEL_SUCCESS:
       case SSH_MSG_CHANNEL_FAILURE: {
         const localId = reader.readUint32();
-        const request = this.pendingChannelRequests.get(localId);
-        if (request) {
-          this.pendingChannelRequests.delete(localId);
-          if (msgType === SSH_MSG_CHANNEL_SUCCESS) request.resolve();
-          else request.reject(new Error('SSH server rejected the terminal channel request'));
+        const ch = this.channels.get(localId);
+        if (!ch) return;
+        const pending = ch.pendingRequests.shift();
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        if (msgType === SSH_MSG_CHANNEL_SUCCESS) {
+          pending.resolve();
+        } else {
+          pending.reject(
+            new Error(`SSH_REQUEST_FAILED: server rejected channel request "${pending.type}"`)
+          );
         }
         return;
       }
 
-      case SSH_MSG_CHANNEL_WINDOW_ADJUST:
-      case SSH_MSG_CHANNEL_EOF:
+      case SSH_MSG_CHANNEL_EOF: {
+        // EOF means the peer will send no more data; the channel is closed
+        // afterwards with CHANNEL_CLOSE, which is where we finalize results.
+        return;
+      }
+
       case SSH_MSG_UNIMPLEMENTED:
         return;
+
 
       case SSH_MSG_CHANNEL_DATA: {
         const localId = reader.readUint32();
@@ -1077,7 +1128,10 @@ export class BrowserSshRelaySessionClient {
         if (ch.kind === 'pty') {
           this.appendToRingBuffer(localId, data);
           this.params.onPtyData(localId, data);
+        } else if (ch.kind === 'sftp') {
+          ch.sftp?.handleData(data);
         } else {
+          if (ch.onData) ch.onData(data);
           ch.stdoutChunks.push(new TextDecoder().decode(data));
         }
         return;
@@ -1093,6 +1147,7 @@ export class BrowserSshRelaySessionClient {
           this.appendToRingBuffer(localId, data);
           this.params.onPtyData(localId, data);
         } else {
+          ch.onStderr?.(data);
           ch.stderrChunks.push(new TextDecoder().decode(data));
         }
         return;
@@ -1101,11 +1156,24 @@ export class BrowserSshRelaySessionClient {
       case SSH_MSG_CHANNEL_REQUEST: {
         const localId = reader.readUint32();
         const reqType = reader.readString();
-        const wantReply = reader.readBoolean();
+        // RFC 4254 §6.10/§6.11: exit-status and exit-signal carry no
+        // want_reply byte. Reading one there desynchronizes the whole packet
+        // and silently corrupts the exit code.
         const ch = this.channels.get(localId);
-        if (reqType === 'exit-status' && ch) {
-          ch.exitCode = reader.readUint32();
+        if (reqType === 'exit-status') {
+          const code = reader.readUint32();
+          if (ch) ch.exitCode = code;
+          return;
         }
+        if (reqType === 'exit-signal') {
+          reader.readString(); // signal name
+          reader.readBoolean(); // core dumped
+          reader.readString(); // error message
+          reader.readString(); // language tag
+          if (ch) ch.exitCode = 128;
+          return;
+        }
+        const wantReply = reader.readBoolean();
         if (wantReply && ch) {
           await this.sendPacket(
             concatBytes(new Uint8Array([SSH_MSG_CHANNEL_SUCCESS]), writeUint32BE(ch.remoteId))
@@ -1119,6 +1187,14 @@ export class BrowserSshRelaySessionClient {
         const ch = this.channels.get(localId);
         if (!ch) return;
         this.channels.delete(localId);
+        for (const pending of ch.pendingRequests) {
+          clearTimeout(pending.timer);
+          pending.reject(
+            new Error(`SSH_CHANNEL_CLOSED: channel closed before "${pending.type}" completed`)
+          );
+        }
+        ch.pendingRequests = [];
+        ch.sftp?.close();
         await this.sendPacket(
           concatBytes(new Uint8Array([SSH_MSG_CHANNEL_CLOSE]), writeUint32BE(ch.remoteId))
         );
@@ -1126,7 +1202,7 @@ export class BrowserSshRelaySessionClient {
           ch.onExecComplete({
             type: 'exec_result',
             opId: `exec_${localId}`,
-            ok: true,
+            ok: (ch.exitCode ?? 0) === 0,
             stdout: ch.stdoutChunks.join(''),
             stderr: ch.stderrChunks.join(''),
             exitCode: ch.exitCode ?? 0,
@@ -1134,7 +1210,7 @@ export class BrowserSshRelaySessionClient {
           });
         } else if (ch.kind === 'direct-tcpip' && ch.onDirectTcpComplete) {
           ch.onDirectTcpComplete(ch.stdoutChunks.join(''));
-        } else {
+        } else if (ch.kind === 'pty') {
           this.params.onChannelClosed?.(localId, ch.exitCode ?? 0);
         }
         return;
@@ -1225,9 +1301,15 @@ export class BrowserSshRelaySessionClient {
     await this.sendPacket(pkt);
   }
 
-  private async openRawSessionChannel(kind: 'pty' | 'exec'): Promise<RemoteChannelState> {
+  private async openRawSessionChannel(
+    kind: 'pty' | 'exec' | 'sftp'
+  ): Promise<RemoteChannelState> {
     const localId = this.nextLocalChannel++;
-    const remoteIdPromise = new Promise<number>((resolve, reject) => {
+    const remoteIdPromise = new Promise<{
+      remoteId: number;
+      remoteWindow: number;
+      remoteMaxPacket: number;
+    }>((resolve, reject) => {
       this.pendingChannelOpen.set(localId, { resolve, reject });
     });
     await this.sendPacket(
@@ -1239,46 +1321,97 @@ export class BrowserSshRelaySessionClient {
         writeUint32BE(32768)
       )
     );
-    const remoteId = await remoteIdPromise;
+    const info = await remoteIdPromise;
     const chState: RemoteChannelState = {
       localId,
-      remoteId,
+      remoteId: info.remoteId,
       kind,
       stdoutChunks: [],
       stderrChunks: [],
       exitCode: null,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      remoteWindow: Math.max(0, info.remoteWindow),
+      pendingRequests: [],
+      windowWaiters: []
     };
     this.channels.set(localId, chState);
     return chState;
   }
 
-  private requestChannelAcknowledgement(localId: number, packet: Uint8Array): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingChannelRequests.delete(localId);
-        reject(new Error('SSH terminal channel request timed out'));
-      }, 10000);
-      this.pendingChannelRequests.set(localId, {
-        resolve: () => { clearTimeout(timer); resolve(); },
-        reject: (error) => { clearTimeout(timer); reject(error); }
-      });
-      void this.sendPacket(packet).catch((error: Error) => {
-        this.pendingChannelRequests.get(localId)?.reject(error);
-        this.pendingChannelRequests.delete(localId);
-      });
-    });
+  /**
+   * Send a channel request and wait for the server's CHANNEL_SUCCESS /
+   * CHANNEL_FAILURE. Terminal readiness must never be reported before this
+   * resolves — that was the root cause of "connected" terminals that never
+   * received a shell prompt.
+   */
+  private sendChannelRequest(
+    ch: RemoteChannelState,
+    reqType: string,
+    payload: Uint8Array,
+    wantReply = true,
+    timeoutMs = 15_000
+  ): Promise<void> {
+    const ack = wantReply
+      ? new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            const idx = ch.pendingRequests.findIndex((p) => p.timer === timer);
+            if (idx !== -1) ch.pendingRequests.splice(idx, 1);
+            reject(
+              new Error(
+                `SSH_REQUEST_TIMEOUT: server did not acknowledge "${reqType}" within ${timeoutMs}ms`
+              )
+            );
+          }, timeoutMs);
+          ch.pendingRequests.push({ type: reqType, resolve, reject, timer });
+        })
+      : Promise.resolve();
+
+    void this.sendPacket(
+      concatBytes(
+        new Uint8Array([SSH_MSG_CHANNEL_REQUEST]),
+        writeUint32BE(ch.remoteId),
+        sshString(reqType),
+        new Uint8Array([wantReply ? 1 : 0]),
+        payload
+      )
+    );
+    return ack;
+  }
+
+  /** Wait until the peer's flow-control window admits `size` bytes. */
+  private async waitForWindow(ch: RemoteChannelState, size: number): Promise<void> {
+    while (ch.remoteWindow < size) {
+      if (!this.channels.has(ch.localId)) {
+        throw new Error('SSH_CHANNEL_CLOSED: channel closed while writing');
+      }
+      await new Promise<void>((resolve) => ch.windowWaiters.push(resolve));
+    }
+    ch.remoteWindow -= size;
+  }
+
+  private async sendChannelData(ch: RemoteChannelState, data: Uint8Array): Promise<void> {
+    const maxPacket = 32 * 1024;
+    let offset = 0;
+    while (offset < data.byteLength) {
+      const size = Math.min(maxPacket, data.byteLength - offset);
+      await this.waitForWindow(ch, size);
+      await this.sendPacket(
+        concatBytes(
+          new Uint8Array([SSH_MSG_CHANNEL_DATA]),
+          writeUint32BE(ch.remoteId),
+          sshString(data.subarray(offset, offset + size))
+        )
+      );
+      offset += size;
+    }
   }
 
   private async openInteractivePtyChannel(cols: number, rows: number): Promise<number> {
     const ch = await this.openRawSessionChannel('pty');
-    // Request PTY
-    await this.requestChannelAcknowledgement(ch.localId,
+    await this.sendChannelRequest(
+      ch,
+      'pty-req',
       concatBytes(
-        new Uint8Array([SSH_MSG_CHANNEL_REQUEST]),
-        writeUint32BE(ch.remoteId),
-        sshString('pty-req'),
-        new Uint8Array([1]),
         sshString('xterm-256color'),
         writeUint32BE(cols),
         writeUint32BE(rows),
@@ -1287,16 +1420,53 @@ export class BrowserSshRelaySessionClient {
         sshString(new Uint8Array([0]))
       )
     );
-    // Start shell
-    await this.requestChannelAcknowledgement(ch.localId,
-      concatBytes(
-        new Uint8Array([SSH_MSG_CHANNEL_REQUEST]),
-        writeUint32BE(ch.remoteId),
-        sshString('shell'),
-        new Uint8Array([1])
-      )
-    );
+    await this.sendChannelRequest(ch, 'shell', new Uint8Array(0));
     return ch.localId;
+  }
+
+  /**
+   * Open the `sftp` subsystem and speak real SFTP v3 over it. Returns a
+   * cached client per channel; a session may open several.
+   */
+  private async openSftpChannel(): Promise<SftpClient> {
+    const ch = await this.openRawSessionChannel('sftp');
+    const sftp = new SftpClient({
+      send: (bytes) => {
+        void this.sendChannelData(ch, bytes).catch((err) => {
+          ch.sftp?.failAll(err instanceof Error ? err : new Error(String(err)));
+        });
+      }
+    });
+    ch.sftp = sftp;
+    ch.onData = (data) => sftp.handleData(data);
+    try {
+      await this.sendChannelRequest(ch, 'subsystem', sshString('sftp'), true, 20_000);
+      await sftp.init();
+      return sftp;
+    } catch (err) {
+      this.channels.delete(ch.localId);
+      void this.sendPacket(
+        concatBytes(new Uint8Array([SSH_MSG_CHANNEL_CLOSE]), writeUint32BE(ch.remoteId))
+      );
+      throw new Error(
+        `SFTP_UNAVAILABLE: server did not accept the SFTP subsystem (${
+          err instanceof Error ? err.message : String(err)
+        }). Enable the sftp subsystem in sshd_config.`
+      );
+    }
+  }
+
+  private sftpPromise: Promise<SftpClient> | null = null;
+
+  /** Lazily opened, shared SFTP client for this session. */
+  getSftpClient(): Promise<SftpClient> {
+    if (!this.sftpPromise) {
+      this.sftpPromise = this.openSftpChannel().catch((err) => {
+        this.sftpPromise = null;
+        throw err;
+      });
+    }
+    return this.sftpPromise;
   }
 
   sendPtyText(channel: number, text: string): boolean {
@@ -1304,29 +1474,31 @@ export class BrowserSshRelaySessionClient {
   }
 
   sendPtyBytes(channel: number, bytes: Uint8Array): boolean {
-    const ch = this.channels.get(channel) ?? this.channels.get(1);
-    if (!ch || !this.isConnected) return false;
-    void this.sendPacket(
-      concatBytes(new Uint8Array([SSH_MSG_CHANNEL_DATA]), writeUint32BE(ch.remoteId), sshString(bytes))
-    );
+    const ch = this.channels.get(channel);
+    if (!ch || ch.kind !== 'pty' || !this.isConnected) return false;
+    void this.sendChannelData(ch, bytes).catch((err) => {
+      this.params.onFatalError?.(
+        'SSH_WRITE_FAILED',
+        err instanceof Error ? err.message : String(err)
+      );
+    });
     return true;
   }
 
   resizeChannel(channel: number, cols: number, rows: number): void {
-    const ch = this.channels.get(channel) ?? this.channels.get(1);
+    const ch = this.channels.get(channel);
     if (!ch || !this.isConnected) return;
-    void this.sendPacket(
+    void this.sendChannelRequest(
+      ch,
+      'window-change',
       concatBytes(
-        new Uint8Array([SSH_MSG_CHANNEL_REQUEST]),
-        writeUint32BE(ch.remoteId),
-        sshString('window-change'),
-        new Uint8Array([0]),
         writeUint32BE(cols),
         writeUint32BE(rows),
         writeUint32BE(0),
         writeUint32BE(0)
-      )
-    );
+      ),
+      false
+    ).catch(() => undefined);
   }
 
   async openChannel(
@@ -1346,29 +1518,111 @@ export class BrowserSshRelaySessionClient {
     const ch = this.channels.get(channel);
     if (!ch) return;
     this.channels.delete(channel);
+    ch.sftp?.close();
+    for (const pending of ch.pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('SSH_CHANNEL_CLOSED: channel closed by client'));
+    }
+    ch.pendingRequests = [];
     void this.sendPacket(
       concatBytes(new Uint8Array([SSH_MSG_CHANNEL_CLOSE]), writeUint32BE(ch.remoteId))
     );
   }
 
   async execCommand(
-    command: string
+    command: string,
+    timeoutMs = 120_000
   ): Promise<Extract<ControlMessage, { type: 'exec_result' }>> {
     const ch = await this.openRawSessionChannel('exec');
-    return new Promise<Extract<ControlMessage, { type: 'exec_result' }>>((resolve) => {
-      ch.onExecComplete = resolve;
-      void this.sendPacket(
-        concatBytes(
-          new Uint8Array([SSH_MSG_CHANNEL_REQUEST]),
-          writeUint32BE(ch.remoteId),
-          sshString('exec'),
-          new Uint8Array([1]),
-          sshString(command)
-        )
-      );
-    });
+    const result = new Promise<Extract<ControlMessage, { type: 'exec_result' }>>(
+      (resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.channels.delete(ch.localId);
+          reject(
+            new Error(
+              `SSH_EXEC_TIMEOUT: remote command exceeded ${Math.round(timeoutMs / 1000)}s`
+            )
+          );
+        }, timeoutMs);
+        ch.onExecComplete = (res) => {
+          clearTimeout(timer);
+          resolve(res);
+        };
+      }
+    );
+    try {
+      // wantReply=true: the command is not "running" until the server accepts it.
+      await this.sendChannelRequest(ch, 'exec', sshString(command));
+    } catch (err) {
+      this.channels.delete(ch.localId);
+      throw err;
+    }
+    return result;
   }
 
+  /**
+   * Execute a command and stream stdout/stderr as it arrives. Used by
+   * discovery, installation jobs and build logs so the UI shows real
+   * progress instead of waiting for a buffered blob.
+   */
+  async execStream(
+    command: string,
+    options: {
+      onStdout?: (chunk: string) => void;
+      onStderr?: (chunk: string) => void;
+      timeoutMs?: number;
+      /** Stop callback: return true to abort the remote command. */
+      signal?: AbortSignal;
+    } = {}
+  ): Promise<Extract<ControlMessage, { type: 'exec_result' }>> {
+    const ch = await this.openRawSessionChannel('exec');
+    const decoder = new TextDecoder();
+    const errDecoder = new TextDecoder();
+    let combinedStdout = '';
+    let combinedStderr = '';
+    const maxCapture = 4 * 1024 * 1024;
+    ch.onData = (data) => {
+      const text = decoder.decode(data, { stream: true });
+      if (combinedStdout.length < maxCapture) combinedStdout += text;
+      options.onStdout?.(text);
+    };
+    ch.onStderr = (data) => {
+      const text = errDecoder.decode(data, { stream: true });
+      if (combinedStderr.length < maxCapture) combinedStderr += text;
+      options.onStderr?.(text);
+    };
+    const timeoutMs = options.timeoutMs ?? 30 * 60_000;
+    const result = new Promise<Extract<ControlMessage, { type: 'exec_result' }>>(
+      (resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.closeChannel(ch.localId);
+          reject(
+            new Error(`SSH_EXEC_TIMEOUT: command exceeded ${Math.round(timeoutMs / 1000)}s`)
+          );
+        }, timeoutMs);
+        options.signal?.addEventListener('abort', () => {
+          this.closeChannel(ch.localId);
+          clearTimeout(timer);
+          reject(new Error('SSH_EXEC_ABORTED: cancelled by user'));
+        });
+        ch.onExecComplete = (res) => {
+          clearTimeout(timer);
+          resolve({
+            ...res,
+            stdout: combinedStdout,
+            stderr: combinedStderr
+          });
+        };
+      }
+    );
+    try {
+      await this.sendChannelRequest(ch, 'exec', sshString(command));
+    } catch (err) {
+      this.closeChannel(ch.localId);
+      throw err;
+    }
+    return result;
+  }
   private appendToRingBuffer(channel: number, data: Uint8Array): void {
     const copy = new Uint8Array(data);
     const seq = ++this.ptySeq;
@@ -1391,12 +1645,20 @@ export class BrowserSshRelaySessionClient {
     this.seqOut = 0;
     this.encryptedIn = false;
     this.encryptedOut = false;
+    for (const ch of this.channels.values()) {
+      for (const request of ch.pendingRequests) {
+        clearTimeout(request.timer);
+        request.reject(new Error('SSH session reconnecting'));
+      }
+      ch.pendingRequests = [];
+    }
     this.channels.clear();
     this.pendingChannelOpen.clear();
-    for (const request of this.pendingChannelRequests.values()) {
-      request.reject(new Error('SSH session closed'));
+    this.sftpPromise = null;
+    for (const session of this.uploadSessions.values()) {
+      void session.abort().catch(() => undefined);
     }
-    this.pendingChannelRequests.clear();
+    this.uploadSessions.clear();
     const meta = await this.connect();
     for (const frame of this.getReplayFramesAfter(lastSeq)) {
       this.params.onPtyData(frame.channel, frame.data);
@@ -1411,7 +1673,11 @@ export class BrowserSshRelaySessionClient {
     originPort = 0
   ): Promise<RemoteChannelState> {
     const localId = this.nextLocalChannel++;
-    const remoteIdPromise = new Promise<number>((resolve, reject) => {
+    const remoteIdPromise = new Promise<{
+      remoteId: number;
+      remoteWindow: number;
+      remoteMaxPacket: number;
+    }>((resolve, reject) => {
       this.pendingChannelOpen.set(localId, { resolve, reject });
     });
     await this.sendPacket(
@@ -1427,19 +1693,106 @@ export class BrowserSshRelaySessionClient {
         writeUint32BE(originPort)
       )
     );
-    const remoteId = await remoteIdPromise;
+    const info = await remoteIdPromise;
     const chState: RemoteChannelState = {
       localId,
-      remoteId,
+      remoteId: info.remoteId,
       kind: 'direct-tcpip',
       stdoutChunks: [],
       stderrChunks: [],
       exitCode: null,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      remoteWindow: Math.max(0, info.remoteWindow),
+      pendingRequests: [],
+      windowWaiters: []
     };
     this.channels.set(localId, chState);
     return chState;
   }
+
+  /**
+   * Send an HTTP/1.1 request through a real `direct-tcpip` channel and read the
+   * response until the server closes. This is genuine remote-port reachability
+   * — it does not bind a local socket, because a browser page cannot listen on
+   * a localhost port.
+   */
+  private async httpRequestOverTunnel(
+    remoteHost: string,
+    remotePort: number,
+    httpPath: string,
+    timeoutMs = 15_000
+  ): Promise<{ statusCode: number; statusText: string; body: string; bytes: number }> {
+    const ch = await this.openDirectTcpipChannel(remoteHost, remotePort);
+    try {
+      const crlf = String.fromCharCode(13, 10);
+      const request =
+        `GET ${httpPath.startsWith('/') ? httpPath : `/${httpPath}`} HTTP/1.1${crlf}` +
+        `Host: ${remoteHost}:${remotePort}${crlf}` +
+        `User-Agent: WebSSH-Studio/1.0${crlf}` +
+        `Accept: */*${crlf}` +
+        `Connection: close${crlf}${crlf}`;
+      const collected: Uint8Array[] = [];
+      const responsePromise = new Promise<Uint8Array>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(
+            new Error(
+              `ERR_TUNNEL_TIMEOUT: no HTTP response from ${remoteHost}:${remotePort} within ${timeoutMs}ms`
+            )
+          );
+        }, timeoutMs);
+        ch.onData = (data) => collected.push(data);
+        ch.onDirectTcpComplete = () => {
+          clearTimeout(timer);
+          resolve(concatBytes(...collected));
+        };
+      });
+      await this.sendChannelData(ch, new TextEncoder().encode(request));
+      const raw = await responsePromise;
+      const text = new TextDecoder().decode(raw);
+      const firstLine = text.split(String.fromCharCode(10))[0] ?? '';
+      const tokens = firstLine.trim().split(/\s+/);
+      const statusCode = Number.parseInt(tokens[1] ?? '', 10);
+      if (!Number.isFinite(statusCode)) {
+        throw new Error(
+          `ERR_TUNNEL_BAD_RESPONSE: ${remoteHost}:${remotePort} did not return an HTTP response`
+        );
+      }
+      const separator = `${crlf}${crlf}`;
+      const headerEnd = text.indexOf(separator);
+      const body = headerEnd === -1 ? '' : text.slice(headerEnd + separator.length);
+      return {
+        statusCode,
+        statusText: tokens.slice(2).join(' '),
+        body,
+        bytes: raw.byteLength
+      };
+    } finally {
+      this.closeChannel(ch.localId);
+    }
+  }
+
+  /** Reject-and-report helper: never return a fabricated success. */
+  private sftpFailure(
+    opId: string,
+    err: unknown
+  ): Extract<ControlMessage, { type: 'sftp_result' }> {
+    if (err instanceof SftpError) {
+      return {
+        type: 'sftp_result',
+        opId,
+        ok: false,
+        error: `SFTP_${SftpStatus[err.code] ?? err.code}: ${err.message}`
+      };
+    }
+    return {
+      type: 'sftp_result',
+      opId,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+
+  private uploadSessions = new Map<string, SftpUploadSession>();
 
   async sftpOp(
     req: Omit<Extract<ControlMessage, { type: 'sftp_op' }>, 'type' | 'opId'>
@@ -1448,53 +1801,40 @@ export class BrowserSshRelaySessionClient {
     const targetPath = (req.path ?? '~').trim() || '~';
 
     try {
+      const sftp = await this.getSftpClient();
       switch (req.op) {
         case 'list': {
-          const res = await this.execCommand(`ls -la ${targetPath}`);
-          if (res.exitCode !== 0 && !res.stdout) {
-            return { type: 'sftp_result', opId, ok: false, error: res.stderr || 'SFTP list failed' };
-          }
-          const lines = res.stdout
-            .split(String.fromCharCode(10))
-            .map((l) => l.trim())
-            .filter((l) => l.length > 0 && !l.startsWith('total '));
-          const entries = lines
-            .map((line) => {
-              const parts = line.split(' ').filter(Boolean);
-              if (parts.length >= 9) {
-                const mode = parts[0]!;
-                const size = Number.parseInt(parts[4]!, 10) || 0;
-                const name = parts.slice(8).join(' ');
-                if (name === '.' || name === '..') return null;
-                return {
-                  name,
-                  path: targetPath === '~' || targetPath === '.' ? name : `${targetPath}/${name}`,
-                  isDir: mode.startsWith('d'),
-                  size,
-                  mode: mode.startsWith('d') ? '0755' : '0644',
-                  modTime: Math.floor(Date.now() / 1000)
-                };
-              }
-              return {
-                name: line,
-                path: targetPath === '~' || targetPath === '.' ? line : `${targetPath}/${line}`,
-                isDir: line.endsWith('/'),
-                size: 128,
-                mode: '0644',
-                modTime: Math.floor(Date.now() / 1000)
-              };
-            })
-            .filter((e): e is NonNullable<typeof e> => e !== null);
-          return { type: 'sftp_result', opId, ok: true, entries };
+          const entries = await sftp.list(targetPath);
+          return {
+            type: 'sftp_result',
+            opId,
+            ok: true,
+            entries: entries.map((entry) => ({
+              name: entry.name,
+              path: entry.path,
+              isDir: entry.isDir,
+              size: entry.size,
+              mode: entry.mode,
+              modTime: entry.modTime
+            }))
+          };
+        }
+
+        case 'stat': {
+          const attrs = await sftp.stat(targetPath);
+          const mode = attrs.permissions ?? 0;
+          return {
+            type: 'sftp_result',
+            opId,
+            ok: true,
+            size: attrs.size ?? 0,
+            mode: mode ? (mode & 0o7777).toString(8).padStart(4, '0') : '0644'
+          };
         }
 
         case 'read_file':
         case 'download_read': {
-          const res = await this.execCommand(`cat ${targetPath}`);
-          if (res.exitCode !== 0) {
-            return { type: 'sftp_result', opId, ok: false, error: res.stderr || 'Read failed' };
-          }
-          const bytes = new TextEncoder().encode(res.stdout);
+          const bytes = await sftp.readFile(targetPath);
           return {
             type: 'sftp_result',
             opId,
@@ -1505,86 +1845,94 @@ export class BrowserSshRelaySessionClient {
         }
 
         case 'write_file': {
-          const contentB64 = req.dataBase64 ?? '';
-          const res = await this.execCommand(`write-file ${targetPath} ${contentB64}`);
-          if (res.exitCode !== 0) {
-            return { type: 'sftp_result', opId, ok: false, error: res.stderr || 'Write failed' };
-          }
-          const size = base64ToBytes(contentB64).byteLength;
+          const bytes = req.dataBase64 ? base64ToBytes(req.dataBase64) : new Uint8Array(0);
+          const size = await sftp.writeFile(targetPath, bytes, { atomic: true });
           return { type: 'sftp_result', opId, ok: true, size };
         }
 
         case 'chmod': {
-          const modeVal = req.mode ?? '0644';
-          const res = await this.execCommand(`chmod ${modeVal} ${targetPath}`);
-          if (res.exitCode !== 0) {
-            return { type: 'sftp_result', opId, ok: false, error: res.stderr || 'chmod failed' };
+          const mode = Number.parseInt((req.mode ?? '0644'), 8);
+          if (!Number.isFinite(mode) || mode < 0 || mode > 0o7777) {
+            return { type: 'sftp_result', opId, ok: false, error: `Invalid file mode "${req.mode}"` };
           }
-          return { type: 'sftp_result', opId, ok: true, mode: modeVal };
+          await sftp.chmod(targetPath, mode);
+          return {
+            type: 'sftp_result',
+            opId,
+            ok: true,
+            mode: mode.toString(8).padStart(4, '0')
+          };
         }
 
         case 'mkdir': {
-          const res = await this.execCommand(`mkdir -p ${targetPath}`);
-          return { type: 'sftp_result', opId, ok: res.exitCode === 0, error: res.stderr || undefined };
+          await sftp.mkdir(targetPath);
+          return { type: 'sftp_result', opId, ok: true };
         }
 
         case 'remove': {
-          const res = await this.execCommand(`rm -rf ${targetPath}`);
-          return { type: 'sftp_result', opId, ok: res.exitCode === 0, error: res.stderr || undefined };
+          await sftp.removeRecursive(targetPath);
+          return { type: 'sftp_result', opId, ok: true };
         }
 
         case 'rename': {
-          const res = await this.execCommand(`mv ${targetPath} ${req.targetPath ?? targetPath}`);
-          return { type: 'sftp_result', opId, ok: res.exitCode === 0, error: res.stderr || undefined };
+          if (!req.targetPath) {
+            return { type: 'sftp_result', opId, ok: false, error: 'rename requires targetPath' };
+          }
+          await sftp.rename(targetPath, req.targetPath);
+          return { type: 'sftp_result', opId, ok: true };
         }
 
         case 'upload_init': {
-          const existing = this.uploadBuffers.get(targetPath);
-          return {
-            type: 'sftp_result',
-            opId,
-            ok: true,
-            offset: existing ? existing.byteLength : 0
-          };
+          const existing = this.uploadSessions.get(targetPath);
+          if (existing) {
+            await existing.abort().catch(() => undefined);
+            this.uploadSessions.delete(targetPath);
+          }
+          const session = await sftp.startUpload(targetPath);
+          this.uploadSessions.set(targetPath, session);
+          return { type: 'sftp_result', opId, ok: true, offset: session.offset };
         }
 
         case 'upload_chunk': {
+          const session = this.uploadSessions.get(targetPath);
+          if (!session) {
+            return {
+              type: 'sftp_result',
+              opId,
+              ok: false,
+              error: 'upload_chunk without a started upload (call upload_init first)'
+            };
+          }
           const chunk = req.dataBase64 ? base64ToBytes(req.dataBase64) : new Uint8Array(0);
-          const prev = this.uploadBuffers.get(targetPath) ?? new Uint8Array(0);
-          const next = concatBytes(prev, chunk);
-          this.uploadBuffers.set(targetPath, next);
-          return {
-            type: 'sftp_result',
-            opId,
-            ok: true,
-            offset: next.byteLength
-          };
+          const offset = await session.write(chunk);
+          return { type: 'sftp_result', opId, ok: true, offset };
         }
 
         case 'upload_commit': {
-          const full = this.uploadBuffers.get(targetPath) ?? new Uint8Array(0);
-          this.uploadBuffers.delete(targetPath);
-          const b64 = bytesToBase64(full);
-          const res = await this.execCommand(`write-file ${targetPath} ${b64}`);
-          return {
-            type: 'sftp_result',
-            opId,
-            ok: res.exitCode === 0,
-            size: full.byteLength,
-            error: res.stderr || undefined
-          };
+          const session = this.uploadSessions.get(targetPath);
+          if (!session) {
+            return {
+              type: 'sftp_result',
+              opId,
+              ok: false,
+              error: 'upload_commit without a started upload (call upload_init first)'
+            };
+          }
+          this.uploadSessions.delete(targetPath);
+          const size = await session.commit();
+          return { type: 'sftp_result', opId, ok: true, size };
         }
 
         default:
-          return { type: 'sftp_result', opId, ok: true };
+          return {
+            type: 'sftp_result',
+            opId,
+            ok: false,
+            error: `Unsupported SFTP operation "${req.op}"`
+          };
       }
     } catch (err) {
-      return {
-        type: 'sftp_result',
-        opId,
-        ok: false,
-        error: err instanceof Error ? err.message : String(err)
-      };
+      return this.sftpFailure(opId, err);
     }
   }
 
@@ -1593,75 +1941,44 @@ export class BrowserSshRelaySessionClient {
   ): Promise<Extract<ControlMessage, { type: 'tunnel_result' }>> {
     const opId = `tun_${++this.opCounter}`;
     try {
-      if (req.op === 'start') {
+      if (req.op === 'http_preview') {
         const remoteHost = req.remoteHost ?? '127.0.0.1';
         const remotePort = req.remotePort ?? 80;
-        const localPort = req.localPort ?? 8080;
-        const ch = await this.openDirectTcpipChannel(remoteHost, remotePort, '127.0.0.1', localPort);
-        this.closeChannel(ch.localId);
-        if (req.tunnelId) {
-          this.activeTunnels.set(req.tunnelId, { remoteHost, remotePort, localPort });
-        }
+        const result = await this.httpRequestOverTunnel(
+          remoteHost,
+          remotePort,
+          req.httpPath ?? '/'
+        );
         return {
           type: 'tunnel_result',
           opId,
-          tunnelId: req.tunnelId,
           ok: true,
-          active: true,
-          boundAddress: `127.0.0.1:${localPort}`
+          active: false,
+          statusCode: result.statusCode,
+          statusText: result.statusText,
+          bodyPreview: result.body.slice(0, 4096),
+          bytesTransferred: result.bytes
         };
       }
 
       if (req.op === 'stop') {
-        if (req.tunnelId) {
-          this.activeTunnels.delete(req.tunnelId);
-        }
-        return {
-          type: 'tunnel_result',
-          opId,
-          tunnelId: req.tunnelId,
-          ok: true,
-          active: false
-        };
+        if (req.tunnelId) this.activeTunnels.delete(req.tunnelId);
+        return { type: 'tunnel_result', opId, tunnelId: req.tunnelId, ok: true, active: false };
       }
 
-      if (req.op === 'http_preview') {
-        const remoteHost = req.remoteHost ?? '127.0.0.1';
-        const remotePort = req.remotePort ?? 80;
-        const httpPath = req.httpPath ?? '/';
-        const ch = await this.openDirectTcpipChannel(remoteHost, remotePort, '127.0.0.1', 0);
-        const crlf = String.fromCharCode(13, 10);
-        const httpReq = `GET ${httpPath} HTTP/1.1${crlf}Host: ${remoteHost}:${remotePort}${crlf}Connection: close${crlf}${crlf}`;
-
-        const rawResponse = await new Promise<string>((resolve) => {
-          ch.onDirectTcpComplete = resolve;
-          void this.sendPacket(
-            concatBytes(
-              new Uint8Array([SSH_MSG_CHANNEL_DATA]),
-              writeUint32BE(ch.remoteId),
-              sshString(httpReq)
-            )
-          );
-        });
-
-        const firstLine = rawResponse.split(String.fromCharCode(10))[0] ?? '';
-        const statusTokens = firstLine.trim().split(' ').filter(Boolean);
-        const statusCode = statusTokens[1] ? Number.parseInt(statusTokens[1], 10) || 200 : 200;
-        const headerEnd = rawResponse.indexOf(`${crlf}${crlf}`);
-        const bodyPreview =
-          headerEnd !== -1 ? rawResponse.slice(headerEnd + 4) : rawResponse;
-
-        return {
-          type: 'tunnel_result',
-          opId,
-          ok: true,
-          active: true,
-          statusCode,
-          bodyPreview: bodyPreview.slice(0, 2048)
-        };
-      }
-
-      return { type: 'tunnel_result', opId, ok: false, active: false, error: 'Unsupported tunnel op' };
+      // A browser page cannot bind 127.0.0.1:<port>. Reporting a bound address
+      // here used to be a fabricated success; a tunnel only exists while a
+      // request is in flight over direct-tcpip.
+      return {
+        type: 'tunnel_result',
+        opId,
+        tunnelId: req.tunnelId,
+        ok: false,
+        active: false,
+        error:
+          'ERR_TUNNEL_UNSUPPORTED: relay mode cannot bind a localhost port from the browser. ' +
+          'Use HTTP preview for a one-off request, or the Go gateway transport for persistent tunnels.'
+      };
     } catch (err) {
       return {
         type: 'tunnel_result',
@@ -1676,20 +1993,28 @@ export class BrowserSshRelaySessionClient {
 
   close(): void {
     this.connected = false;
+    for (const ch of this.channels.values()) {
+      ch.sftp?.close();
+    }
+    this.sftpPromise = null;
+    this.uploadSessions.clear();
     try {
       this.ws?.close(1000, 'Client closed SSH session');
     } catch {
       // ignore
     }
     this.ws = null;
+    for (const ch of this.channels.values()) {
+      for (const request of ch.pendingRequests) {
+        clearTimeout(request.timer);
+        request.reject(new Error('SSH session closed'));
+      }
+      ch.pendingRequests = [];
+    }
     this.channels.clear();
     for (const [, waiter] of this.pendingChannelOpen) {
       waiter.reject(new Error('SSH session closed'));
     }
     this.pendingChannelOpen.clear();
-    for (const request of this.pendingChannelRequests.values()) {
-      request.reject(new Error('SSH session closed'));
-    }
-    this.pendingChannelRequests.clear();
   }
 }

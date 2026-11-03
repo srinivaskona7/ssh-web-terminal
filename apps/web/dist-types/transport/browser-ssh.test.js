@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
 import { BrowserSshRelaySessionClient } from './browser-ssh-client.js';
 import { bytesToBase64 } from '../vault/ssh-wire.js';
+import { FakeSftpServer } from './testing/fake-sftp-server.js';
 const subtle = (globalThis.crypto?.subtle ?? webcrypto.subtle);
 function concatBytes(...arrays) {
     let total = 0;
@@ -75,6 +76,8 @@ class IsolatedSsh2ServerFixture {
     lastResize = null;
     openedPtyChannels = [];
     directTcpChannels = new Set();
+    sftpChannels = new Set();
+    sftpServers = new Map();
     files = new Map([['README.md', '# WebSSH Relay Server']]);
     closed = false;
     inBuffer = new Uint8Array(0);
@@ -283,6 +286,25 @@ class IsolatedSsh2ServerFixture {
                     await this.sendPacket(concatBytes(new Uint8Array([94]), writeUint32BE(recipientCh), sshString(httpResp)));
                     await this.sendPacket(concatBytes(new Uint8Array([97]), writeUint32BE(recipientCh)));
                 }
+                return;
+            }
+            if (this.sftpChannels.has(recipientCh)) {
+                let server = this.sftpServers.get(recipientCh);
+                if (!server) {
+                    server = new FakeSftpServer();
+                    server.dirs.add('.');
+                    for (const [path, content] of this.files) {
+                        server.files.set(path, {
+                            data: new TextEncoder().encode(content),
+                            mode: 0o644
+                        });
+                    }
+                    server.setSendTarget((payload) => {
+                        void this.sendPacket(concatBytes(new Uint8Array([94]), writeUint32BE(recipientCh), sshString(payload)));
+                    });
+                    this.sftpServers.set(recipientCh, server);
+                }
+                server.send(data);
             }
             return;
         }
@@ -293,6 +315,11 @@ class IsolatedSsh2ServerFixture {
             const wantReply = payload[offset++] !== 0;
             if (reqType === 'pty-req') {
                 this.openedPtyChannels.push(recipientCh);
+            }
+            else if (reqType === 'subsystem') {
+                const name = readStr();
+                if (name === 'sftp')
+                    this.sftpChannels.add(recipientCh);
             }
             else if (reqType === 'window-change') {
                 const cols = readUint32();
@@ -344,8 +371,8 @@ class IsolatedSsh2ServerFixture {
                 if (errOut) {
                     await this.sendPacket(concatBytes(new Uint8Array([95]), writeUint32BE(recipientCh), writeUint32BE(1), sshString(errOut)));
                 }
-                // exit-status
-                await this.sendPacket(concatBytes(new Uint8Array([98]), writeUint32BE(recipientCh), sshString('exit-status'), new Uint8Array([0]), writeUint32BE(exitCode)));
+                // exit-status (RFC 4254 §6.10: no want_reply byte)
+                await this.sendPacket(concatBytes(new Uint8Array([98]), writeUint32BE(recipientCh), sshString('exit-status'), writeUint32BE(exitCode)));
                 // CHANNEL_CLOSE
                 await this.sendPacket(concatBytes(new Uint8Array([97]), writeUint32BE(recipientCh)));
                 return;

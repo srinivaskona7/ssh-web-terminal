@@ -9,6 +9,7 @@ export const BUNDLED_PROGRAMMING_FONTS = [
 ] as const;
 
 export type LayoutPreset = 'sidebar-left' | 'sidebar-right' | 'bottom-files' | 'compact' | 'zen';
+export type WorkspacePreset = 'terminal' | 'develop' | 'operate';
 export type CursorShape = 'block' | 'underline' | 'bar';
 
 export interface CustomAnsiPalette {
@@ -77,6 +78,10 @@ export interface UserPreferencesV2 {
   customThemes: Record<string, CustomThemeDefinition>;
   typography: TypographyPreferences;
   layoutPreset: LayoutPreset;
+  /** Navigation rail width in CSS pixels (120–360). */
+  railWidthPx: number;
+  /** Named workspace preset: terminal-first, develop, or operate. */
+  workspacePreset: WorkspacePreset;
   surface: SurfacePreferences;
   storageLimits: StorageLimitPreferences;
   perHostOverrides: Record<string, HostPreferenceOverride>;
@@ -105,6 +110,8 @@ export function createDefaultPreferences(): UserPreferencesV2 {
       ligatures: true
     },
     layoutPreset: 'sidebar-left',
+    railWidthPx: 168,
+    workspacePreset: 'terminal',
     surface: {
       cursorShape: 'block',
       cursorBlink: true,
@@ -136,6 +143,8 @@ const VALID_LAYOUT_PRESETS: readonly LayoutPreset[] = [
 ];
 
 const VALID_CURSOR_SHAPES: readonly CursorShape[] = ['block', 'underline', 'bar'];
+
+const VALID_WORKSPACE_PRESETS: readonly WorkspacePreset[] = ['terminal', 'develop', 'operate'];
 
 export function clampPreferencesLimits(prefs: UserPreferencesV2): UserPreferencesV2 {
   const defaults = createDefaultPreferences();
@@ -259,6 +268,13 @@ export function migratePreferences(raw: unknown): UserPreferencesV2 {
       perHostOverrides: rawOverrides,
       schemaVersion: 2
     };
+    if (!VALID_WORKSPACE_PRESETS.includes(merged.workspacePreset)) {
+      merged.workspacePreset = defaults.workspacePreset;
+    }
+    merged.railWidthPx = Math.min(
+      360,
+      Math.max(120, toFiniteNumber(merged.railWidthPx, defaults.railWidthPx))
+    );
     return clampPreferencesLimits(merged);
   }
 

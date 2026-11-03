@@ -32,3 +32,18 @@
   3. **Decision**:
      - We implemented a dedicated, zero-dependency, WebCrypto-native **RFC 4251/4252/4253/4254 Browser SSH-2.0 Client (`apps/web/src/transport/browser-ssh-client.ts`)** supporting `ecdh-sha2-nistp256` (RFC 5656), `ssh-ed25519` / `ecdsa-sha2-nistp256` / `rsa-sha2-256` host-key verification (with TOFU pinning and MITM mismatch blocking), `aes128-ctr` + `hmac-sha2-256` packet encryption/MAC, `password` and `publickey` authentication (OpenSSH Ed25519 PEM, RSA PKCS#1/PKCS#8 PEM, ECDSA P-256 PEM, and non-extractable WebCrypto `KeyVault` keys), and multi-channel `session` PTYs (`pty-req`, `shell`, `exec`, `window-change`, `signal`).
      - Private keys remain strictly inside browser memory / WebCrypto and are **never** transmitted to the Cloudflare Worker; the Worker only relays ciphertext SSH-2.0 packets after enforcing `Origin`, `RELAY_AUTH_TOKEN`, `ALLOWED_SSH_TARGETS`, and SSH-2.0 server banner checks.
+
+## ADR-007: Workspace Modules Talk to the Server, Never to Fixtures (2026-11-03)
+- **Context**: The previous UI contained marketing surfaces and simulated actions ("50 features", invented CPU/RAM values, fake reconnect, fake upload progress, fake FIDO2 enrollment). These read as functionality but performed nothing, which is both misleading and untestable.
+- **Decision**:
+  - Every module screen consumes the `WorkspaceRemoteSession` contract (`apps/web/src/session/adapters.ts`), which normalises the Cloudflare relay client and the Go gateway client into one `exec`/`writeFile` interface.
+  - `apps/web/src/control/server-control.ts` is the only source of live metrics. It samples `/proc` twice for real CPU/network deltas and leaves a field `null` when the probe is missing; the UI renders "not reported".
+  - Destructive actions (service stop/restart, reboot/power off, delete, overwrite) require an inline confirmation; power actions additionally require typing the hostname.
+  - Claims are generated from `apps/web/src/ui/capability-matrix.ts` and documented in `docs/FEATURES.md`, which separates **Verified** (a test exists) from **Implemented** (code exists, real-server run pending).
+  - Removed surfaces are not kept behind flags: the 50-feature workbench, telemetry HUD, fleet playbooks and simulation controls are deleted.
+- **Consequences**: The app can no longer claim a capability just because a card renders. Adding a feature requires wiring a real probe/action and a test, or an explicit *Conditional/Unsupported* matrix row.
+
+## ADR-008: Editor Saves Are Conflict-Checked Content Writes
+- **Context**: A remote editor that writes blindly can silently overwrite another operator's change, and a save attempted while the socket is closed must never present as successful.
+- **Decision**: `saveEditorBuffer` (App.tsx) re-reads the remote file before writing and refuses when the content differs from what was loaded. The UI offers explicit "Overwrite with my version" or "Discard mine and reload". A disconnected session returns an error state; no local-fallback success path exists.
+- **Consequences**: Editor-sized files (<= 512 KiB read cap) pay one extra read per save. Larger files are outside the editor's scope.

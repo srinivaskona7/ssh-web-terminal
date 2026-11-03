@@ -1,0 +1,177 @@
+import { posixQuote } from '../recipes/engine.js';
+import {
+  validateGitRef,
+  validateRemoteDirectory,
+  type RemoteSession
+} from '../session/remote-session.js';
+
+export interface GitFileStatus {
+  path: string;
+  /** Two-character porcelain code, e.g. "M ", "??". */
+  code: string;
+  index: string;
+  worktree: string;
+}
+
+export interface GitStatus {
+  branch: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  files: GitFileStatus[];
+  clean: boolean;
+}
+
+export interface GitLogEntry {
+  hash: string;
+  shortHash: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+function gitArgv(dir: string, argv: string[]): string {
+  return ['git', '-C', posixQuote(dir), ...argv.map(posixQuote)].join(' ');
+}
+
+export class GitClient {
+  constructor(
+    private readonly session: RemoteSession,
+    private readonly dir: string
+  ) {
+    validateRemoteDirectory(dir);
+  }
+
+  private async run(argv: string[], timeoutMs = 60_000) {
+    const result = await this.session.exec(gitArgv(this.dir, argv), { timeoutMs });
+    if (result.exitCode !== 0) {
+      throw new Error(`git ${argv[0]} failed: ${(result.stderr || result.stdout).trim()}`);
+    }
+    return result;
+  }
+
+  async isRepository(): Promise<boolean> {
+    const result = await this.session.exec(
+      gitArgv(this.dir, ['rev-parse', '--is-inside-work-tree'])
+    );
+    return result.exitCode === 0 && result.stdout.trim() === 'true';
+  }
+
+  async status(): Promise<GitStatus> {
+    const result = await this.run(['status', '--porcelain=v1', '-z', '--branch']);
+    const parts = result.stdout.split('\0');
+    const status: GitStatus = {
+      branch: '',
+      ahead: 0,
+      behind: 0,
+      files: [],
+      clean: true
+    };
+    for (const part of parts) {
+      if (!part) continue;
+      if (part.startsWith('## ')) {
+        const header = part.slice(3);
+        const branchPart = header.split('...')[0]?.trim() ?? '';
+        status.branch = branchPart.replace(/^No commits yet on /, '');
+        const upstream = header.match(/\.\.\.(\S+)/);
+        if (upstream) status.upstream = upstream[1];
+        const ahead = header.match(/ahead (\d+)/);
+        const behind = header.match(/behind (\d+)/);
+        if (ahead) status.ahead = Number.parseInt(ahead[1]!, 10);
+        if (behind) status.behind = Number.parseInt(behind[1]!, 10);
+        continue;
+      }
+      // Porcelain v1 -z: "XY path" where the code is the first two chars.
+      const index = part[0] ?? ' ';
+      const worktree = part[1] ?? ' ';
+      const path = part.slice(3);
+      status.files.push({ path, code: `${index}${worktree}`, index, worktree });
+    }
+    status.clean = status.files.length === 0;
+    return status;
+  }
+
+  async diff(path?: string, staged = false): Promise<string> {
+    const argv = ['diff', '--no-color'];
+    if (staged) argv.push('--cached');
+    if (path) argv.push('--', path);
+    const result = await this.session.exec(gitArgv(this.dir, argv), { timeoutMs: 60_000 });
+    return result.stdout;
+  }
+
+  async branches(): Promise<{ current: string; branches: string[] }> {
+    const result = await this.run(['branch', '--format=%(refname:short)']);
+    const branches = result.stdout
+      .split('\n')
+      .map((b) => b.trim())
+      .filter(Boolean);
+    const currentResult = await this.run(['rev-parse', '--abbrev-ref', 'HEAD']);
+    return { current: currentResult.stdout.trim(), branches };
+  }
+
+  async log(limit = 50): Promise<GitLogEntry[]> {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const result = await this.run([
+      'log',
+      `-n`,
+      String(safeLimit),
+      '--pretty=format:%H%x09%h%x09%an%x09%aI%x09%s'
+    ]);
+    return result.stdout
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [hash = '', shortHash = '', author = '', date = '', ...subject] = line.split('\t');
+        return { hash, shortHash, author, date, subject: subject.join(' ') };
+      });
+  }
+
+  async stage(paths: string[]): Promise<void> {
+    if (paths.length === 0) {
+      await this.run(['add', '-A']);
+      return;
+    }
+    await this.run(['add', '--', ...paths]);
+  }
+
+  async unstage(paths: string[]): Promise<void> {
+    await this.run(['reset', 'HEAD', '--', ...(paths.length ? paths : ['.'])]);
+  }
+
+  async commit(message: string): Promise<{ hash: string; summary: string }> {
+    const trimmed = message.trim();
+    if (!trimmed) throw new Error('A commit message is required');
+    if (trimmed.length > 5000) throw new Error('Commit message is too long');
+    await this.run(['commit', '-m', trimmed]);
+    const hash = (await this.run(['rev-parse', 'HEAD'])).stdout.trim();
+    const summary = (await this.run(['show', '-s', '--format=%s', 'HEAD'])).stdout.trim();
+    return { hash, summary };
+  }
+
+  async fetch(remote = 'origin'): Promise<string> {
+    const result = await this.run(['fetch', validateGitRef(remote)], 120_000);
+    return result.stdout + result.stderr;
+  }
+
+  /** Fast-forward only. Never rewrites history or discards local changes. */
+  async pull(): Promise<string> {
+    const result = await this.run(['pull', '--ff-only'], 180_000);
+    return result.stdout + result.stderr;
+  }
+
+  /** Plain push only — force-push is not exposed anywhere in the UI. */
+  async push(setUpstream = false): Promise<string> {
+    const argv = ['push'];
+    if (setUpstream) argv.push('-u', 'origin', 'HEAD');
+    const result = await this.run(argv, 180_000);
+    return result.stdout + result.stderr;
+  }
+
+  async checkout(branch: string): Promise<void> {
+    await this.run(['checkout', validateGitRef(branch)]);
+  }
+
+  async createBranch(branch: string): Promise<void> {
+    await this.run(['checkout', '-b', validateGitRef(branch)]);
+  }
+}

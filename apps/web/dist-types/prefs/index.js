@@ -19,6 +19,8 @@ export function createDefaultPreferences() {
             ligatures: true
         },
         layoutPreset: 'sidebar-left',
+        railWidthPx: 168,
+        workspacePreset: 'terminal',
         surface: {
             cursorShape: 'block',
             cursorBlink: true,
@@ -47,6 +49,7 @@ const VALID_LAYOUT_PRESETS = [
     'zen'
 ];
 const VALID_CURSOR_SHAPES = ['block', 'underline', 'bar'];
+const VALID_WORKSPACE_PRESETS = ['terminal', 'develop', 'operate'];
 export function clampPreferencesLimits(prefs) {
     const defaults = createDefaultPreferences();
     const typo = typeof prefs.typography === 'object' && prefs.typography !== null
@@ -150,6 +153,10 @@ export function migratePreferences(raw) {
             perHostOverrides: rawOverrides,
             schemaVersion: 2
         };
+        if (!VALID_WORKSPACE_PRESETS.includes(merged.workspacePreset)) {
+            merged.workspacePreset = defaults.workspacePreset;
+        }
+        merged.railWidthPx = Math.min(360, Math.max(120, toFiniteNumber(merged.railWidthPx, defaults.railWidthPx)));
         return clampPreferencesLimits(merged);
     }
     // Migrate from v1 schema

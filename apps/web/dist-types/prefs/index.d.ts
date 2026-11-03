@@ -2,6 +2,7 @@ import { type ThemeId } from '@webssh/ui-kit';
 export declare const PREFERENCES_SCHEMA_VERSION = 2;
 export declare const BUNDLED_PROGRAMMING_FONTS: readonly ["JetBrains Mono", "Fira Code", "Source Code Pro", "IBM Plex Mono"];
 export type LayoutPreset = 'sidebar-left' | 'sidebar-right' | 'bottom-files' | 'compact' | 'zen';
+export type WorkspacePreset = 'terminal' | 'develop' | 'operate';
 export type CursorShape = 'block' | 'underline' | 'bar';
 export interface CustomAnsiPalette {
     black: string;
@@ -63,6 +64,10 @@ export interface UserPreferencesV2 {
     customThemes: Record<string, CustomThemeDefinition>;
     typography: TypographyPreferences;
     layoutPreset: LayoutPreset;
+    /** Navigation rail width in CSS pixels (120–360). */
+    railWidthPx: number;
+    /** Named workspace preset: terminal-first, develop, or operate. */
+    workspacePreset: WorkspacePreset;
     surface: SurfacePreferences;
     storageLimits: StorageLimitPreferences;
     perHostOverrides: Record<string, HostPreferenceOverride>;

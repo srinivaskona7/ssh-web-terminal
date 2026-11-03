@@ -103,20 +103,19 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('remote-editor-textarea')).toHaveValue(/WebSSH Test Server/);
 
     // 8. Navigate through remaining IDE screens and verify accessibility
-    await page.getByTestId('nav-telemetry').click();
-    await expect(page.getByTestId('screen-telemetry')).toBeVisible();
+    await page.getByTestId('nav-overview').click();
+    await expect(page.getByTestId('screen-overview')).toBeVisible();
+    await expect(page.getByTestId('live-control')).toBeVisible();
 
     await page.getByTestId('nav-tunnels').click();
     await expect(page.getByTestId('screen-tunnels')).toBeVisible();
     await expect(page.getByTestId('remote-web-preview-card')).toBeVisible();
 
-    await page.getByTestId('nav-playbooks').click();
-    await expect(page.getByTestId('screen-playbooks')).toBeVisible();
-
     await page.getByTestId('nav-features').click();
     await expect(page.getByTestId('screen-features')).toBeVisible();
-    const featureCards = await page.locator('[data-testid^="feature-card-"]').count();
-    expect(featureCards).toBe(50);
+    await expect(page.getByTestId('capability-table')).toBeVisible();
+    const capabilityRows = await page.locator('[data-testid^="capability-"]').count();
+    expect(capabilityRows).toBeGreaterThan(10);
 
     // 9. Run axe-core WCAG 2.1 AA audit on Chromium
     if (browserName === 'chromium') {

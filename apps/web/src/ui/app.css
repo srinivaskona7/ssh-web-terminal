@@ -729,3 +729,307 @@
   border-bottom: var(--border-hairline);
 }
 
+
+/* ------------------------------------------------------------------------
+   Workspace modules (Servers, Software, Containers, Kubernetes, Automation)
+   ---------------------------------------------------------------------- */
+.ws-mod {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  overflow: auto;
+  color: var(--color-fg-primary);
+}
+
+.ws-mod-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.ws-mod-head h1,
+.ws-mod-head h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  line-height: var(--font-line-height-ui);
+}
+
+.ws-mod-muted {
+  margin: 0;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-ui);
+}
+
+.ws-mod-error,
+.ws-mod-success {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: var(--border-hairline);
+  font-size: var(--font-size-sm);
+}
+
+.ws-mod-error {
+  color: var(--color-status-danger);
+  border-color: var(--color-status-danger);
+}
+
+.ws-mod-success {
+  color: var(--color-status-success);
+  border-color: var(--color-status-success);
+}
+
+.ws-mod-warnings,
+.ws-mod-issues,
+.ws-mod-error-list {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-ui);
+}
+
+.ws-mod-warnings {
+  color: var(--color-status-warning);
+}
+
+.ws-mod-issues li,
+.ws-mod-error-list li {
+  color: var(--color-status-danger);
+}
+
+.ws-mod-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.ws-mod-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-2);
+}
+
+.ws-mod-grid--compact {
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+}
+
+.ws-mod-grid-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0);
+  padding: var(--space-2);
+  border: var(--border-hairline);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-surface);
+  min-width: 0;
+}
+
+.ws-mod-grid-row dt {
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--font-letter-spacing-tight);
+}
+
+.ws-mod-grid-row dd {
+  margin: 0;
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.ws-mod-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-xs);
+  font-family: var(--font-font-mono);
+}
+
+.ws-mod-table th,
+.ws-mod-table td {
+  text-align: left;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: var(--border-hairline);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.ws-mod-table th {
+  color: var(--color-fg-muted);
+  font-family: var(--font-font-sans);
+  font-weight: normal;
+}
+
+.ws-mod-row-actions {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.ws-mod-split {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+.ws-mod-list,
+.ws-mod-content,
+.ws-mod-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 0;
+}
+
+.ws-mod-list {
+  border: var(--border-hairline);
+  border-radius: var(--radius-panel);
+  background-color: var(--color-bg-surface);
+  padding: var(--space-2);
+  overflow: auto;
+}
+
+.ws-mod-content {
+  overflow: auto;
+}
+
+.ws-mod-detail {
+  padding: var(--space-3);
+  border: var(--border-hairline);
+  border-radius: var(--radius-panel);
+  background-color: var(--color-bg-surface);
+}
+
+.ws-mod-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.ws-mod-filters {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.ws-mod-recipes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ws-mod-recipes > li {
+  border-radius: var(--radius-md);
+  border: var(--border-hairline);
+  padding: var(--space-1);
+}
+
+.ws-mod-recipes > li[aria-selected='true'] {
+  border-color: var(--color-accent-primary);
+}
+
+.ws-mod-recipe-name {
+  display: block;
+  font-size: var(--font-size-sm);
+  font-family: var(--font-font-mono);
+}
+
+.ws-mod-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ws-mod-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+.ws-mod-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.ws-mod-plan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: var(--border-hairline);
+  border-radius: var(--radius-md);
+}
+
+.ws-mod-steps {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-font-mono);
+}
+
+.ws-mod-log {
+  margin: 0;
+  padding: var(--space-2);
+  max-height: 320px;
+  overflow: auto;
+  background-color: var(--color-terminal-bg);
+  color: var(--color-terminal-fg);
+  border-radius: var(--radius-md);
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .ws-mod-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.webssh-rail-presets {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+  border-bottom: var(--border-hairline);
+  margin-bottom: var(--space-1);
+}
+
+.webssh-rail-resizer {
+  width: 4px;
+  flex: 0 0 auto;
+  cursor: col-resize;
+  background-color: var(--color-border-subtle);
+  border: none;
+  padding: 0;
+}
+
+.webssh-rail-resizer:hover,
+.webssh-rail-resizer:focus-visible {
+  background-color: var(--color-accent-primary);
+  outline: none;
+}

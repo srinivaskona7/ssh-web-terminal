@@ -1,11 +1,21 @@
 # WebSSH Studio — Project Memory Index
 
 - **Session Plan & Checklist**: [SESSION_PLAN.md](./SESSION_PLAN.md)
+- **Honest capability matrix (source of truth for claims)**: [../docs/FEATURES.md](../docs/FEATURES.md)
 - **Monorepo Modules**:
   - `design/`: Source-of-truth design tokens (`tokens.json`) and screen/component specifications.
   - `packages/ui-kit/`: Token compiler, themes, icons, self-hosted WOFF2 fonts, UI primitives.
   - `packages/protocol/`: Binary framing and control message codecs (TypeScript & Go).
-  - `apps/web/`: Browser SSH studio client (`vault`, `transport`, `terminal`, `files`, `prefs`, `hosts`, `ui`).
+  - `apps/web/`: Browser SSH studio client.
+    - `vault/`, `transport/`, `terminal/`, `files/`, `prefs/`, `hosts/`: original modules.
+    - `discovery/`: read-only capability model (`capabilities.ts`).
+    - `recipes/`: versioned recipe schema, catalog and plan builder.
+    - `jobs/`: durable detached job model (`types.ts`), remote runner, manager, IndexedDB store.
+    - `session/`: `adapters.ts` normalises relay and gateway clients into `WorkspaceRemoteSession`.
+    - `control/`: live metrics, processes, services and power actions (`server-control.ts`).
+    - `containers/`, `kubernetes/`, `git/`, `projects/`, `automation/`: module engines.
+    - `ui/`: `App.tsx` shell, `ServerModules.tsx` module screens, `CapabilityMatrixPanel.tsx`,
+      `capability-matrix.ts` (claims), `app.css` (`ws-mod-*` workspace styles).
   - `apps/relay/`: Cloudflare Worker WebSocket-to-TCP SSH relay (`src/index.ts`, `src/policy.ts`, `wrangler.jsonc`).
   - `apps/gateway/`: Go WebSocket-to-SSH/SFTP gateway (`policy`, `session`, `sshbridge`, `sftpbridge`, `auth`, `audit`).
   - `e2e/`: Playwright E2E, full-screen, and accessibility tests.
@@ -21,3 +31,11 @@
 - Operational setup and target connection checks are documented in `docs/RUNBOOK.md`, section 5.
 - `.npmrc` pins the public npm registry; all `package-lock.json` download URLs must use `registry.npmjs.org` so GitHub and Cloudflare runners can install without corporate network access. Keep dependency-install failures visible in CI logs.
 - Relay PTY creation must wait for server acknowledgements of both `pty-req` and `shell`; `connected`/`channel_opened` must not be reported before acceptance. Production limitations of relay file tools and process resumption are recorded in `docs/RUNBOOK.md`.
+
+## Non-negotiables
+
+1. No fake data: missing probes render "not reported", never a zero or estimate.
+2. No simulated success: disconnected actions report the disconnect, never a green status.
+3. No billing code, tiers or paywalls.
+4. No anonymous TCP proxy; auth, origin checks, destination validation and quotas stay in place.
+5. Claims come from tests; docs/FEATURES.md distinguishes Verified from Implemented.
