@@ -475,10 +475,12 @@ describe('Cloudflare Worker SSH Relay: Public Mode, Anti-Rebinding DNS, Session 
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const body = String(init?.body ?? '');
       turnstileCalls.push(body);
-      const success = body.includes('response=good-token');
+      const success = !body.includes('response=bad-token');
+      const hostname = body.includes('response=wrong-host') ? 'evil.example' : new URL(origin).hostname;
+      const action = body.includes('response=wrong-action') ? 'other_action' : 'ssh_connect';
       return new Response(
         JSON.stringify(
-          success ? { success: true } : { success: false, 'error-codes': ['invalid-input-response'] }
+          success ? { success: true, hostname, action } : { success: false, 'error-codes': ['invalid-input-response'] }
         ),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
@@ -489,6 +491,12 @@ describe('Cloudflare Worker SSH Relay: Public Mode, Anti-Rebinding DNS, Session 
       const rejected = await issue(guestEnv, { ...request, turnstileToken: 'bad-token' });
       expect(rejected.status).toBe(401);
       expect(((await rejected.json()) as any).code).toBe('ERR_TURNSTILE_FAILED');
+
+      for (const turnstileToken of ['wrong-host', 'wrong-action']) {
+        const mismatch = await issue(guestEnv, { ...request, turnstileToken });
+        expect(mismatch.status).toBe(401);
+        expect(((await mismatch.json()) as any).code).toBe('ERR_TURNSTILE_FAILED');
+      }
 
       const missing = await issue(guestEnv, { ...request, turnstileToken: '' });
       expect(missing.status).toBe(401);
