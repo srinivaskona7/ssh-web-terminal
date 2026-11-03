@@ -50,6 +50,26 @@ const cacheName = `webssh-studio-shell-${assetDigest}`;
 
 let indexHtml = fs.readFileSync(indexHtmlPath, 'utf8');
 indexHtml = indexHtml.replace(/__WEBSSH_BUILD_VERSION__/g, buildVersion);
+
+// The placeholder must never appear in identifier position. On 2026-11-03 the
+// startup shell shipped `window.1.0.0+sha.digest = BUILD_VERSION`, a parse
+// error that killed the whole startup script and left the loader spinning.
+// Fail the build instead of trusting the source to stay shaped correctly.
+if (/__WEBSSH_BUILD_VERSION__/.test(indexHtml)) {
+  console.error('Build verification failed: unreplaced __WEBSSH_BUILD_VERSION__ in dist/index.html.');
+  process.exit(1);
+}
+if (!/window\.__WEBSSH_BUILD__\s*=/.test(indexHtml)) {
+  console.error('Build verification failed: dist/index.html lost window.__WEBSSH_BUILD__.');
+  process.exit(1);
+}
+if (/window\.\s*\d/.test(indexHtml)) {
+  console.error(
+    'Build verification failed: version substitution corrupted a JavaScript identifier in dist/index.html.'
+  );
+  process.exit(1);
+}
+
 fs.writeFileSync(indexHtmlPath, indexHtml, 'utf8');
 
 const basePath = process.env.VITE_BASE_PATH || './';

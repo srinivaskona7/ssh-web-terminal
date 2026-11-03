@@ -80,6 +80,8 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Reviewed deployment as a durable job | `apps/web/src/ui/ServerModules.tsx` (`DeploymentsPanel`) | Implemented | needs a project manifest and runtime |
 | Python detection and managed cron entries | `apps/web/src/automation/python-automation.ts` | Implemented | needs python3 and a crontab |
 
+| Product sign-in for the hosted relay (no endpoint or token in the user path) | `apps/web/src/ui/App.tsx` (`handleRelayLogin`) | Verified | `app.test.tsx`; calls `/auth/session` and stores the short-lived token in `sessionStorage` |
+
 ## Deliberately unsupported
 
 | Capability | Why |
@@ -92,7 +94,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 
 ## Test suite reference
 
-- Vitest: `npm test` at the repo root (currently 18 files / 111 tests).
+- Vitest: `npm test` at the repo root (currently 18 files / 112 tests).
 - Go: `npm run test:go` (gateway packages).
 - Playwright: `npm run test:e2e` (cross-browser, full-screen, accessibility).
 - Token invariant: `npm run lint:tokens`.

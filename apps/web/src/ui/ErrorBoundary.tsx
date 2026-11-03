@@ -4,6 +4,7 @@ import { redactSecretsInText } from './advanced-features';
 
 declare global {
   interface Window {
+    __WEBSSH_BUILD__?: string;
     __WEBSSH_BUILD_VERSION__?: string;
     __websshMarkReady?: () => void;
     __websshReportStartupError?: (reason: string) => void;
@@ -44,7 +45,9 @@ export function sanitizeDiagnosticMessage(raw: unknown): string {
 
 export function buildSafeDiagnosticReport(reason: unknown): DiagnosticReport {
   const buildVersion =
-    (typeof window !== 'undefined' && window.__WEBSSH_BUILD_VERSION__) || '1.0.0';
+    (typeof window !== 'undefined' &&
+      (window.__WEBSSH_BUILD__ || window.__WEBSSH_BUILD_VERSION__)) ||
+      '1.0.0';
   let localStorageAvailable = false;
   try {
     localStorageAvailable = typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function';

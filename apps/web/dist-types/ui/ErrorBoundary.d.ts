@@ -1,6 +1,7 @@
 import { Component, type ComponentChildren } from 'preact';
 declare global {
     interface Window {
+        __WEBSSH_BUILD__?: string;
         __WEBSSH_BUILD_VERSION__?: string;
         __websshMarkReady?: () => void;
         __websshReportStartupError?: (reason: string) => void;

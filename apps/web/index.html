@@ -154,7 +154,10 @@
     <script>
       (function () {
         var BUILD_VERSION = '__WEBSSH_BUILD_VERSION__';
-        window.__WEBSSH_BUILD_VERSION__ = BUILD_VERSION;
+        // The global name must not be the placeholder token: the build
+        // replaces every occurrence, so an identifier-shaped placeholder becomes
+        // a numeric literal — a SyntaxError that leaves the shell spinning.
+        window.__WEBSSH_BUILD__ = BUILD_VERSION;
 
         var shell = document.getElementById('startup-shell');
         var titleEl = document.getElementById('startup-title');

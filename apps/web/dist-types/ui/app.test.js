@@ -192,6 +192,35 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         expect(container.querySelector('[data-testid="fido2-hardware-card"]')?.textContent).toContain('Browsers cannot create OpenSSH FIDO2 keys');
         document.body.removeChild(container);
     });
+    it('keeps relay internals in administrator settings and asks for a product sign-in instead', async () => {
+        localStorage.setItem('webssh.transport.mode', 'cloudflare-relay');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        render(_jsx(App, {}), container);
+        // Sign-in is the visible step; the endpoint, token and transport picker are not.
+        const signIn = container.querySelector('[data-testid="product-sign-in"]');
+        expect(signIn).toBeTruthy();
+        expect(signIn?.textContent).toContain('Sign in');
+        expect(container.querySelector('[data-testid="product-sign-in-user"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="product-sign-in-pass"]')).toBeTruthy();
+        const admin = container.querySelector('[data-testid="admin-transport-settings"]');
+        expect(admin).toBeTruthy();
+        expect(admin.open).toBe(false);
+        expect(admin.querySelector('[data-testid="welcome-gateway-url-input"]')).toBeTruthy();
+        expect(admin.querySelector('[data-testid="welcome-transport-mode-select"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="welcome-gateway-url-input"]')).toBe(admin.querySelector('[data-testid="welcome-gateway-url-input"]'));
+        // Connecting without a session is refused locally with an actionable message.
+        const host = container.querySelector('[data-testid="welcome-host-input"]');
+        host.value = '10.0.0.5';
+        host.dispatchEvent(new Event('input', { bubbles: true }));
+        const form = container.querySelector('[data-testid="welcome-quick-connect-card"] form');
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        await new Promise((r) => setTimeout(r, 10));
+        expect(container.textContent).toContain('Sign in to WebSSH Studio first');
+        document.body.removeChild(container);
+        localStorage.removeItem('webssh.transport.mode');
+        sessionStorage.clear();
+    });
     it('renders AppErrorBoundary fallback with Retry, targeted cache repair, and secret-safe diagnostics while preserving localStorage', async () => {
         localStorage.setItem('webssh.hosts.v1', JSON.stringify([{ id: 'h-keep', alias: 'keep-host', host: '10.0.0.9', port: 22, user: 'ubuntu', tags: [], favorite: true, jumpHops: [] }]));
         localStorage.setItem('webssh.preferences.v2', JSON.stringify({

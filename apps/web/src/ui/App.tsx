@@ -266,25 +266,61 @@ export function App(): JSX.Element {
   const [gatewayProbeStatus, setGatewayProbeStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [relayLoginUser, setRelayLoginUser] = useState<string>('');
   const [relayLoginPass, setRelayLoginPass] = useState<string>('');
-  const [relaySessionUser, setRelaySessionUser] = useState<string>('');
+  const [relaySessionUser, setRelaySessionUser] = useState<string>(() => {
+    try {
+      const raw = globalThis.sessionStorage?.getItem('webssh.relay.session');
+      if (!raw) return '';
+      const parsed = JSON.parse(raw) as { userId?: unknown };
+      return typeof parsed.userId === 'string' ? parsed.userId : '';
+    } catch {
+      return '';
+    }
+  });
 
+  /**
+   * Product sign-in. The relay session token is obtained from the configured
+   * endpoint and kept in session storage; the user never sees or enters it.
+   */
   const handleRelayLogin = async (): Promise<void> => {
+    if (!relayLoginUser.trim() || !relayLoginPass) {
+      setGatewayProbeStatus({ ok: false, message: 'Enter your username and password to sign in.' });
+      return;
+    }
     try {
       const res = await loginToCloudflareRelay(gatewayUrl, relayLoginUser, relayLoginPass);
       setGatewayAuthToken(res.token);
       setRelaySessionUser(res.userId);
       setRelayLoginPass('');
+      try {
+        globalThis.sessionStorage?.setItem(
+          'webssh.relay.session',
+          JSON.stringify({ userId: res.userId, token: res.token })
+        );
+        globalThis.sessionStorage?.setItem('webssh.gateway.authToken', res.token);
+      } catch {
+        // Session storage may be unavailable; the token stays in memory.
+      }
       setGatewayProbeStatus({
         ok: true,
-        message: `Relay Session Active (${res.userId}) · Short-lived JWT expires in ${Math.round(
-          res.expiresIn / 60
-        )}m`
+        message: `Signed in as ${res.userId} · session expires in ${Math.round(res.expiresIn / 60)}m`
       });
     } catch (err) {
       setGatewayProbeStatus({
         ok: false,
         message: err instanceof Error ? err.message : String(err)
       });
+    }
+  };
+
+  const handleRelaySignOut = (): void => {
+    setRelaySessionUser('');
+    setGatewayAuthToken('');
+    setGatewayProbeStatus(null);
+    try {
+      globalThis.sessionStorage?.removeItem('webssh.relay.session');
+      globalThis.sessionStorage?.removeItem('webssh.gateway.authToken');
+    } catch {
+      // ignore
     }
   };
   const [negotiatedCipher, setNegotiatedCipher] = useState<string>('chacha20-poly1305@openssh.com');
@@ -831,6 +867,11 @@ export function App(): JSX.Element {
       setConnectErrorMsg(
         'Permissions 0644 for private key are too open! OpenSSH requires chmod 0400 (-r--------) or 0600.'
       );
+      return;
+    }
+
+    if (transportMode === 'cloudflare-relay' && !gatewayAuthToken.trim()) {
+      setConnectErrorMsg('Sign in to WebSSH Studio first — the relay rejects connections without a session.');
       return;
     }
 
@@ -2824,130 +2865,155 @@ export function App(): JSX.Element {
                   onSubmit={handleConnectSubmit}
                   style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}
                 >
-                  <div>
-                    <label htmlFor="welcome-transport-mode-select">SSH Transport Mode</label>
-                    <select
-                      id="welcome-transport-mode-select"
-                      className="ui-input"
-                      value={transportMode}
-                      onChange={(e) => {
-                        const mode = (e.target as HTMLSelectElement).value as TransportBackendMode;
-                        setTransportMode(mode);
-                        try {
-                          globalThis.localStorage?.setItem('webssh.transport.mode', mode);
-                        } catch {
-                          // ignore
-                        }
-                      }}
-                      data-testid="welcome-transport-mode-select"
-                    >
-                      <option value="go-gateway">
-                        Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)
-                      </option>
-                      <option value="cloudflare-relay">
-                        Cloudflare Worker SSH Relay (Browser SSH-2.0 over cloudflare:sockets — Zero Target Agent)
-                      </option>
-                    </select>
-                  </div>
-                  <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                    <div style={{ flex: 2, minWidth: '220px' }}>
-                      <label htmlFor="welcome-gateway-url-input">
-                        {transportMode === 'cloudflare-relay'
-                          ? 'Cloudflare Worker Relay Endpoint (wss://<worker>.workers.dev/ws)'
-                          : 'SSH Gateway WebSocket Endpoint (WSS / WS)'}
-                      </label>
-                      <input
-                        id="welcome-gateway-url-input"
-                        type="text"
-                        className="ui-input"
-                        placeholder="wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws"
-                        value={gatewayUrl}
-                        onInput={(e) => {
-                          const val = (e.target as HTMLInputElement).value;
-                          setGatewayUrl(val);
-                          setGatewayProbeStatus(null);
-                          try {
-                            globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
-                          } catch {
-                            // ignore
-                          }
-                        }}
-                        data-testid="welcome-gateway-url-input"
-                      />
-                    </div>
-                    <div style={{ flex: 1, minWidth: '160px' }}>
-                      <label htmlFor="welcome-gateway-token-input">Gateway Auth Token (Optional)</label>
-                      <input
-                        id="welcome-gateway-token-input"
-                        type="password"
-                        className="ui-input"
-                        placeholder="Bearer / EC2 gateway token"
-                        value={gatewayAuthToken}
-                        onInput={(e) => {
-                          const val = (e.target as HTMLInputElement).value;
-                          setGatewayAuthToken(val);
-                          try {
-                            globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
-                          } catch {
-                            // ignore
-                          }
-                        }}
-                        data-testid="welcome-gateway-token-input"
-                      />
-                    </div>
-                    <Button
-                      variant="default"
-                      type="button"
-                      testId="test-gateway-btn"
-                      onClick={() => void handleTestGateway(gatewayUrl)}
-                    >
-                      Test Gateway
-                    </Button>
-                  </div>
                   {transportMode === 'cloudflare-relay' ? (
-                    <div
-                      style={{
-                        display: 'flex',
-                        gap: 'var(--space-2)',
-                        flexWrap: 'wrap',
-                        alignItems: 'flex-end'
-                      }}
-                      data-testid="relay-user-login-bar"
-                    >
-                      <div style={{ flex: 1, minWidth: '160px' }}>
-                        <label htmlFor="relay-login-user-input">Relay Account Username</label>
-                        <input
-                          id="relay-login-user-input"
-                          type="text"
-                          className="ui-input"
-                          placeholder="alice"
-                          value={relayLoginUser}
-                          onInput={(e) => setRelayLoginUser((e.target as HTMLInputElement).value)}
-                          data-testid="relay-login-user-input"
-                        />
-                      </div>
-                      <div style={{ flex: 1, minWidth: '160px' }}>
-                        <label htmlFor="relay-login-pass-input">Relay Account Password</label>
-                        <input
-                          id="relay-login-pass-input"
-                          type="password"
-                          className="ui-input"
-                          placeholder="Sign in for 15m session JWT"
-                          value={relayLoginPass}
-                          onInput={(e) => setRelayLoginPass((e.target as HTMLInputElement).value)}
-                          data-testid="relay-login-pass-input"
-                        />
-                      </div>
-                      <Button
-                        variant="default"
-                        type="button"
-                        testId="relay-login-submit-btn"
-                        onClick={() => void handleRelayLogin()}
+                    relaySessionUser ? (
+                      <div
+                        style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}
+                        data-testid="product-signed-in"
                       >
-                        {relaySessionUser ? `Signed In (${relaySessionUser})` : 'Sign In to Relay'}
-                      </Button>
-                    </div>
+                        <Badge tone="success">Signed in as {relaySessionUser}</Badge>
+                        <Button
+                          variant="ghost"
+                          type="button"
+                          testId="product-sign-out-btn"
+                          onClick={() => handleRelaySignOut()}
+                        >
+                          Sign out
+                        </Button>
+                      </div>
+                    ) : (
+                      <div
+                        style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}
+                        data-testid="product-sign-in"
+                      >
+                        <div style={{ flex: 1, minWidth: '160px' }}>
+                          <label htmlFor="product-sign-in-user">Username</label>
+                          <input
+                            id="product-sign-in-user"
+                            type="text"
+                            autoComplete="username"
+                            className="ui-input"
+                            placeholder="Your account"
+                            value={relayLoginUser}
+                            onInput={(e) => setRelayLoginUser((e.target as HTMLInputElement).value)}
+                            data-testid="product-sign-in-user"
+                          />
+                        </div>
+                        <div style={{ flex: 1, minWidth: '160px' }}>
+                          <label htmlFor="product-sign-in-pass">Password</label>
+                          <input
+                            id="product-sign-in-pass"
+                            type="password"
+                            autoComplete="current-password"
+                            className="ui-input"
+                            placeholder="Account password"
+                            value={relayLoginPass}
+                            onInput={(e) => setRelayLoginPass((e.target as HTMLInputElement).value)}
+                            data-testid="product-sign-in-pass"
+                          />
+                        </div>
+                        <Button
+                          variant="primary"
+                          type="button"
+                          testId="product-sign-in-submit"
+                          onClick={() => void handleRelayLogin()}
+                        >
+                          Sign in
+                        </Button>
+                        <p className="ws-mod-muted" style={{ width: '100%', margin: 0 }}>
+                          Sign in once; the short-lived session token is acquired automatically and kept out of
+                          URLs and logs.
+                        </p>
+                      </div>
+                    )
                   ) : null}
+                  <details data-testid="admin-transport-settings">
+                    <summary>Administrator settings</summary>
+                    <div
+                      style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}
+                    >
+                      <div>
+                        <label htmlFor="welcome-transport-mode-select">SSH Transport Mode</label>
+                        <select
+                          id="welcome-transport-mode-select"
+                          className="ui-input"
+                          value={transportMode}
+                          onChange={(e) => {
+                            const mode = (e.target as HTMLSelectElement).value as TransportBackendMode;
+                            setTransportMode(mode);
+                            try {
+                              globalThis.localStorage?.setItem('webssh.transport.mode', mode);
+                            } catch {
+                              // ignore
+                            }
+                          }}
+                          data-testid="welcome-transport-mode-select"
+                        >
+                          <option value="go-gateway">
+                            Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)
+                          </option>
+                          <option value="cloudflare-relay">
+                            Cloudflare Worker SSH Relay (Browser SSH-2.0 over cloudflare:sockets — Zero Target Agent)
+                          </option>
+                        </select>
+                      </div>
+                      <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                        <div style={{ flex: 2, minWidth: '220px' }}>
+                          <label htmlFor="welcome-gateway-url-input">
+                            {transportMode === 'cloudflare-relay'
+                              ? 'Cloudflare Worker Relay Endpoint (wss://<worker>.workers.dev/ws)'
+                              : 'SSH Gateway WebSocket Endpoint (WSS / WS)'}
+                          </label>
+                          <input
+                            id="welcome-gateway-url-input"
+                            type="text"
+                            className="ui-input"
+                            placeholder="wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws"
+                            value={gatewayUrl}
+                            onInput={(e) => {
+                              const val = (e.target as HTMLInputElement).value;
+                              setGatewayUrl(val);
+                              setGatewayProbeStatus(null);
+                              try {
+                                globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                              } catch {
+                                // ignore
+                              }
+                            }}
+                            data-testid="welcome-gateway-url-input"
+                          />
+                        </div>
+                        <div style={{ flex: 1, minWidth: '160px' }}>
+                          <label htmlFor="welcome-gateway-token-input">Gateway Auth Token (Optional)</label>
+                          <input
+                            id="welcome-gateway-token-input"
+                            type="password"
+                            className="ui-input"
+                            placeholder="Bearer / EC2 gateway token"
+                            value={gatewayAuthToken}
+                            onInput={(e) => {
+                              const val = (e.target as HTMLInputElement).value;
+                              setGatewayAuthToken(val);
+                              try {
+                                globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
+                              } catch {
+                                // ignore
+                              }
+                            }}
+                            data-testid="welcome-gateway-token-input"
+                          />
+                        </div>
+                        <Button
+                          variant="default"
+                          type="button"
+                          testId="test-gateway-btn"
+                          onClick={() => void handleTestGateway(gatewayUrl)}
+                        >
+                          Test Gateway
+                        </Button>
+                      </div>
+                    </div>
+                  </details>
                   {gatewayProbeStatus ? (
                     <Badge
                       tone={gatewayProbeStatus.ok ? 'success' : 'danger'}

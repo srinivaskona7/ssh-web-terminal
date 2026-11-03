@@ -146,16 +146,42 @@ export function App() {
     const [gatewayProbeStatus, setGatewayProbeStatus] = useState(null);
     const [relayLoginUser, setRelayLoginUser] = useState('');
     const [relayLoginPass, setRelayLoginPass] = useState('');
-    const [relaySessionUser, setRelaySessionUser] = useState('');
+    const [relaySessionUser, setRelaySessionUser] = useState(() => {
+        try {
+            const raw = globalThis.sessionStorage?.getItem('webssh.relay.session');
+            if (!raw)
+                return '';
+            const parsed = JSON.parse(raw);
+            return typeof parsed.userId === 'string' ? parsed.userId : '';
+        }
+        catch {
+            return '';
+        }
+    });
+    /**
+     * Product sign-in. The relay session token is obtained from the configured
+     * endpoint and kept in session storage; the user never sees or enters it.
+     */
     const handleRelayLogin = async () => {
+        if (!relayLoginUser.trim() || !relayLoginPass) {
+            setGatewayProbeStatus({ ok: false, message: 'Enter your username and password to sign in.' });
+            return;
+        }
         try {
             const res = await loginToCloudflareRelay(gatewayUrl, relayLoginUser, relayLoginPass);
             setGatewayAuthToken(res.token);
             setRelaySessionUser(res.userId);
             setRelayLoginPass('');
+            try {
+                globalThis.sessionStorage?.setItem('webssh.relay.session', JSON.stringify({ userId: res.userId, token: res.token }));
+                globalThis.sessionStorage?.setItem('webssh.gateway.authToken', res.token);
+            }
+            catch {
+                // Session storage may be unavailable; the token stays in memory.
+            }
             setGatewayProbeStatus({
                 ok: true,
-                message: `Relay Session Active (${res.userId}) · Short-lived JWT expires in ${Math.round(res.expiresIn / 60)}m`
+                message: `Signed in as ${res.userId} · session expires in ${Math.round(res.expiresIn / 60)}m`
             });
         }
         catch (err) {
@@ -163,6 +189,18 @@ export function App() {
                 ok: false,
                 message: err instanceof Error ? err.message : String(err)
             });
+        }
+    };
+    const handleRelaySignOut = () => {
+        setRelaySessionUser('');
+        setGatewayAuthToken('');
+        setGatewayProbeStatus(null);
+        try {
+            globalThis.sessionStorage?.removeItem('webssh.relay.session');
+            globalThis.sessionStorage?.removeItem('webssh.gateway.authToken');
+        }
+        catch {
+            // ignore
         }
     };
     const [negotiatedCipher, setNegotiatedCipher] = useState('chacha20-poly1305@openssh.com');
@@ -635,6 +673,10 @@ export function App() {
             e.preventDefault();
         if (authMethod === 'Private Key (.pem / id_rsa)' && keyPermissionMode === '0644') {
             setConnectErrorMsg('Permissions 0644 for private key are too open! OpenSSH requires chmod 0400 (-r--------) or 0600.');
+            return;
+        }
+        if (transportMode === 'cloudflare-relay' && !gatewayAuthToken.trim()) {
+            setConnectErrorMsg('Sign in to WebSSH Studio first — the relay rejects connections without a session.');
             return;
         }
         const gwValidation = validateGatewayWsUrl(gatewayUrl);
@@ -1556,42 +1598,37 @@ export function App() {
                                                                 }, children: "Probe HTTP Preview" })] })] }), _jsxs("p", { children: ["Proxying remote ", _jsxs("code", { children: ["http://127.0.0.1:", webPreviewPort] }), " over SSH ", _jsx("code", { children: "direct-tcpip" }), " channel:"] }), _jsx("pre", { "data-testid": "tunnel-preview-output", children: tunnelPreviewOutput })] })] })) : null, activeScreen === 'welcome' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-welcome", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("h1", { children: "Welcome to WebSSH Studio" }), _jsxs("p", { style: { color: 'var(--color-fg-secondary)' }, children: ["Clean, minimal SSH workspace \u2014 connect with Username & Password or upload a Private Key (", _jsx("code", { children: "chmod 0400" }), ")."] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "default", testId: "welcome-open-terminal-btn", onClick: () => setActiveScreen('workspace'), children: [_jsx(Icon, { name: "terminal" }), " Open Terminal"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', testId: "welcome-open-ide-btn", onClick: () => {
                                                             setIdeMode(true);
                                                             setActiveScreen('features');
-                                                        }, children: "Open IDE" })] })] }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "welcome-transport-mode-select", children: "SSH Transport Mode" }), _jsxs("select", { id: "welcome-transport-mode-select", className: "ui-input", value: transportMode, onChange: (e) => {
-                                                                    const mode = e.target.value;
-                                                                    setTransportMode(mode);
-                                                                    try {
-                                                                        globalThis.localStorage?.setItem('webssh.transport.mode', mode);
-                                                                    }
-                                                                    catch {
-                                                                        // ignore
-                                                                    }
-                                                                }, "data-testid": "welcome-transport-mode-select", children: [_jsx("option", { value: "go-gateway", children: "Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)" }), _jsx("option", { value: "cloudflare-relay", children: "Cloudflare Worker SSH Relay (Browser SSH-2.0 over cloudflare:sockets \u2014 Zero Target Agent)" })] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '220px' }, children: [_jsx("label", { htmlFor: "welcome-gateway-url-input", children: transportMode === 'cloudflare-relay'
-                                                                            ? 'Cloudflare Worker Relay Endpoint (wss://<worker>.workers.dev/ws)'
-                                                                            : 'SSH Gateway WebSocket Endpoint (WSS / WS)' }), _jsx("input", { id: "welcome-gateway-url-input", type: "text", className: "ui-input", placeholder: "wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws", value: gatewayUrl, onInput: (e) => {
-                                                                            const val = e.target.value;
-                                                                            setGatewayUrl(val);
-                                                                            setGatewayProbeStatus(null);
-                                                                            try {
-                                                                                globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
-                                                                            }
-                                                                            catch {
-                                                                                // ignore
-                                                                            }
-                                                                        }, "data-testid": "welcome-gateway-url-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "welcome-gateway-token-input", children: "Gateway Auth Token (Optional)" }), _jsx("input", { id: "welcome-gateway-token-input", type: "password", className: "ui-input", placeholder: "Bearer / EC2 gateway token", value: gatewayAuthToken, onInput: (e) => {
-                                                                            const val = e.target.value;
-                                                                            setGatewayAuthToken(val);
-                                                                            try {
-                                                                                globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
-                                                                            }
-                                                                            catch {
-                                                                                // ignore
-                                                                            }
-                                                                        }, "data-testid": "welcome-gateway-token-input" })] }), _jsx(Button, { variant: "default", type: "button", testId: "test-gateway-btn", onClick: () => void handleTestGateway(gatewayUrl), children: "Test Gateway" })] }), transportMode === 'cloudflare-relay' ? (_jsxs("div", { style: {
-                                                            display: 'flex',
-                                                            gap: 'var(--space-2)',
-                                                            flexWrap: 'wrap',
-                                                            alignItems: 'flex-end'
-                                                        }, "data-testid": "relay-user-login-bar", children: [_jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "relay-login-user-input", children: "Relay Account Username" }), _jsx("input", { id: "relay-login-user-input", type: "text", className: "ui-input", placeholder: "alice", value: relayLoginUser, onInput: (e) => setRelayLoginUser(e.target.value), "data-testid": "relay-login-user-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "relay-login-pass-input", children: "Relay Account Password" }), _jsx("input", { id: "relay-login-pass-input", type: "password", className: "ui-input", placeholder: "Sign in for 15m session JWT", value: relayLoginPass, onInput: (e) => setRelayLoginPass(e.target.value), "data-testid": "relay-login-pass-input" })] }), _jsx(Button, { variant: "default", type: "button", testId: "relay-login-submit-btn", onClick: () => void handleRelayLogin(), children: relaySessionUser ? `Signed In (${relaySessionUser})` : 'Sign In to Relay' })] })) : null, gatewayProbeStatus ? (_jsx(Badge, { tone: gatewayProbeStatus.ok ? 'success' : 'danger', testId: "gateway-probe-badge", children: gatewayProbeStatus.message })) : null, _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '180px' }, children: [_jsx("label", { htmlFor: "welcome-host-input", children: "Host / IP" }), _jsx("input", { id: "welcome-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or server.example.com", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "welcome-host-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '130px' }, children: [_jsx("label", { htmlFor: "welcome-user-input", children: "Username" }), _jsx("input", { id: "welcome-user-input", type: "text", className: "ui-input", placeholder: "ubuntu / root", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "welcome-user-input" })] }), _jsxs("div", { style: { width: '100px' }, children: [_jsx("label", { htmlFor: "welcome-port-input", children: "Port" }), _jsx("input", { id: "welcome-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "welcome-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Authentication Method" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
+                                                        }, children: "Open IDE" })] })] }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [transportMode === 'cloudflare-relay' ? (relaySessionUser ? (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, "data-testid": "product-signed-in", children: [_jsxs(Badge, { tone: "success", children: ["Signed in as ", relaySessionUser] }), _jsx(Button, { variant: "ghost", type: "button", testId: "product-sign-out-btn", onClick: () => handleRelaySignOut(), children: "Sign out" })] })) : (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }, "data-testid": "product-sign-in", children: [_jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-user", children: "Username" }), _jsx("input", { id: "product-sign-in-user", type: "text", autoComplete: "username", className: "ui-input", placeholder: "Your account", value: relayLoginUser, onInput: (e) => setRelayLoginUser(e.target.value), "data-testid": "product-sign-in-user" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-pass", children: "Password" }), _jsx("input", { id: "product-sign-in-pass", type: "password", autoComplete: "current-password", className: "ui-input", placeholder: "Account password", value: relayLoginPass, onInput: (e) => setRelayLoginPass(e.target.value), "data-testid": "product-sign-in-pass" })] }), _jsx(Button, { variant: "primary", type: "button", testId: "product-sign-in-submit", onClick: () => void handleRelayLogin(), children: "Sign in" }), _jsx("p", { className: "ws-mod-muted", style: { width: '100%', margin: 0 }, children: "Sign in once; the short-lived session token is acquired automatically and kept out of URLs and logs." })] }))) : null, _jsxs("details", { "data-testid": "admin-transport-settings", children: [_jsx("summary", { children: "Administrator settings" }), _jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "welcome-transport-mode-select", children: "SSH Transport Mode" }), _jsxs("select", { id: "welcome-transport-mode-select", className: "ui-input", value: transportMode, onChange: (e) => {
+                                                                                    const mode = e.target.value;
+                                                                                    setTransportMode(mode);
+                                                                                    try {
+                                                                                        globalThis.localStorage?.setItem('webssh.transport.mode', mode);
+                                                                                    }
+                                                                                    catch {
+                                                                                        // ignore
+                                                                                    }
+                                                                                }, "data-testid": "welcome-transport-mode-select", children: [_jsx("option", { value: "go-gateway", children: "Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)" }), _jsx("option", { value: "cloudflare-relay", children: "Cloudflare Worker SSH Relay (Browser SSH-2.0 over cloudflare:sockets \u2014 Zero Target Agent)" })] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '220px' }, children: [_jsx("label", { htmlFor: "welcome-gateway-url-input", children: transportMode === 'cloudflare-relay'
+                                                                                            ? 'Cloudflare Worker Relay Endpoint (wss://<worker>.workers.dev/ws)'
+                                                                                            : 'SSH Gateway WebSocket Endpoint (WSS / WS)' }), _jsx("input", { id: "welcome-gateway-url-input", type: "text", className: "ui-input", placeholder: "wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws", value: gatewayUrl, onInput: (e) => {
+                                                                                            const val = e.target.value;
+                                                                                            setGatewayUrl(val);
+                                                                                            setGatewayProbeStatus(null);
+                                                                                            try {
+                                                                                                globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
+                                                                                            }
+                                                                                            catch {
+                                                                                                // ignore
+                                                                                            }
+                                                                                        }, "data-testid": "welcome-gateway-url-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "welcome-gateway-token-input", children: "Gateway Auth Token (Optional)" }), _jsx("input", { id: "welcome-gateway-token-input", type: "password", className: "ui-input", placeholder: "Bearer / EC2 gateway token", value: gatewayAuthToken, onInput: (e) => {
+                                                                                            const val = e.target.value;
+                                                                                            setGatewayAuthToken(val);
+                                                                                            try {
+                                                                                                globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
+                                                                                            }
+                                                                                            catch {
+                                                                                                // ignore
+                                                                                            }
+                                                                                        }, "data-testid": "welcome-gateway-token-input" })] }), _jsx(Button, { variant: "default", type: "button", testId: "test-gateway-btn", onClick: () => void handleTestGateway(gatewayUrl), children: "Test Gateway" })] })] })] }), gatewayProbeStatus ? (_jsx(Badge, { tone: gatewayProbeStatus.ok ? 'success' : 'danger', testId: "gateway-probe-badge", children: gatewayProbeStatus.message })) : null, _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '180px' }, children: [_jsx("label", { htmlFor: "welcome-host-input", children: "Host / IP" }), _jsx("input", { id: "welcome-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or server.example.com", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "welcome-host-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '130px' }, children: [_jsx("label", { htmlFor: "welcome-user-input", children: "Username" }), _jsx("input", { id: "welcome-user-input", type: "text", className: "ui-input", placeholder: "ubuntu / root", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "welcome-user-input" })] }), _jsxs("div", { style: { width: '100px' }, children: [_jsx("label", { htmlFor: "welcome-port-input", children: "Port" }), _jsx("input", { id: "welcome-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "welcome-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Authentication Method" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
                                                                             setAuthMethod('Password');
                                                                             setConnectErrorMsg('');
                                                                         }, testId: "welcome-auth-password-btn", children: "Username & Password" }), _jsx(Button, { variant: authMethod === 'Private Key (.pem / id_rsa)' ? 'primary' : 'default', onClick: () => {

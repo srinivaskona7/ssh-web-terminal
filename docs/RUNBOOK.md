@@ -122,8 +122,16 @@ Configure in **Cloudflare Dashboard → Compute (Workers) → Create Application
 | **Project / Worker Name** | `webssh-studio-relay` |
 | **Production Branch** | `main` |
 | **Root Directory** | `apps/relay` |
-| **Build Command** | `npm ci --include=dev && npm run build` |
+| **Build Command** | `npm run build` |
 | **Deploy Command** | `npx wrangler deploy` |
+
+`apps/relay` has no package-lock of its own, so `npm ci` from that directory either fails or
+installs without dev dependencies and later dies with `tsc: not found`. `npm run build` now
+runs `apps/relay/scripts/typecheck.mjs`, which uses the hoisted root TypeScript when present,
+the local one otherwise, and only then the pinned `typescript@5.7.2` through `npx`. If you
+prefer one install for the whole repo, set **Root Directory** to `/` with
+`npm ci --include=dev && npm run build --workspace=@webssh/relay` and
+`npx wrangler deploy --config apps/relay/wrangler.jsonc`.
 
 ### 4.2 Required Cloudflare Worker Secrets, Variables & Durable Object Bindings
 
@@ -170,10 +178,11 @@ Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `clou
 ## 5. Current Pages and Relay Connection Setup
 
 - GitHub Pages Source: **GitHub Actions**. The Pages workflow defaults to `wss://webssh-studio-relay.life-magic.workers.dev/ws`. Repository Actions variable `GATEWAY_URL` overrides it; `TRANSPORT_MODE` optionally selects `cloudflare-relay` or `go-gateway` (needed for custom relay domains). Worker endpoints select relay mode automatically for new users. Existing explicit browser preferences are preserved.
-- Cloudflare Git build root: `apps/relay`; build: `npm ci --include=dev && npm run build`; deploy: `npx wrangler deploy`. Wrangler is pinned in the root lockfile. `SKIP_DEPENDENCY_INSTALL=1` is supported because the build command installs dependencies explicitly.
+- Cloudflare Git build root: `apps/relay`; build: `npm run build` (resolves TypeScript from the hoisted root, then locally, then the pinned `npx` fallback); deploy: `npx wrangler deploy`. Wrangler is pinned in the root lockfile.
 - Runtime secrets must be entered directly in Cloudflare: `SESSION_SIGNING_SECRET` and `AUTH_USERS_JSON`. These are separate from the EC2 SSH credentials. No secret belongs in Pages variables or source control.
 - `USER_QUOTA_DO` and migration `v1` are defined in `apps/relay/wrangler.jsonc`. Missing binding blocks SSH connections. `/healthz` lists missing configuration names without exposing secret values.
-- Target for this setup: host `13.238.115.195`, user `ec2-user`, port `22`. Select Cloudflare relay mode, use **Relay Login** first, then supply the EC2 key directly in the browser's SSH form. Successful relay login alone does not establish SSH authentication.
+- Target for this setup: host `13.238.115.195`, user `ec2-user`, port `22`. Sign in to WebSSH Studio on the welcome screen (username/password → short-lived relay session acquired automatically), then supply the EC2 key directly in the browser's SSH form. Signing in acquires a relay session only; it does not authenticate the EC2 host.
+- The relay endpoint, transport selector and gateway token live under **Administrator settings** on the welcome screen. Users see only the sign-in form; the endpoint comes from `GATEWAY_URL`/the Pages default, and the session token is kept in `sessionStorage`, never in a URL or log.
 - Verify HTTPS `/healthz`, CORS from `https://srinivaskona7.github.io`, rejected foreign Origins and unauthenticated requests, relay login, host-key verification, then PTY and SFTP on the EC2 target. A successful static deployment or health check alone does not prove an authenticated SSH connection.
 
 ### Verification limits for relay file tools

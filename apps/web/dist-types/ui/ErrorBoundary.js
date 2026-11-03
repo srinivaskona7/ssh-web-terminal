@@ -19,7 +19,9 @@ export function sanitizeDiagnosticMessage(raw) {
         .replace(/(?:password|passphrase|secret|token|authorization)\s*[:=]\s*\S+/gi, '[REDACTED_CREDENTIAL]');
 }
 export function buildSafeDiagnosticReport(reason) {
-    const buildVersion = (typeof window !== 'undefined' && window.__WEBSSH_BUILD_VERSION__) || '1.0.0';
+    const buildVersion = (typeof window !== 'undefined' &&
+        (window.__WEBSSH_BUILD__ || window.__WEBSSH_BUILD_VERSION__)) ||
+        '1.0.0';
     let localStorageAvailable = false;
     try {
         localStorageAvailable = typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function';
