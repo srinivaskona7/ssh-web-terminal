@@ -5,7 +5,7 @@ import { KeyVault, KnownHostsStore, base64ToBytes, bytesToBase64, validateAndIns
 import { HostRegistry } from '../hosts';
 import { PreferencesStore } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
-import { BrowserSshRelaySessionClient, LiveGatewaySessionClient, deriveGatewayHealthUrl, loginToCloudflareRelay, resolveGatewayWsUrl, resolveTransportBackendMode, validateGatewayWsUrl } from '../transport';
+import { BrowserSshRelaySessionClient, LiveGatewaySessionClient, deriveGatewayHealthUrl, loginToCloudflareRelay, requestConnectionTicket, resolveGatewayWsUrl, resolveTransportBackendMode, validateGatewayWsUrl } from '../transport';
 import { AsciicastRecorder, CommandPaletteRegistry, KeybindingRegistry, SPECIAL_KEYS_ROW, SnippetLibrary, interpolateSnippet, parseAsciicastV2, scrubAsciicastOutput } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
 import { computeGhostAutocomplete, computeSideBySideDiff, detectDangerousCommand, formatChmodOctal, redactSecretsInText } from './advanced-features';
@@ -13,16 +13,104 @@ import { repairApplicationAssetCaches } from './ErrorBoundary';
 import { ActivityPanel, DeploymentsPanel, AutomationsPanel, ContainersPanel, KubernetesPanel, OverviewPanel, SoftwarePanel, runDiscovery } from './ServerModules';
 import { createRemoteSession } from '../session/adapters';
 import { CapabilityMatrixPanel } from './CapabilityMatrixPanel';
+/**
+ * The site key is public. It comes from the build environment, with a runtime
+ * global as a fallback (the same pattern as the gateway URL override).
+ */
+function resolveTurnstileSiteKey() {
+    try {
+        const env = import.meta.env;
+        const configured = env?.VITE_TURNSTILE_SITE_KEY ??
+            globalThis
+                .__WEBSSH_TURNSTILE_SITE_KEY__ ??
+            '';
+        return configured.trim();
+    }
+    catch {
+        return '';
+    }
+}
+function getTurnstileApi() {
+    return globalThis.turnstile;
+}
+function TurnstileWidget({ siteKey, resetNonce, onToken }) {
+    const ref = useRef(null);
+    const widgetIdRef = useRef(null);
+    // Callbacks are read through a ref so a parent re-render never re-renders
+    // the widget or leaves the challenge bound to a stale callback.
+    const onTokenRef = useRef(onToken);
+    onTokenRef.current = onToken;
+    useEffect(() => {
+        let cancelled = false;
+        const renderWidget = () => {
+            const turnstile = getTurnstileApi();
+            if (cancelled || !ref.current || !turnstile || widgetIdRef.current !== null)
+                return;
+            widgetIdRef.current = turnstile.render(ref.current, {
+                sitekey: siteKey,
+                callback: (token) => onTokenRef.current(token),
+                'expired-callback': () => onTokenRef.current(''),
+                'error-callback': () => onTokenRef.current('')
+            });
+        };
+        // The API may already be present from an earlier mount or another widget;
+        // render now rather than waiting for a load event that will not fire again.
+        if (getTurnstileApi()) {
+            renderWidget();
+            return;
+        }
+        const existing = document.querySelector('script[data-webssh-turnstile]');
+        if (existing) {
+            // The tag is present but the API has not loaded yet; wait for it rather
+            // than silently rendering nothing.
+            existing.addEventListener('load', renderWidget);
+            return () => existing.removeEventListener('load', renderWidget);
+        }
+        const script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        script.async = true;
+        script.defer = true;
+        script.dataset.websshTurnstile = '1';
+        script.addEventListener('load', renderWidget);
+        document.head.appendChild(script);
+        return () => {
+            cancelled = true;
+            script.removeEventListener('load', renderWidget);
+        };
+    }, [siteKey]);
+    // A Turnstile response is single-use, so the parent bumps this after every
+    // ticket attempt to put a fresh challenge in front of the user.
+    useEffect(() => {
+        if (resetNonce === 0)
+            return;
+        const turnstile = getTurnstileApi();
+        if (turnstile && widgetIdRef.current !== null)
+            turnstile.reset(widgetIdRef.current);
+    }, [resetNonce]);
+    useEffect(() => () => {
+        const turnstile = getTurnstileApi();
+        if (turnstile && widgetIdRef.current !== null) {
+            turnstile.remove(widgetIdRef.current);
+        }
+        widgetIdRef.current = null;
+    }, []);
+    return _jsx("div", { ref: ref, "data-testid": "turnstile-widget" });
+}
 export function App() {
     const rootRef = useRef(null);
     const terminalViewRef = useRef(null);
     const xtermHostRef = useRef(null);
     const xtermAdapterRef = useRef(null);
+    const turnstileSiteKey = resolveTurnstileSiteKey();
     const prefsStore = useMemo(() => new PreferencesStore(), []);
     const hostRegistry = useMemo(() => new HostRegistry(), []);
     const vault = useMemo(() => new KeyVault(), []);
     const knownHosts = useMemo(() => new KnownHostsStore(), []);
     const liveSessionRef = useRef(null);
+    // A guest ticket is bound to one host/port and expires quickly, so it is
+    // cached here instead of in the administrator token state.
+    const guestTicketRef = useRef(null);
+    const connectInFlightRef = useRef(false);
     const hostKeyDecisionResolverRef = useRef(null);
     const storageGuard = useMemo(() => new StorageGuard(), []);
     const snippetLib = useMemo(() => new SnippetLibrary([
@@ -146,6 +234,8 @@ export function App() {
     const [gatewayProbeStatus, setGatewayProbeStatus] = useState(null);
     const [relayLoginUser, setRelayLoginUser] = useState('');
     const [relayLoginPass, setRelayLoginPass] = useState('');
+    const [turnstileToken, setTurnstileToken] = useState('');
+    const [turnstileResetNonce, setTurnstileResetNonce] = useState(0);
     const [relaySessionUser, setRelaySessionUser] = useState(() => {
         try {
             const raw = globalThis.sessionStorage?.getItem('webssh.relay.session');
@@ -675,10 +765,6 @@ export function App() {
             setConnectErrorMsg('Permissions 0644 for private key are too open! OpenSSH requires chmod 0400 (-r--------) or 0600.');
             return;
         }
-        if (transportMode === 'cloudflare-relay' && !gatewayAuthToken.trim()) {
-            setConnectErrorMsg('Sign in to WebSSH Studio first — the relay rejects connections without a session.');
-            return;
-        }
         const gwValidation = validateGatewayWsUrl(gatewayUrl);
         if (!gwValidation.valid) {
             setConnectErrorMsg(gwValidation.error ?? 'Invalid SSH Gateway WebSocket URL.');
@@ -691,154 +777,220 @@ export function App() {
         const portNum = Number.parseInt(portVal, 10) || 22;
         const label = `${userVal}@${hostVal}`;
         const tabTitle = `Terminal 1 (${label})`;
+        if (connectInFlightRef.current)
+            return;
+        connectInFlightRef.current = true;
         void (async () => {
-            if (authMethod === 'Private Key (.pem / id_rsa)' && uploadedKeyContent.trim()) {
-                const keyCheck = await validateAndInspectPrivateKeyPem(uploadedKeyContent);
-                if (!keyCheck.valid) {
-                    setConnectErrorMsg(keyCheck.error ?? 'Invalid private key PEM format.');
-                    return;
-                }
-            }
-            liveSessionRef.current?.close();
-            const protocolAuthMethod = authMethod === 'Password'
-                ? 'password'
-                : authMethod === 'Private Key (.pem / id_rsa)'
-                    ? 'private_key'
-                    : 'remote_signer';
-            const sessionParams = {
-                transportMode,
-                gatewayUrl: gwValidation.normalizedUrl,
-                gatewayAuthToken,
-                host: hostVal,
-                port: portNum,
-                user: userVal,
-                authMethod: protocolAuthMethod,
-                password: connectPassword,
-                privateKeyPem: authMethod === 'Private Key (.pem / id_rsa)' ? uploadedKeyContent : undefined,
-                publicKey: authMethod === 'Argon2id Ed25519 Key' ? generatedPubKey : undefined,
-                keyFingerprint: generatedFp,
-                cols,
-                rows,
-                onPtyData: (_channel, data) => {
-                    try {
-                        xtermAdapterRef.current?.writeBytes(data);
-                    }
-                    catch {
-                        // ignore
-                    }
-                    const rawText = new TextDecoder().decode(data);
-                    const cleaned = rawText
-                        .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-                        .replace(/\r/g, '')
-                        .split('\n')
-                        .map((l) => l.trimEnd())
-                        .filter((l) => l.length > 0);
-                    if (cleaned.length > 0) {
-                        setTerminalLines((prev) => [...prev.slice(-200), ...cleaned]);
-                    }
-                },
-                onHostKeyPrompt: async (prompt) => {
-                    const v = knownHosts.verify(prompt.host, prompt.port, prompt.algorithm, prompt.fingerprint, prompt.publicKeyBase64);
-                    if (v.status === 'trusted') {
-                        return true;
-                    }
-                    if (v.status === 'mismatch') {
-                        setPendingHostKeyPrompt({
-                            host: prompt.host,
-                            port: prompt.port,
-                            algorithm: prompt.algorithm,
-                            fingerprint: prompt.fingerprint,
-                            publicKeyBase64: prompt.publicKeyBase64,
-                            expectedFingerprint: v.expectedFingerprint
-                        });
-                        setHostKeyModal('mismatch');
-                        return new Promise((resolve) => {
-                            hostKeyDecisionResolverRef.current = resolve;
-                        });
-                    }
-                    knownHosts.trustNewHost(prompt.host, prompt.port, prompt.algorithm, prompt.fingerprint, prompt.publicKeyBase64);
-                    return true;
-                },
-                onSignRequest: async (req) => {
-                    const allKeys = vault.listKeys();
-                    if (allKeys[0]) {
-                        const resp = await vault.signChallenge(allKeys[0].id, base64ToBytes(req.dataBase64));
-                        return bytesToBase64(resp.rawWebCryptoSignature);
-                    }
-                    return '';
-                },
-                onChannelClosed: (channel) => {
-                    setTabs((prev) => prev.map((t) => (t.channelId === channel ? { ...t, connected: false } : t)));
-                },
-                onStateChange: (st) => {
-                    if (st === 'disconnected') {
-                        setConnectionState('disconnected');
-                        setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
-                    }
-                }
-            };
-            const client = transportMode === 'cloudflare-relay'
-                ? new BrowserSshRelaySessionClient(sessionParams)
-                : new LiveGatewaySessionClient(sessionParams);
             try {
-                const meta = await client.connect();
-                liveSessionRef.current = client;
-                hostRegistry.upsert({
-                    id: `host-${hostVal}-${portVal}`,
-                    alias: hostVal,
-                    host: hostVal,
-                    port: portNum,
-                    user: userVal,
-                    folder: 'Connected',
-                    tags: [authMethod === 'Password' ? 'password' : 'key-400'],
-                    favorite: true,
-                    jumpHops: []
-                });
-                setHosts(hostRegistry.list());
-                setConnectedUser(userVal);
-                setConnectedHost(hostVal);
-                setSessionTabLabel(tabTitle);
-                setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
-                setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
-                setTabs((prev) => prev.map((t) => t.id === activeTabId
-                    ? { ...t, title: tabTitle, connected: true, channelId: meta.ptyChannel || 1 }
-                    : t));
-                setConnectionState('connected');
-                setConnectModalOpen(false);
-                setActiveScreen('workspace');
-                const workspaceSession = createRemoteSession(client, {
-                    transport: transportMode === 'cloudflare-relay' ? 'cloudflare-relay' : 'go-gateway',
-                    host: hostVal,
-                    user: userVal,
-                    port: portNum,
-                    isConnected: () => client.isConnected
-                });
-                setRemoteSession(workspaceSession);
-                setCapabilities(null);
-                setDiscoveryError(null);
-                void discoverForSession(workspaceSession);
-                const authDetail = authMethod === 'Private Key (.pem / id_rsa)'
-                    ? `Private Key ${uploadedKeyFileName || 'id_ed25519'} [chmod ${keyPermissionMode}]`
-                    : authMethod;
-                const msg = `Connected to ${label}:${portVal} (${authDetail} · ${meta.serverVersion || 'SSH-2.0'})`;
-                setTerminalLines((prev) => [...prev, msg]);
-                writeToXterm(`${String.fromCharCode(13, 10)}${msg}${String.fromCharCode(13, 10)}`);
-                if (meta.sftpReady) {
-                    void refreshSftpDirectory('~', client);
-                    void loadRemoteFileIntoEditor('README.md', client);
+                if (authMethod === 'Private Key (.pem / id_rsa)' && uploadedKeyContent.trim()) {
+                    const keyCheck = await validateAndInspectPrivateKeyPem(uploadedKeyContent);
+                    if (!keyCheck.valid) {
+                        setConnectErrorMsg(keyCheck.error ?? 'Invalid private key PEM format.');
+                        return;
+                    }
                 }
-                else {
-                    setSftpRawEntries([]);
-                    setTransferStatus('Cloudflare Worker TCP Relay active — Terminal PTY, Tabs, Split Panes & Exec are live. SFTP, Remote Editor, and Ring-Buffer Resume require Go SSH/SFTP Gateway mode.');
+                liveSessionRef.current?.close();
+                const protocolAuthMethod = authMethod === 'Password'
+                    ? 'password'
+                    : authMethod === 'Private Key (.pem / id_rsa)'
+                        ? 'private_key'
+                        : 'remote_signer';
+                // Guest flow: no account. The relay issues a short-lived ticket bound to
+                // this host/port once the Turnstile challenge has been validated. The
+                // ticket is single-use and expires, so it is reused only for the exact
+                // destination it was issued for.
+                let effectiveGatewayToken = gatewayAuthToken.trim();
+                if (transportMode === 'cloudflare-relay' && !effectiveGatewayToken) {
+                    const destinationHost = hostVal.toLowerCase();
+                    const nowSec = Math.floor(Date.now() / 1000);
+                    const cached = guestTicketRef.current;
+                    const reusable = cached !== null &&
+                        cached.host === destinationHost &&
+                        cached.port === portNum &&
+                        cached.expiresAt - nowSec > 30;
+                    if (!reusable) {
+                        const failGuest = (message) => {
+                            setGatewayProbeStatus(null);
+                            setConnectErrorMsg(message);
+                        };
+                        if (!turnstileSiteKey) {
+                            failGuest('Guest connections are not configured in this build. Open Administrator settings and sign in with an account.');
+                            return;
+                        }
+                        if (!turnstileToken) {
+                            failGuest('Complete the human check above, then press Connect.');
+                            return;
+                        }
+                        setConnectErrorMsg('');
+                        setGatewayProbeStatus({ ok: true, message: 'Requesting a connection ticket…' });
+                        try {
+                            const ticket = await requestConnectionTicket(gwValidation.normalizedUrl, {
+                                host: destinationHost,
+                                port: portNum,
+                                turnstileToken
+                            });
+                            guestTicketRef.current = {
+                                token: ticket.token,
+                                host: ticket.host,
+                                port: ticket.port,
+                                expiresAt: ticket.expiresAt
+                            };
+                            setGatewayProbeStatus({
+                                ok: true,
+                                message: `Connection ticket issued for ${ticket.host}:${ticket.port}`
+                            });
+                        }
+                        catch (err) {
+                            failGuest(err instanceof Error ? err.message : String(err));
+                            return;
+                        }
+                        finally {
+                            // A Turnstile response is single-use: whatever the outcome, the
+                            // next ticket request needs a freshly solved challenge.
+                            setTurnstileToken('');
+                            setTurnstileResetNonce((n) => n + 1);
+                        }
+                    }
+                    effectiveGatewayToken = guestTicketRef.current?.token ?? '';
+                }
+                const sessionParams = {
+                    transportMode,
+                    gatewayUrl: gwValidation.normalizedUrl,
+                    gatewayAuthToken: effectiveGatewayToken,
+                    host: hostVal,
+                    port: portNum,
+                    user: userVal,
+                    authMethod: protocolAuthMethod,
+                    password: connectPassword,
+                    privateKeyPem: authMethod === 'Private Key (.pem / id_rsa)' ? uploadedKeyContent : undefined,
+                    publicKey: authMethod === 'Argon2id Ed25519 Key' ? generatedPubKey : undefined,
+                    keyFingerprint: generatedFp,
+                    cols,
+                    rows,
+                    onPtyData: (_channel, data) => {
+                        try {
+                            xtermAdapterRef.current?.writeBytes(data);
+                        }
+                        catch {
+                            // ignore
+                        }
+                        const rawText = new TextDecoder().decode(data);
+                        const cleaned = rawText
+                            .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+                            .replace(/\r/g, '')
+                            .split('\n')
+                            .map((l) => l.trimEnd())
+                            .filter((l) => l.length > 0);
+                        if (cleaned.length > 0) {
+                            setTerminalLines((prev) => [...prev.slice(-200), ...cleaned]);
+                        }
+                    },
+                    onHostKeyPrompt: async (prompt) => {
+                        const v = knownHosts.verify(prompt.host, prompt.port, prompt.algorithm, prompt.fingerprint, prompt.publicKeyBase64);
+                        if (v.status === 'trusted') {
+                            return true;
+                        }
+                        if (v.status === 'mismatch') {
+                            setPendingHostKeyPrompt({
+                                host: prompt.host,
+                                port: prompt.port,
+                                algorithm: prompt.algorithm,
+                                fingerprint: prompt.fingerprint,
+                                publicKeyBase64: prompt.publicKeyBase64,
+                                expectedFingerprint: v.expectedFingerprint
+                            });
+                            setHostKeyModal('mismatch');
+                            return new Promise((resolve) => {
+                                hostKeyDecisionResolverRef.current = resolve;
+                            });
+                        }
+                        knownHosts.trustNewHost(prompt.host, prompt.port, prompt.algorithm, prompt.fingerprint, prompt.publicKeyBase64);
+                        return true;
+                    },
+                    onSignRequest: async (req) => {
+                        const allKeys = vault.listKeys();
+                        if (allKeys[0]) {
+                            const resp = await vault.signChallenge(allKeys[0].id, base64ToBytes(req.dataBase64));
+                            return bytesToBase64(resp.rawWebCryptoSignature);
+                        }
+                        return '';
+                    },
+                    onChannelClosed: (channel) => {
+                        setTabs((prev) => prev.map((t) => (t.channelId === channel ? { ...t, connected: false } : t)));
+                    },
+                    onStateChange: (st) => {
+                        if (st === 'disconnected') {
+                            setConnectionState('disconnected');
+                            setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
+                        }
+                    }
+                };
+                const client = transportMode === 'cloudflare-relay'
+                    ? new BrowserSshRelaySessionClient(sessionParams)
+                    : new LiveGatewaySessionClient(sessionParams);
+                try {
+                    const meta = await client.connect();
+                    liveSessionRef.current = client;
+                    hostRegistry.upsert({
+                        id: `host-${hostVal}-${portVal}`,
+                        alias: hostVal,
+                        host: hostVal,
+                        port: portNum,
+                        user: userVal,
+                        folder: 'Connected',
+                        tags: [authMethod === 'Password' ? 'password' : 'key-400'],
+                        favorite: true,
+                        jumpHops: []
+                    });
+                    setHosts(hostRegistry.list());
+                    setConnectedUser(userVal);
+                    setConnectedHost(hostVal);
+                    setSessionTabLabel(tabTitle);
+                    setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
+                    setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
+                    setTabs((prev) => prev.map((t) => t.id === activeTabId
+                        ? { ...t, title: tabTitle, connected: true, channelId: meta.ptyChannel || 1 }
+                        : t));
+                    setConnectionState('connected');
+                    setConnectModalOpen(false);
+                    setActiveScreen('workspace');
+                    const workspaceSession = createRemoteSession(client, {
+                        transport: transportMode === 'cloudflare-relay' ? 'cloudflare-relay' : 'go-gateway',
+                        host: hostVal,
+                        user: userVal,
+                        port: portNum,
+                        isConnected: () => client.isConnected
+                    });
+                    setRemoteSession(workspaceSession);
+                    setCapabilities(null);
+                    setDiscoveryError(null);
+                    void discoverForSession(workspaceSession);
+                    const authDetail = authMethod === 'Private Key (.pem / id_rsa)'
+                        ? `Private Key ${uploadedKeyFileName || 'id_ed25519'} [chmod ${keyPermissionMode}]`
+                        : authMethod;
+                    const msg = `Connected to ${label}:${portVal} (${authDetail} · ${meta.serverVersion || 'SSH-2.0'})`;
+                    setTerminalLines((prev) => [...prev, msg]);
+                    writeToXterm(`${String.fromCharCode(13, 10)}${msg}${String.fromCharCode(13, 10)}`);
+                    if (meta.sftpReady) {
+                        void refreshSftpDirectory('~', client);
+                        void loadRemoteFileIntoEditor('README.md', client);
+                    }
+                    else {
+                        setSftpRawEntries([]);
+                        setTransferStatus('Cloudflare Worker TCP Relay active — Terminal PTY, Tabs, Split Panes & Exec are live. SFTP, Remote Editor, and Ring-Buffer Resume require Go SSH/SFTP Gateway mode.');
+                    }
+                }
+                catch (err) {
+                    liveSessionRef.current = null;
+                    setConnectionState('disconnected');
+                    setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
+                    const errMsg = err instanceof Error ? err.message : String(err);
+                    setConnectErrorMsg(errMsg);
+                    setTerminalLines((prev) => [...prev, `[SSH Connection Error] ${errMsg}`]);
                 }
             }
-            catch (err) {
-                liveSessionRef.current = null;
-                setConnectionState('disconnected');
-                setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
-                const errMsg = err instanceof Error ? err.message : String(err);
-                setConnectErrorMsg(errMsg);
-                setTerminalLines((prev) => [...prev, `[SSH Connection Error] ${errMsg}`]);
+            finally {
+                connectInFlightRef.current = false;
             }
         })();
     };
@@ -1598,7 +1750,7 @@ export function App() {
                                                                 }, children: "Probe HTTP Preview" })] })] }), _jsxs("p", { children: ["Proxying remote ", _jsxs("code", { children: ["http://127.0.0.1:", webPreviewPort] }), " over SSH ", _jsx("code", { children: "direct-tcpip" }), " channel:"] }), _jsx("pre", { "data-testid": "tunnel-preview-output", children: tunnelPreviewOutput })] })] })) : null, activeScreen === 'welcome' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-welcome", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("h1", { children: "Welcome to WebSSH Studio" }), _jsxs("p", { style: { color: 'var(--color-fg-secondary)' }, children: ["Clean, minimal SSH workspace \u2014 connect with Username & Password or upload a Private Key (", _jsx("code", { children: "chmod 0400" }), ")."] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "default", testId: "welcome-open-terminal-btn", onClick: () => setActiveScreen('workspace'), children: [_jsx(Icon, { name: "terminal" }), " Open Terminal"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', testId: "welcome-open-ide-btn", onClick: () => {
                                                             setIdeMode(true);
                                                             setActiveScreen('features');
-                                                        }, children: "Open IDE" })] })] }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [transportMode === 'cloudflare-relay' ? (relaySessionUser ? (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, "data-testid": "product-signed-in", children: [_jsxs(Badge, { tone: "success", children: ["Signed in as ", relaySessionUser] }), _jsx(Button, { variant: "ghost", type: "button", testId: "product-sign-out-btn", onClick: () => handleRelaySignOut(), children: "Sign out" })] })) : (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }, "data-testid": "product-sign-in", children: [_jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-user", children: "Username" }), _jsx("input", { id: "product-sign-in-user", type: "text", autoComplete: "username", className: "ui-input", placeholder: "Your account", value: relayLoginUser, onInput: (e) => setRelayLoginUser(e.target.value), "data-testid": "product-sign-in-user" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-pass", children: "Password" }), _jsx("input", { id: "product-sign-in-pass", type: "password", autoComplete: "current-password", className: "ui-input", placeholder: "Account password", value: relayLoginPass, onInput: (e) => setRelayLoginPass(e.target.value), "data-testid": "product-sign-in-pass" })] }), _jsx(Button, { variant: "primary", type: "button", testId: "product-sign-in-submit", onClick: () => void handleRelayLogin(), children: "Sign in" }), _jsx("p", { className: "ws-mod-muted", style: { width: '100%', margin: 0 }, children: "Sign in once; the short-lived session token is acquired automatically and kept out of URLs and logs." })] }))) : null, _jsxs("details", { "data-testid": "admin-transport-settings", children: [_jsx("summary", { children: "Administrator settings" }), _jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "welcome-transport-mode-select", children: "SSH Transport Mode" }), _jsxs("select", { id: "welcome-transport-mode-select", className: "ui-input", value: transportMode, onChange: (e) => {
+                                                        }, children: "Open IDE" })] })] }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [transportMode === 'cloudflare-relay' && turnstileSiteKey ? (_jsxs("div", { "data-testid": "guest-challenge", children: [_jsx("p", { className: "ws-mod-muted", style: { margin: 0 }, children: "No account needed: complete the human check, then connect. A short-lived ticket is issued for this host and port only." }), _jsx(TurnstileWidget, { siteKey: turnstileSiteKey, resetNonce: turnstileResetNonce, onToken: setTurnstileToken })] })) : null, relaySessionUser ? (_jsxs(Badge, { tone: "success", testId: "product-signed-in", children: ["Signed in as ", relaySessionUser] })) : null, _jsxs("details", { "data-testid": "admin-transport-settings", children: [_jsx("summary", { children: "Administrator settings" }), _jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsxs("div", { "data-testid": "admin-sign-in", children: [_jsx("h4", { children: "Account sign-in (optional)" }), _jsx("p", { className: "ws-mod-muted", style: { margin: 0 }, children: "Accounts are for administrators. Guest connections use the human check and need no account." }), relaySessionUser ? (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, "data-testid": "product-signed-in-actions", children: [_jsxs(Badge, { tone: "success", children: ["Signed in as ", relaySessionUser] }), _jsx(Button, { variant: "ghost", type: "button", testId: "product-sign-out-btn", onClick: () => handleRelaySignOut(), children: "Sign out" })] })) : (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }, "data-testid": "product-sign-in", children: [_jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-user", children: "Username" }), _jsx("input", { id: "product-sign-in-user", type: "text", autoComplete: "username", className: "ui-input", placeholder: "Your account", value: relayLoginUser, onInput: (e) => setRelayLoginUser(e.target.value), "data-testid": "product-sign-in-user" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-pass", children: "Password" }), _jsx("input", { id: "product-sign-in-pass", type: "password", autoComplete: "current-password", className: "ui-input", placeholder: "Account password", value: relayLoginPass, onInput: (e) => setRelayLoginPass(e.target.value), "data-testid": "product-sign-in-pass" })] }), _jsx(Button, { variant: "default", type: "button", testId: "product-sign-in-submit", onClick: () => void handleRelayLogin(), children: "Sign in" })] }))] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "welcome-transport-mode-select", children: "SSH Transport Mode" }), _jsxs("select", { id: "welcome-transport-mode-select", className: "ui-input", value: transportMode, onChange: (e) => {
                                                                                     const mode = e.target.value;
                                                                                     setTransportMode(mode);
                                                                                     try {

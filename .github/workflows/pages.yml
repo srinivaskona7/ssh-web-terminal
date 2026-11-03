@@ -41,6 +41,7 @@ jobs:
         env:
           VITE_GATEWAY_URL: ${{ vars.GATEWAY_URL || 'wss://webssh-studio-relay.life-magic.workers.dev/ws' }}
           VITE_TRANSPORT_MODE: ${{ vars.TRANSPORT_MODE || '' }}
+          VITE_TURNSTILE_SITE_KEY: ${{ vars.VITE_TURNSTILE_SITE_KEY || '' }}
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
         run: npm run build
 

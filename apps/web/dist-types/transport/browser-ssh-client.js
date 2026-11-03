@@ -282,6 +282,44 @@ export async function loginToCloudflareRelay(relayWsUrl, username, password) {
         expiresIn: data.expiresIn ?? 900
     };
 }
+/**
+ * Exchange a Turnstile response for a short-lived connection ticket bound to
+ * one host/port. No account is involved: the ticket is the authorisation.
+ */
+export async function requestConnectionTicket(relayWsUrl, request) {
+    const raw = relayWsUrl.trim();
+    if (!raw) {
+        throw new Error('ERR_CONFIG_MISSING: The relay endpoint is not configured.');
+    }
+    const target = raw.startsWith('ws://')
+        ? `http://${raw.slice('ws://'.length)}`
+        : raw.startsWith('wss://')
+            ? `https://${raw.slice('wss://'.length)}`
+            : raw;
+    const u = new URL(target);
+    u.pathname = '/auth/ticket';
+    u.search = '';
+    const res = await fetch(u.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            turnstileToken: request.turnstileToken,
+            host: request.host.trim().toLowerCase(),
+            port: request.port
+        })
+    });
+    const data = (await res.json().catch(() => ({})));
+    if (!res.ok || !data.ok || !data.token) {
+        throw new Error(`${data.code ?? 'ERR_TURNSTILE_FAILED'}: ${data.error ?? `Connection ticket request failed with HTTP ${res.status}`}`);
+    }
+    return {
+        token: data.token,
+        host: data.destination?.host ?? request.host.trim().toLowerCase(),
+        port: data.destination?.port ?? request.port,
+        expiresAt: data.expiresAt ?? Math.floor(Date.now() / 1000) + 300,
+        expiresIn: data.expiresIn ?? 300
+    };
+}
 export const RELAY_RING_BUFFER_MAX_BYTES = 4 * 1024 * 1024; // 4 MiB session replay ring buffer
 export class BrowserSshRelaySessionClient {
     params;

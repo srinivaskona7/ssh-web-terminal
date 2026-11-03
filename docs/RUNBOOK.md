@@ -139,7 +139,8 @@ In **Cloudflare Dashboard → Workers & Pages → `webssh-studio-relay` → Sett
 
 1. **Secrets (Encrypted — NEVER commit to Git or embed in GitHub Pages)**:
    - `SESSION_SIGNING_SECRET`: A strong 32-byte random secret (`openssl rand -hex 32`) used to sign and verify short-lived (`15m`) HS256 user session JWTs (`iss`, `aud`, `sub`, `iat`, `exp`, `jti`).
-   - `AUTH_USERS_JSON`: JSON map of authorized relay users and passphrases for `POST /auth/session` (e.g. `{"alice":"your-strong-passphrase"}`).
+   - `AUTH_USERS_JSON`: JSON map of authorized relay users and passphrases for the optional administrator `POST /auth/session` flow (e.g. `{"alice":"your-strong-passphrase"}`). Guest connections do not use it.
+   - `TURNSTILE_SECRET_KEY`: Cloudflare Turnstile **secret** key. Required for guest mode; without it `POST /auth/ticket` returns `503 ERR_GUEST_DISABLED` and only account sign-in works. Never put this in Pages or Git.
    - `RELAY_AUTH_TOKEN` *(optional admin/CI test secret)*: Only active when `ENABLE_ADMIN_SHARED_TOKEN="1"` is explicitly set.
 2. **Environment Variables (`apps/relay/wrangler.jsonc`)**:
    - `DESTINATION_MODE`: `"public"` (permits validated globally routable IPv4/IPv6 SSH targets on `ALLOWED_SSH_PORTS` while rejecting all private, loopback, link-local, metadata, CGNAT, multicast, reserved, IPv4-mapped IPv6, alternative encodings, and DNS rebinding answers; set to `"allowlist"` to restrict strictly to `ALLOWED_SSH_TARGETS`).
@@ -147,7 +148,10 @@ In **Cloudflare Dashboard → Workers & Pages → `webssh-studio-relay` → Sett
    - `ALLOWED_SSH_PORTS`: `22,2222`
    - `ALLOWED_SSH_TARGETS`: `""` *(optional in `public` mode; required in `allowlist` mode — never `*`)*
    - `MAX_CONCURRENT_SESSIONS_PER_USER`: `5` *(centrally enforced across all Worker isolates via the `USER_QUOTA_DO` Durable Object)*
-   - `MAX_CONNECTION_ATTEMPTS_PER_MIN`: `20` *(centrally enforced per-user rate limit via `USER_QUOTA_DO`)*
+   - `MAX_CONNECTION_ATTEMPTS_PER_MIN`: `20` *(centrally enforced per-agent rate limit via `USER_QUOTA_DO`; guests are keyed by `guest:<CF-Connecting-IP>`, so the edge client IP is the quota identity)*
+   - `MAX_TICKET_ATTEMPTS_PER_MIN`: `10` *(per-IP cap on `POST /auth/ticket`; each accepted call costs one outbound siteverify request, so this is checked before Turnstile)*
+   - `GUEST_TICKET_TTL_SECONDS`: `300` *(shortest useful lifetime for a guest ticket; it is single-destination and expires on its own)*
+   - `TURNSTILE_VERIFY_URL`: *(optional override, default `https://challenges.cloudflare.com/turnstile/v0/siteverify`)*
 
 ### 4.3 EC2 Firewall Requirements & Outbound IP Architecture
 
@@ -179,10 +183,18 @@ Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `clou
 
 - GitHub Pages Source: **GitHub Actions**. The Pages workflow defaults to `wss://webssh-studio-relay.life-magic.workers.dev/ws`. Repository Actions variable `GATEWAY_URL` overrides it; `TRANSPORT_MODE` optionally selects `cloudflare-relay` or `go-gateway` (needed for custom relay domains). Worker endpoints select relay mode automatically for new users. Existing explicit browser preferences are preserved.
 - Cloudflare Git build root: `apps/relay`; build: `npm run build` (resolves TypeScript from the hoisted root, then locally, then the pinned `npx` fallback); deploy: `npx wrangler deploy`. Wrangler is pinned in the root lockfile.
-- Runtime secrets must be entered directly in Cloudflare: `SESSION_SIGNING_SECRET` and `AUTH_USERS_JSON`. These are separate from the EC2 SSH credentials. No secret belongs in Pages variables or source control.
+- Runtime secrets must be entered directly in Cloudflare: `SESSION_SIGNING_SECRET`, `AUTH_USERS_JSON` and `TURNSTILE_SECRET_KEY`. These are separate from the EC2 SSH credentials. No secret belongs in Pages variables or source control.
+
+### Guest mode setup (Cloudflare Turnstile)
+
+1. Cloudflare Dashboard -> Turnstile -> **Add widget**, hostname `srinivaskona7.github.io`. Copy the **site key** (public) and **secret key**.
+2. Worker `webssh-studio-relay` -> Settings -> Variables and Secrets: add `TURNSTILE_SECRET_KEY` as an encrypted secret. Keep `SESSION_SIGNING_SECRET` and the `USER_QUOTA_DO` binding as they are.
+3. GitHub repository -> Settings -> Secrets and variables -> Actions -> **Variables**: add `VITE_TURNSTILE_SITE_KEY` with the public site key. The Pages build bakes it in; it is public by design. A runtime override, `window.__WEBSSH_TURNSTILE_SITE_KEY__`, is also accepted for local or custom pages.
+4. Redeploy the Worker (user-triggered build) **and** the Pages site, otherwise the page has no site key and the relay has no secret.
+5. Check: `POST /auth/ticket` without a Turnstile token returns `401`, with a valid token returns `{ ok: true, token, destination }`; reusing that token on `/ws` for a different host or port returns `403 ERR_TICKET_SCOPE`.
 - `USER_QUOTA_DO` and migration `v1` are defined in `apps/relay/wrangler.jsonc`. Missing binding blocks SSH connections. `/healthz` lists missing configuration names without exposing secret values.
-- Target for this setup: host `13.238.115.195`, user `ec2-user`, port `22`. Sign in to WebSSH Studio on the welcome screen (username/password → short-lived relay session acquired automatically), then supply the EC2 key directly in the browser's SSH form. Signing in acquires a relay session only; it does not authenticate the EC2 host.
-- The relay endpoint, transport selector and gateway token live under **Administrator settings** on the welcome screen. Users see only the sign-in form; the endpoint comes from `GATEWAY_URL`/the Pages default, and the session token is kept in `sessionStorage`, never in a URL or log.
+- Target for this setup: host `13.238.115.195`, user `ec2-user`, port `22`. **Guest mode** (default when `VITE_TURNSTILE_SITE_KEY` is set): enter host, user and port, solve the Turnstile check, and supply the EC2 key or password in the browser's SSH form. Pressing Connect requests a short-lived ticket for exactly that host and port; no account is needed. Administrator **account mode** remains under Administrator settings and issues the same kind of relay session through `/auth/session`. Neither ticket authenticates the EC2 host.
+- The relay endpoint, transport selector, gateway token and account sign-in live under **Administrator settings** on the welcome screen. Guests see the connection form and the Turnstile check only; the endpoint comes from `GATEWAY_URL`/the Pages default, and the ticket is held in memory, never in page URLs. It reaches the relay in the `/ws` query string (the existing transport contract, same as the user JWT), so Worker request logs can contain it; that is why it is scoped to one host/port and expires within minutes. `/healthz` reports `guestMode: true|false` so a Worker with the secret missing is visible.
 - Verify HTTPS `/healthz`, CORS from `https://srinivaskona7.github.io`, rejected foreign Origins and unauthenticated requests, relay login, host-key verification, then PTY and SFTP on the EC2 target. A successful static deployment or health check alone does not prove an authenticated SSH connection.
 
 ### Verification limits for relay file tools

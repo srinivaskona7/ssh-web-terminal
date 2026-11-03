@@ -20,7 +20,9 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 |---|---|---|---|
 | Browser SSH-2.0 over the Cloudflare relay | `apps/web/src/transport/browser-ssh-client.ts`, `apps/relay/src` | Verified | `browser-ssh.test.ts`, `apps/relay/src/relay.test.ts` |
 | Go gateway WebSocket bridge | `apps/gateway`, `apps/web/src/transport/transport.ts` | Implemented | Go tests exist; needs a deployed gateway endpoint |
-| Relay user login (short-lived JWT) | `apps/relay/src/auth.ts`, `apps/relay/src/index.ts` | Verified | `relay.test.ts` |
+| Guest connections (Turnstile → short-lived ticket, no account) | `apps/relay/src/auth.ts` (`issueGuestTicket`), `apps/relay/src/index.ts` (`POST /auth/ticket`), `apps/web/src/ui/App.tsx` | Verified | `relay.test.ts`, `browser-ssh.test.ts`, `app.test.tsx`; requires `TURNSTILE_SECRET_KEY` on the Worker and `VITE_TURNSTILE_SITE_KEY` at build |
+| Guest tickets scoped to one host and port | `apps/relay/src/index.ts` (`ERR_TICKET_SCOPE`) | Verified | `relay.test.ts` |
+| Relay user login (short-lived JWT, administrator mode) | `apps/relay/src/auth.ts`, `apps/relay/src/index.ts` | Verified | `relay.test.ts` |
 | Per-user quotas and connection limits | `apps/relay/src/index.ts` (`RelayUserQuotaDO`) | Verified | `relay.test.ts` |
 | Destination validation / anti-rebinding pinning | `apps/relay/src/policy.ts` | Verified | `relay.test.ts` |
 | Host-key TOFU pinning and mismatch blocking | `apps/web/src/vault/known-hosts.ts` | Verified | `vault.test.ts`, `browser-ssh.test.ts` |
@@ -80,7 +82,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Reviewed deployment as a durable job | `apps/web/src/ui/ServerModules.tsx` (`DeploymentsPanel`) | Implemented | needs a project manifest and runtime |
 | Python detection and managed cron entries | `apps/web/src/automation/python-automation.ts` | Implemented | needs python3 and a crontab |
 
-| Product sign-in for the hosted relay (no endpoint or token in the user path) | `apps/web/src/ui/App.tsx` (`handleRelayLogin`) | Verified | `app.test.tsx`; calls `/auth/session` and stores the short-lived token in `sessionStorage` |
+| Product sign-in for the hosted relay (administrator mode, under Administrator settings) | `apps/web/src/ui/App.tsx` (`handleRelayLogin`) | Verified | `app.test.tsx`; calls `/auth/session` and stores the short-lived token in `sessionStorage` |
 
 ## Deliberately unsupported
 
@@ -94,7 +96,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 
 ## Test suite reference
 
-- Vitest: `npm test` at the repo root (currently 18 files / 112 tests).
+- Vitest: `npm test` at the repo root (currently 18 files / 114 tests).
 - Go: `npm run test:go` (gateway packages).
 - Playwright: `npm run test:e2e` (cross-browser, full-screen, accessibility).
 - Token invariant: `npm run lint:tokens`.

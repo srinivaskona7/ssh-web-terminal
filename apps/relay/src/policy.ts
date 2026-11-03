@@ -28,10 +28,17 @@ export interface RelayEnv {
   IDLE_TIMEOUT_MS?: string;
   MAX_CONCURRENT_SESSIONS_PER_USER?: string;
   MAX_CONNECTION_ATTEMPTS_PER_MIN?: string;
+  MAX_TICKET_ATTEMPTS_PER_MIN?: string;
   USER_QUOTA_DO?: DurableObjectNamespaceLike;
   ALLOW_LOOPBACK_FOR_TESTS?: string;
   ALLOW_UNAUTHENTICATED_DEV?: string;
   ALLOW_IN_MEMORY_QUOTA_FOR_TESTS?: string;
+  /** Cloudflare Turnstile secret; guest tickets cannot be issued without it. */
+  TURNSTILE_SECRET_KEY?: string;
+  /** Override for tests; defaults to the Cloudflare siteverify endpoint. */
+  TURNSTILE_VERIFY_URL?: string;
+  /** Lifetime of a guest connection ticket, in seconds. */
+  GUEST_TICKET_TTL_SECONDS?: string;
 }
 
 export interface PolicyCheckResult {
@@ -45,7 +52,10 @@ export interface PolicyCheckResult {
     | 'ERR_DESTINATION_DENIED'
     | 'ERR_INVALID_TARGET'
     | 'ERR_NON_SSH_BANNER'
-    | 'ERR_RATE_LIMITED';
+    | 'ERR_RATE_LIMITED'
+    | 'ERR_TICKET_SCOPE'
+    | 'ERR_GUEST_DISABLED'
+    | 'ERR_TURNSTILE_FAILED';
   message: string;
   resolvedIp?: string;
   originalHost?: string;
@@ -59,6 +69,7 @@ export const DEFAULT_CONNECT_TIMEOUT_MS = 8000;
 export const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 export const DEFAULT_MAX_CONCURRENT_PER_USER = 5;
 export const DEFAULT_MAX_ATTEMPTS_PER_MIN = 20;
+export const DEFAULT_MAX_TICKET_ATTEMPTS_PER_MIN = 10;
 
 export function constantTimeEqual(a: string, b: string): boolean {
   const enc = new TextEncoder();

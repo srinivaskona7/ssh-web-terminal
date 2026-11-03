@@ -8,6 +8,23 @@ export interface RelaySessionLoginResult {
     expiresIn: number;
 }
 export declare function loginToCloudflareRelay(relayWsUrl: string, username: string, password: string): Promise<RelaySessionLoginResult>;
+export interface GuestTicketRequest {
+    host: string;
+    port: number;
+    turnstileToken: string;
+}
+export interface GuestTicketResult {
+    token: string;
+    host: string;
+    port: number;
+    expiresAt: number;
+    expiresIn: number;
+}
+/**
+ * Exchange a Turnstile response for a short-lived connection ticket bound to
+ * one host/port. No account is involved: the ticket is the authorisation.
+ */
+export declare function requestConnectionTicket(relayWsUrl: string, request: GuestTicketRequest): Promise<GuestTicketResult>;
 export declare const RELAY_RING_BUFFER_MAX_BYTES: number;
 export declare class BrowserSshRelaySessionClient {
     private readonly params;
@@ -39,7 +56,6 @@ export declare class BrowserSshRelaySessionClient {
     private nextLocalChannel;
     private channels;
     private pendingChannelOpen;
-    private pendingChannelRequests;
     private opCounter;
     private ptySeq;
     private ringBuffer;
@@ -61,9 +77,6 @@ export declare class BrowserSshRelaySessionClient {
     private handlePacket;
     private sendUserauthRequest;
     private openRawSessionChannel;
-<<<<<<< HEAD
-    private requestChannelAcknowledgement;
-=======
     /**
      * Send a channel request and wait for the server's CHANNEL_SUCCESS /
      * CHANNEL_FAILURE. Terminal readiness must never be reported before this
@@ -74,7 +87,6 @@ export declare class BrowserSshRelaySessionClient {
     /** Wait until the peer's flow-control window admits `size` bytes. */
     private waitForWindow;
     private sendChannelData;
->>>>>>> 257250a (feat(web): add workspace modules, live server control and honest capability matrix)
     private openInteractivePtyChannel;
     /**
      * Open the `sftp` subsystem and speak real SFTP v3 over it. Returns a

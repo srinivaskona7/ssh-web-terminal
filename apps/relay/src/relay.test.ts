@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   authenticateRelayRequest,
+  issueGuestTicket,
   issueUserSessionToken,
   verifyUserSessionToken
 } from './auth.js';
@@ -424,6 +425,223 @@ describe('Cloudflare Worker SSH Relay: Public Mode, Anti-Rebinding DNS, Session 
     } finally {
       (globalThis as any).WebSocketPair = prevPair;
     }
+  });
+
+  it('requires a Turnstile challenge before issuing a guest ticket and scopes that ticket to one host and port', async () => {
+    const nowMs = 1_760_000_100_000;
+    const origin = 'https://srinivaskona7.github.io';
+    const guestEnv: RelayEnv = {
+      ...publicEnv,
+      SESSION_SIGNING_SECRET: signingSecret,
+      TURNSTILE_SECRET_KEY: 'turnstile-test-secret',
+      TURNSTILE_VERIFY_URL: 'https://turnstile.test/siteverify',
+      GUEST_TICKET_TTL_SECONDS: '120',
+      USER_QUOTA_DO: createLocalUserQuotaNamespace()
+    };
+
+    const issue = (env: RelayEnv, body: unknown, headers: Record<string, string> = {}) =>
+      handleRelayRequest(
+        new Request('https://relay.example/auth/ticket', {
+          method: 'POST',
+          headers: {
+            Origin: origin,
+            'Content-Type': 'application/json',
+            'CF-Connecting-IP': '198.51.100.7',
+            ...headers
+          },
+          body: JSON.stringify(body)
+        }),
+        env,
+        { nowMs }
+      );
+
+    const request = { host: 'server1.customer.org', port: 2222, turnstileToken: 'good-token' };
+
+    // Guest mode stays off until the Worker holds a Turnstile secret.
+    const disabled = await issue(
+      { ...guestEnv, TURNSTILE_SECRET_KEY: '' },
+      request
+    );
+    expect(disabled.status).toBe(503);
+    expect(((await disabled.json()) as any).code).toBe('ERR_GUEST_DISABLED');
+
+    // The origin allowlist still applies to the ticket endpoint.
+    const foreign = await issue(guestEnv, request, { Origin: 'https://evil.example' });
+    expect(foreign.status).not.toBe(200);
+    expect(((await foreign.json()) as any).token).toBeUndefined();
+
+    const turnstileCalls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = String(init?.body ?? '');
+      turnstileCalls.push(body);
+      const success = body.includes('response=good-token');
+      return new Response(
+        JSON.stringify(
+          success ? { success: true } : { success: false, 'error-codes': ['invalid-input-response'] }
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }) as typeof fetch;
+
+    try {
+      // A rejected challenge issues nothing and is reported honestly.
+      const rejected = await issue(guestEnv, { ...request, turnstileToken: 'bad-token' });
+      expect(rejected.status).toBe(401);
+      expect(((await rejected.json()) as any).code).toBe('ERR_TURNSTILE_FAILED');
+
+      const missing = await issue(guestEnv, { ...request, turnstileToken: '' });
+      expect(missing.status).toBe(401);
+
+      // Malformed bodies are rejected as invalid input, never as a Worker 500.
+      const rawIssue = (bodyText: string) =>
+        handleRelayRequest(
+          new Request('https://relay.example/auth/ticket', {
+            method: 'POST',
+            headers: { Origin: origin, 'Content-Type': 'application/json' },
+            body: bodyText
+          }),
+          guestEnv,
+          { nowMs }
+        );
+      expect((await rawIssue('null')).status).toBe(400);
+      expect((await rawIssue('[]')).status).toBe(400);
+      expect(
+        (await rawIssue('{"host":5,"port":22,"turnstileToken":"good-token"}')).status
+      ).toBe(400);
+      expect(
+        (await rawIssue('{"host":"server1.customer.org","port":22,"turnstileToken":{}}')).status
+      ).toBe(401);
+
+      const issued = await issue(guestEnv, request);
+      expect(issued.status).toBe(200);
+      const body = (await issued.json()) as any;
+      expect(body.kind).toBe('guest');
+      expect(body.destination).toEqual({ host: 'server1.customer.org', port: 2222 });
+      expect(body.expiresIn).toBe(120);
+      expect(typeof body.token).toBe('string');
+
+      // The ticket carries the destination inside its signed claims.
+      const verified = await verifyUserSessionToken(body.token, guestEnv, Math.floor(nowMs / 1000));
+      expect(verified.ok).toBe(true);
+      expect(verified.claims?.kind).toBe('guest');
+      expect(verified.claims?.dst).toBe('server1.customer.org');
+      expect(verified.claims?.dpt).toBe(2222);
+      // It is not a user session: it cannot be used to reach another host.
+      expect(verified.claims?.sub).toMatch(/^guest-/);
+
+      let dnsCalled = 0;
+      const mockDns = async (host: string): Promise<string[]> => {
+        dnsCalled++;
+        return host === 'server1.customer.org' ? ['54.210.11.99'] : ['35.180.42.10'];
+      };
+
+      // Reuse against a different host fails BEFORE DNS or TCP.
+      const wrongHost = await handleRelayRequest(
+        new Request(
+          `https://relay.example/ws?host=server2.customer.org&port=2222&token=${encodeURIComponent(body.token)}`,
+          {
+            headers: {
+              Origin: origin,
+              Upgrade: 'websocket',
+              'CF-Connecting-IP': '198.51.100.7'
+            }
+          }
+        ),
+        guestEnv,
+        { dnsResolver: mockDns, nowMs }
+      );
+      expect(wrongHost.status).toBe(403);
+      expect(((await wrongHost.json()) as any).code).toBe('ERR_TICKET_SCOPE');
+
+      // Reuse against a different port on the same host fails too.
+      const wrongPort = await handleRelayRequest(
+        new Request(
+          `https://relay.example/ws?host=server1.customer.org&port=22&token=${encodeURIComponent(body.token)}`,
+          { headers: { Origin: origin, Upgrade: 'websocket' } }
+        ),
+        guestEnv,
+        { dnsResolver: mockDns, nowMs }
+      );
+      expect(wrongPort.status).toBe(403);
+      expect(((await wrongPort.json()) as any).code).toBe('ERR_TICKET_SCOPE');
+      expect(dnsCalled).toBe(0);
+
+      // The matching host and port proceed to the DNS-validated dial.
+      const prevPair = (globalThis as any).WebSocketPair;
+      (globalThis as any).WebSocketPair = class {
+        0 = new MockWebSocket();
+        1 = new MockWebSocket();
+      };
+      const dialedAddresses: Array<{ hostname: string; port: number }> = [];
+      try {
+        const ok = await handleRelayRequest(
+          new Request(
+            `https://relay.example/ws?host=server1.customer.org&port=2222&token=${encodeURIComponent(body.token)}`,
+            {
+              headers: {
+                Origin: origin,
+                Upgrade: 'websocket',
+                'CF-Connecting-IP': '198.51.100.7'
+              }
+            }
+          ),
+          guestEnv,
+          {
+            dnsResolver: mockDns,
+            nowMs,
+            connectImpl: (addr) => {
+              dialedAddresses.push(addr);
+              return {
+                readable: new ReadableStream<Uint8Array>({ start() {} }),
+                writable: new WritableStream<Uint8Array>({ write() {} }),
+                opened: Promise.resolve({}),
+                closed: Promise.resolve(),
+                close() {}
+              } as TcpSocketLike;
+            }
+          }
+        );
+        expect(ok.status).toBe(101);
+        expect(dialedAddresses).toEqual([{ hostname: '54.210.11.99', port: 2222 }]);
+      } finally {
+        (globalThis as any).WebSocketPair = prevPair;
+      }
+
+      // Every ticket costs an outbound siteverify call, so unauthenticated
+      // callers are capped per edge client IP.
+      const throttledEnv: RelayEnv = {
+        ...guestEnv,
+        MAX_TICKET_ATTEMPTS_PER_MIN: '1',
+        USER_QUOTA_DO: createLocalUserQuotaNamespace()
+      };
+      expect((await issue(throttledEnv, request)).status).toBe(200);
+      const throttled = await issue(throttledEnv, request);
+      expect(throttled.status).toBe(429);
+      expect(((await throttled.json()) as any).code).toBe('ERR_RATE_LIMITED');
+
+      // Without an edge IP the quota key would be per-ticket: refuse instead.
+      const noIp = await handleRelayRequest(
+        new Request('https://relay.example/auth/ticket', {
+          method: 'POST',
+          headers: { Origin: origin, 'Content-Type': 'application/json' },
+          body: JSON.stringify(request)
+        }),
+        guestEnv,
+        { nowMs }
+      );
+      expect(noIp.status).toBe(403);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    // The ticket helper itself refuses malformed targets.
+    await expect(
+      issueGuestTicket('not a host!', 22, guestEnv, 120, Math.floor(nowMs / 1000))
+    ).rejects.toThrow();
+    await expect(
+      issueGuestTicket('server1.customer.org', 70000, guestEnv, 120, Math.floor(nowMs / 1000))
+    ).rejects.toThrow();
   });
 
   it('bridges binary SSH-2.0 packets bidirectionally, rejects non-SSH banners, enforces frame limits, and cleans up on close', async () => {

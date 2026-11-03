@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
-import { BrowserSshRelaySessionClient } from './browser-ssh-client.js';
+import { BrowserSshRelaySessionClient, requestConnectionTicket } from './browser-ssh-client.js';
 import { bytesToBase64 } from '../vault/ssh-wire.js';
 import { FakeSftpServer } from './testing/fake-sftp-server.js';
 const subtle = (globalThis.crypto?.subtle ?? webcrypto.subtle);
@@ -585,6 +585,56 @@ describe('BrowserSshRelaySessionClient + Cloudflare Worker Relay End-to-End SSH-
                 writable: true,
                 configurable: true
             });
+        }
+    });
+});
+describe('requestConnectionTicket', () => {
+    it('posts the Turnstile token to the ticket endpoint derived from the relay URL', async () => {
+        const json = (body, status) => new Response(JSON.stringify(body), {
+            status,
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce(json({
+            ok: true,
+            token: 'guest-ticket',
+            destination: { host: 'server1.customer.org', port: 2222 },
+            expiresAt: 1_760_000_300,
+            expiresIn: 300
+        }, 200))
+            .mockResolvedValueOnce(json({ ok: false, code: 'ERR_TURNSTILE_FAILED', error: 'Complete the human check to continue.' }, 401));
+        vi.stubGlobal('fetch', fetchMock);
+        try {
+            const ticket = await requestConnectionTicket('wss://relay.example.workers.dev/ws', {
+                host: ' Server1.Customer.ORG ',
+                port: 2222,
+                turnstileToken: 'turnstile-response'
+            });
+            expect(ticket).toEqual({
+                token: 'guest-ticket',
+                host: 'server1.customer.org',
+                port: 2222,
+                expiresAt: 1_760_000_300,
+                expiresIn: 300
+            });
+            const [url, init] = fetchMock.mock.calls[0];
+            // The WebSocket endpoint is not the API endpoint: the ticket lives at /auth/ticket.
+            expect(url).toBe('https://relay.example.workers.dev/auth/ticket');
+            expect(JSON.parse(String(init.body))).toEqual({
+                turnstileToken: 'turnstile-response',
+                host: 'server1.customer.org',
+                port: 2222
+            });
+            // Relay rejections surface with their code, never as a silent success.
+            await expect(requestConnectionTicket('wss://relay.example.workers.dev/ws', {
+                host: 'server1.customer.org',
+                port: 2222,
+                turnstileToken: ''
+            })).rejects.toThrow('ERR_TURNSTILE_FAILED: Complete the human check to continue.');
+        }
+        finally {
+            vi.unstubAllGlobals();
         }
     });
 });

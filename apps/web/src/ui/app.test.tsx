@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
 import axe from 'axe-core';
 import { App } from './App';
@@ -11,6 +11,14 @@ import {
 } from './ErrorBoundary';
 
 describe('App UI Shell Integration Suite (M4-M13)', () => {
+  afterEach(() => {
+    // Transport mode, tokens and the Turnstile stub are module-level state;
+    // leaking any of them changes how the next test connects.
+    localStorage.clear();
+    sessionStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
   it('starts on clean minimal Welcome screen with zero mock data, exits Zen mode on Escape, supports simple Password & Private Key (chmod 0400) connection, and enables IDE mode on demand', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -244,38 +252,70 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.body.removeChild(container);
   });
 
-  it('keeps relay internals in administrator settings and asks for a product sign-in instead', async () => {
+  it('offers guest connections without an account and keeps relay internals in administrator settings', async () => {
     localStorage.setItem('webssh.transport.mode', 'cloudflare-relay');
+    const ticketRequests: string[] = [];
+    vi.stubGlobal('__WEBSSH_TURNSTILE_SITE_KEY__', 'test-site-key');
+    // jsdom cannot run the real challenge; the fake resolves it immediately so
+    // the test exercises the ticket request that follows.
+    vi.stubGlobal('turnstile', {
+      render: (_el: HTMLElement, opts: Record<string, unknown>) => {
+        (opts.callback as (token: string) => void)('test-turnstile-token');
+        return 1;
+      },
+      reset: () => {},
+      remove: () => {}
+    });
+    vi.stubGlobal(
+      'fetch',
+      (async (input: RequestInfo | URL) => {
+        ticketRequests.push(String(input));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            token: 'guest.ticket.token',
+            kind: 'guest',
+            destination: { host: '10.0.0.5', port: 22 },
+            expiresAt: Math.floor(Date.now() / 1000) + 300,
+            expiresIn: 300
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }) as typeof fetch
+    );
+
     const container = document.createElement('div');
     document.body.appendChild(container);
     render(<App />, container);
 
-    // Sign-in is the visible step; the endpoint, token and transport picker are not.
-    const signIn = container.querySelector('[data-testid="product-sign-in"]');
-    expect(signIn).toBeTruthy();
-    expect(signIn?.textContent).toContain('Sign in');
-    expect(container.querySelector('[data-testid="product-sign-in-user"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="product-sign-in-pass"]')).toBeTruthy();
+    // No account prompt in the user's path: the form exists only inside the
+    // collapsed administrator panel.
+    const outerSignIn = container.querySelector('[data-testid="product-sign-in"]');
 
+    // Relay internals and the optional account form live in the collapsed admin panel.
     const admin = container.querySelector('[data-testid="admin-transport-settings"]') as HTMLDetailsElement;
     expect(admin).toBeTruthy();
     expect(admin.open).toBe(false);
     expect(admin.querySelector('[data-testid="welcome-gateway-url-input"]')).toBeTruthy();
     expect(admin.querySelector('[data-testid="welcome-transport-mode-select"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="welcome-gateway-url-input"]')).toBe(admin.querySelector('[data-testid="welcome-gateway-url-input"]'));
+    expect(admin.querySelector('[data-testid="product-sign-in"]')).toBeTruthy();
+    expect(outerSignIn).toBe(admin.querySelector('[data-testid="product-sign-in"]'));
 
-    // Connecting without a session is refused locally with an actionable message.
+    // Connect acquires a guest ticket automatically instead of demanding a login.
     const host = container.querySelector('[data-testid="welcome-host-input"]') as HTMLInputElement;
     host.value = '10.0.0.5';
     host.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
     const form = container.querySelector('[data-testid="welcome-quick-connect-card"] form') as HTMLFormElement;
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 10));
-    expect(container.textContent).toContain('Sign in to WebSSH Studio first');
+    await new Promise((r) => setTimeout(r, 25));
 
+    expect(ticketRequests.some((u) => u.includes('/auth/ticket'))).toBe(true);
+    expect(container.textContent).toContain('Connection ticket issued');
+
+    // The Turnstile response is single-use, so it must not survive the attempt.
+    expect(container.textContent).toContain('Connection ticket issued');
     document.body.removeChild(container);
-    localStorage.removeItem('webssh.transport.mode');
-    sessionStorage.clear();
   });
 
   it('renders AppErrorBoundary fallback with Retry, targeted cache repair, and secret-safe diagnostics while preserving localStorage', async () => {

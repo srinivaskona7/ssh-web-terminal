@@ -28,6 +28,7 @@ import {
   LiveGatewaySessionClient,
   deriveGatewayHealthUrl,
   loginToCloudflareRelay,
+  requestConnectionTicket,
   resolveGatewayWsUrl,
   resolveTransportBackendMode,
   validateGatewayWsUrl,
@@ -110,18 +111,139 @@ export interface SessionTabItem {
   channelId?: number;
 }
 
+/**
+ * The site key is public. It comes from the build environment, with a runtime
+ * global as a fallback (the same pattern as the gateway URL override).
+ */
+function resolveTurnstileSiteKey(): string {
+  try {
+    const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+    const configured =
+      env?.VITE_TURNSTILE_SITE_KEY ??
+      (globalThis as unknown as { __WEBSSH_TURNSTILE_SITE_KEY__?: string })
+        .__WEBSSH_TURNSTILE_SITE_KEY__ ??
+      '';
+    return configured.trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Cloudflare Turnstile widget. The challenge is validated server-side by the
+ * relay; this only supplies the token. The script is the one third-party
+ * resource in the product and is loaded only when a site key is configured.
+ */
+interface TurnstileApi {
+  render: (el: HTMLElement, opts: Record<string, unknown>) => string | number;
+  reset: (widgetId: string | number) => void;
+  remove: (widgetId: string | number) => void;
+}
+
+function getTurnstileApi(): TurnstileApi | undefined {
+  return (globalThis as unknown as { turnstile?: TurnstileApi }).turnstile;
+}
+
+function TurnstileWidget({
+  siteKey,
+  resetNonce,
+  onToken
+}: {
+  siteKey: string;
+  resetNonce: number;
+  onToken: (token: string) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const widgetIdRef = useRef<string | number | null>(null);
+  // Callbacks are read through a ref so a parent re-render never re-renders
+  // the widget or leaves the challenge bound to a stale callback.
+  const onTokenRef = useRef(onToken);
+  onTokenRef.current = onToken;
+
+  useEffect(() => {
+    let cancelled = false;
+    const renderWidget = (): void => {
+      const turnstile = getTurnstileApi();
+      if (cancelled || !ref.current || !turnstile || widgetIdRef.current !== null) return;
+      widgetIdRef.current = turnstile.render(ref.current, {
+        sitekey: siteKey,
+        callback: (token: string) => onTokenRef.current(token),
+        'expired-callback': () => onTokenRef.current(''),
+        'error-callback': () => onTokenRef.current('')
+      });
+    };
+    // The API may already be present from an earlier mount or another widget;
+    // render now rather than waiting for a load event that will not fire again.
+    if (getTurnstileApi()) {
+      renderWidget();
+      return;
+    }
+    const existing = document.querySelector<HTMLScriptElement>(
+      'script[data-webssh-turnstile]'
+    );
+    if (existing) {
+      // The tag is present but the API has not loaded yet; wait for it rather
+      // than silently rendering nothing.
+      existing.addEventListener('load', renderWidget);
+      return () => existing.removeEventListener('load', renderWidget);
+    }
+    const script = document.createElement('script');
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.defer = true;
+    script.dataset.websshTurnstile = '1';
+    script.addEventListener('load', renderWidget);
+    document.head.appendChild(script);
+    return () => {
+      cancelled = true;
+      script.removeEventListener('load', renderWidget);
+    };
+  }, [siteKey]);
+
+  // A Turnstile response is single-use, so the parent bumps this after every
+  // ticket attempt to put a fresh challenge in front of the user.
+  useEffect(() => {
+    if (resetNonce === 0) return;
+    const turnstile = getTurnstileApi();
+    if (turnstile && widgetIdRef.current !== null) turnstile.reset(widgetIdRef.current);
+  }, [resetNonce]);
+
+  useEffect(
+    () => () => {
+      const turnstile = getTurnstileApi();
+      if (turnstile && widgetIdRef.current !== null) {
+        turnstile.remove(widgetIdRef.current);
+      }
+      widgetIdRef.current = null;
+    },
+    []
+  );
+
+  return <div ref={ref} data-testid="turnstile-widget" />;
+}
+
 export function App(): JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const terminalViewRef = useRef<HTMLDivElement | null>(null);
   const xtermHostRef = useRef<HTMLDivElement | null>(null);
   const xtermAdapterRef = useRef<XtermPaneAdapter | null>(null);
 
+  const turnstileSiteKey = resolveTurnstileSiteKey();
   const prefsStore = useMemo(() => new PreferencesStore(), []);
   const hostRegistry = useMemo(() => new HostRegistry(), []);
 
   const vault = useMemo(() => new KeyVault(), []);
   const knownHosts = useMemo(() => new KnownHostsStore(), []);
   const liveSessionRef = useRef<LiveGatewaySessionClient | BrowserSshRelaySessionClient | null>(null);
+  // A guest ticket is bound to one host/port and expires quickly, so it is
+  // cached here instead of in the administrator token state.
+  const guestTicketRef = useRef<{
+    token: string;
+    host: string;
+    port: number;
+    expiresAt: number;
+  } | null>(null);
+  const connectInFlightRef = useRef<boolean>(false);
   const hostKeyDecisionResolverRef = useRef<((trusted: boolean) => void) | null>(null);
   const storageGuard = useMemo(() => new StorageGuard(), []);
   const snippetLib = useMemo(
@@ -266,6 +388,8 @@ export function App(): JSX.Element {
   const [gatewayProbeStatus, setGatewayProbeStatus] = useState<{ ok: boolean; message: string } | null>(null);
   const [relayLoginUser, setRelayLoginUser] = useState<string>('');
   const [relayLoginPass, setRelayLoginPass] = useState<string>('');
+  const [turnstileToken, setTurnstileToken] = useState<string>('');
+  const [turnstileResetNonce, setTurnstileResetNonce] = useState<number>(0);
   const [relaySessionUser, setRelaySessionUser] = useState<string>(() => {
     try {
       const raw = globalThis.sessionStorage?.getItem('webssh.relay.session');
@@ -870,11 +994,6 @@ export function App(): JSX.Element {
       return;
     }
 
-    if (transportMode === 'cloudflare-relay' && !gatewayAuthToken.trim()) {
-      setConnectErrorMsg('Sign in to WebSSH Studio first — the relay rejects connections without a session.');
-      return;
-    }
-
     const gwValidation = validateGatewayWsUrl(gatewayUrl);
     if (!gwValidation.valid) {
       setConnectErrorMsg(gwValidation.error ?? 'Invalid SSH Gateway WebSocket URL.');
@@ -889,7 +1008,11 @@ export function App(): JSX.Element {
     const label = `${userVal}@${hostVal}`;
     const tabTitle = `Terminal 1 (${label})`;
 
+    if (connectInFlightRef.current) return;
+    connectInFlightRef.current = true;
+
     void (async () => {
+      try {
       if (authMethod === 'Private Key (.pem / id_rsa)' && uploadedKeyContent.trim()) {
         const keyCheck = await validateAndInspectPrivateKeyPem(uploadedKeyContent);
         if (!keyCheck.valid) {
@@ -906,10 +1029,70 @@ export function App(): JSX.Element {
             ? 'private_key'
             : 'remote_signer';
 
+      // Guest flow: no account. The relay issues a short-lived ticket bound to
+      // this host/port once the Turnstile challenge has been validated. The
+      // ticket is single-use and expires, so it is reused only for the exact
+      // destination it was issued for.
+      let effectiveGatewayToken = gatewayAuthToken.trim();
+      if (transportMode === 'cloudflare-relay' && !effectiveGatewayToken) {
+        const destinationHost = hostVal.toLowerCase();
+        const nowSec = Math.floor(Date.now() / 1000);
+        const cached = guestTicketRef.current;
+        const reusable =
+          cached !== null &&
+          cached.host === destinationHost &&
+          cached.port === portNum &&
+          cached.expiresAt - nowSec > 30;
+        if (!reusable) {
+          const failGuest = (message: string): void => {
+            setGatewayProbeStatus(null);
+            setConnectErrorMsg(message);
+          };
+          if (!turnstileSiteKey) {
+            failGuest(
+              'Guest connections are not configured in this build. Open Administrator settings and sign in with an account.'
+            );
+            return;
+          }
+          if (!turnstileToken) {
+            failGuest('Complete the human check above, then press Connect.');
+            return;
+          }
+          setConnectErrorMsg('');
+          setGatewayProbeStatus({ ok: true, message: 'Requesting a connection ticket…' });
+          try {
+            const ticket = await requestConnectionTicket(gwValidation.normalizedUrl, {
+              host: destinationHost,
+              port: portNum,
+              turnstileToken
+            });
+            guestTicketRef.current = {
+              token: ticket.token,
+              host: ticket.host,
+              port: ticket.port,
+              expiresAt: ticket.expiresAt
+            };
+            setGatewayProbeStatus({
+              ok: true,
+              message: `Connection ticket issued for ${ticket.host}:${ticket.port}`
+            });
+          } catch (err) {
+            failGuest(err instanceof Error ? err.message : String(err));
+            return;
+          } finally {
+            // A Turnstile response is single-use: whatever the outcome, the
+            // next ticket request needs a freshly solved challenge.
+            setTurnstileToken('');
+            setTurnstileResetNonce((n) => n + 1);
+          }
+        }
+        effectiveGatewayToken = guestTicketRef.current?.token ?? '';
+      }
+
       const sessionParams = {
         transportMode,
         gatewayUrl: gwValidation.normalizedUrl,
-        gatewayAuthToken,
+        gatewayAuthToken: effectiveGatewayToken,
         host: hostVal,
         port: portNum,
         user: userVal,
@@ -1077,6 +1260,9 @@ export function App(): JSX.Element {
         const errMsg = err instanceof Error ? err.message : String(err);
         setConnectErrorMsg(errMsg);
         setTerminalLines((prev) => [...prev, `[SSH Connection Error] ${errMsg}`]);
+      }
+      } finally {
+        connectInFlightRef.current = false;
       }
     })();
   };
@@ -2865,73 +3051,92 @@ export function App(): JSX.Element {
                   onSubmit={handleConnectSubmit}
                   style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}
                 >
-                  {transportMode === 'cloudflare-relay' ? (
-                    relaySessionUser ? (
-                      <div
-                        style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}
-                        data-testid="product-signed-in"
-                      >
-                        <Badge tone="success">Signed in as {relaySessionUser}</Badge>
-                        <Button
-                          variant="ghost"
-                          type="button"
-                          testId="product-sign-out-btn"
-                          onClick={() => handleRelaySignOut()}
-                        >
-                          Sign out
-                        </Button>
-                      </div>
-                    ) : (
-                      <div
-                        style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}
-                        data-testid="product-sign-in"
-                      >
-                        <div style={{ flex: 1, minWidth: '160px' }}>
-                          <label htmlFor="product-sign-in-user">Username</label>
-                          <input
-                            id="product-sign-in-user"
-                            type="text"
-                            autoComplete="username"
-                            className="ui-input"
-                            placeholder="Your account"
-                            value={relayLoginUser}
-                            onInput={(e) => setRelayLoginUser((e.target as HTMLInputElement).value)}
-                            data-testid="product-sign-in-user"
-                          />
-                        </div>
-                        <div style={{ flex: 1, minWidth: '160px' }}>
-                          <label htmlFor="product-sign-in-pass">Password</label>
-                          <input
-                            id="product-sign-in-pass"
-                            type="password"
-                            autoComplete="current-password"
-                            className="ui-input"
-                            placeholder="Account password"
-                            value={relayLoginPass}
-                            onInput={(e) => setRelayLoginPass((e.target as HTMLInputElement).value)}
-                            data-testid="product-sign-in-pass"
-                          />
-                        </div>
-                        <Button
-                          variant="primary"
-                          type="button"
-                          testId="product-sign-in-submit"
-                          onClick={() => void handleRelayLogin()}
-                        >
-                          Sign in
-                        </Button>
-                        <p className="ws-mod-muted" style={{ width: '100%', margin: 0 }}>
-                          Sign in once; the short-lived session token is acquired automatically and kept out of
-                          URLs and logs.
-                        </p>
-                      </div>
-                    )
+                  {transportMode === 'cloudflare-relay' && turnstileSiteKey ? (
+                    <div data-testid="guest-challenge">
+                      <p className="ws-mod-muted" style={{ margin: 0 }}>
+                        No account needed: complete the human check, then connect. A short-lived
+                        ticket is issued for this host and port only.
+                      </p>
+                      <TurnstileWidget
+                        siteKey={turnstileSiteKey}
+                        resetNonce={turnstileResetNonce}
+                        onToken={setTurnstileToken}
+                      />
+                    </div>
+                  ) : null}
+                  {relaySessionUser ? (
+                    <Badge tone="success" testId="product-signed-in">
+                      Signed in as {relaySessionUser}
+                    </Badge>
                   ) : null}
                   <details data-testid="admin-transport-settings">
                     <summary>Administrator settings</summary>
                     <div
                       style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}
                     >
+                      <div data-testid="admin-sign-in">
+                        <h4>Account sign-in (optional)</h4>
+                        <p className="ws-mod-muted" style={{ margin: 0 }}>
+                          Accounts are for administrators. Guest connections use the human check
+                          and need no account.
+                        </p>
+                        {relaySessionUser ? (
+                          <div
+                            style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}
+                            data-testid="product-signed-in-actions"
+                          >
+                            <Badge tone="success">Signed in as {relaySessionUser}</Badge>
+                            <Button
+                              variant="ghost"
+                              type="button"
+                              testId="product-sign-out-btn"
+                              onClick={() => handleRelaySignOut()}
+                            >
+                              Sign out
+                            </Button>
+                          </div>
+                        ) : (
+                          <div
+                            style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}
+                            data-testid="product-sign-in"
+                          >
+                            <div style={{ flex: 1, minWidth: '160px' }}>
+                              <label htmlFor="product-sign-in-user">Username</label>
+                              <input
+                                id="product-sign-in-user"
+                                type="text"
+                                autoComplete="username"
+                                className="ui-input"
+                                placeholder="Your account"
+                                value={relayLoginUser}
+                                onInput={(e) => setRelayLoginUser((e.target as HTMLInputElement).value)}
+                                data-testid="product-sign-in-user"
+                              />
+                            </div>
+                            <div style={{ flex: 1, minWidth: '160px' }}>
+                              <label htmlFor="product-sign-in-pass">Password</label>
+                              <input
+                                id="product-sign-in-pass"
+                                type="password"
+                                autoComplete="current-password"
+                                className="ui-input"
+                                placeholder="Account password"
+                                value={relayLoginPass}
+                                onInput={(e) => setRelayLoginPass((e.target as HTMLInputElement).value)}
+                                data-testid="product-sign-in-pass"
+                              />
+                            </div>
+                            <Button
+                              variant="default"
+                              type="button"
+                              testId="product-sign-in-submit"
+                              onClick={() => void handleRelayLogin()}
+                            >
+                              Sign in
+                            </Button>
+                          </div>
+                        )}
+                      </div>
                       <div>
                         <label htmlFor="welcome-transport-mode-select">SSH Transport Mode</label>
                         <select

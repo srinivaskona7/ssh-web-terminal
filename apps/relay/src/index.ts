@@ -1,11 +1,14 @@
 import {
+  DEFAULT_GUEST_TICKET_TTL_SECONDS,
   authenticateRelayRequest,
+  issueGuestTicket,
   issueUserSessionToken
 } from './auth.js';
 import {
   DEFAULT_CONNECT_TIMEOUT_MS,
   DEFAULT_IDLE_TIMEOUT_MS,
   DEFAULT_MAX_ATTEMPTS_PER_MIN,
+  DEFAULT_MAX_TICKET_ATTEMPTS_PER_MIN,
   DEFAULT_MAX_CONCURRENT_PER_USER,
   MAX_BUFFERED_AMOUNT_BYTES,
   MAX_WS_MESSAGE_BYTES,
@@ -97,6 +100,26 @@ export class RelayUserQuotaDO {
           activeSessions: this.activeSessions.size,
           attemptsLastMin: this.attemptTimestamps.length
         }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (url.pathname === '/rate') {
+      const maxAttempts = body.maxAttemptsPerMin ?? DEFAULT_MAX_ATTEMPTS_PER_MIN;
+      this.attemptTimestamps = this.attemptTimestamps.filter((ts) => nowMs - ts < 60_000);
+      if (this.attemptTimestamps.length >= maxAttempts) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            code: 'ERR_RATE_LIMITED',
+            message: `Connection-ticket rate limit exceeded (max ${maxAttempts} requests/minute).`
+          }),
+          { status: 429, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      this.attemptTimestamps.push(nowMs);
+      return new Response(
+        JSON.stringify({ ok: true, attemptsLastMin: this.attemptTimestamps.length }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
     }
@@ -242,6 +265,229 @@ async function handleAuthSessionIssue(
   );
 }
 
+interface TurnstileResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Validate a Turnstile response server-side. Turnstile proves a human solved a
+ * challenge; it does **not** establish identity, so the ticket it buys is
+ * short-lived and scoped to one host/port.
+ */
+async function verifyTurnstile(
+  token: string,
+  request: Request,
+  env: RelayEnv
+): Promise<TurnstileResult> {
+  const secret = (env.TURNSTILE_SECRET_KEY ?? '').trim();
+  if (!secret) {
+    return { ok: false, error: 'TURNSTILE_SECRET_KEY is not configured on the Cloudflare Worker.' };
+  }
+  const endpoint = (
+    env.TURNSTILE_VERIFY_URL ?? 'https://challenges.cloudflare.com/turnstile/v0/siteverify'
+  ).trim();
+  const form = new URLSearchParams({ secret, response: token });
+  const clientIp = request.headers.get('CF-Connecting-IP');
+  if (clientIp) form.set('remoteip', clientIp);
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString()
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      success?: boolean;
+      'error-codes'?: string[];
+    };
+    if (res.ok && data.success === true) return { ok: true };
+    const codes = data['error-codes'] ?? [];
+    return {
+      ok: false,
+      error: `Turnstile verification failed${codes.length ? ` (${codes.join(', ')})` : ''}.`
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Turnstile verification could not be reached: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    };
+  }
+}
+
+/**
+ * Every ticket costs one outbound siteverify request, so unauthenticated calls
+ * are rate-limited per edge client IP before Turnstile is contacted.
+ */
+async function enforceTicketRateLimit(
+  request: Request,
+  env: RelayEnv,
+  corsHeader: string | null,
+  nowMs: number
+): Promise<Response | null> {
+  if (!env.USER_QUOTA_DO) {
+    return jsonResponse(
+      503,
+      {
+        ok: false,
+        code: 'ERR_CONFIG_MISSING',
+        error: 'USER_QUOTA_DO is not bound; guest ticket issuance is disabled.'
+      },
+      corsHeader
+    );
+  }
+  const clientIp = (request.headers.get('CF-Connecting-IP') ?? '').trim();
+  if (!clientIp) {
+    // Without an edge IP the quota would be per-ticket, i.e. no limit at all.
+    return jsonResponse(
+      403,
+      {
+        ok: false,
+        code: 'ERR_RELAY_AUTH_FAILED',
+        error: 'Guest connections require a client IP; connect through the Cloudflare edge.'
+      },
+      corsHeader
+    );
+  }
+  const maxAttempts =
+    Number(env.MAX_TICKET_ATTEMPTS_PER_MIN ?? DEFAULT_MAX_TICKET_ATTEMPTS_PER_MIN) ||
+    DEFAULT_MAX_TICKET_ATTEMPTS_PER_MIN;
+  const stub = env.USER_QUOTA_DO.get(env.USER_QUOTA_DO.idFromName(`ticket:${clientIp}`));
+  const res = await stub.fetch('https://quota.internal/rate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ maxAttemptsPerMin: maxAttempts, nowMs })
+  });
+  if (res.ok) return null;
+  const err = (await res.json().catch(() => ({}))) as { code?: string; message?: string };
+  return jsonResponse(
+    res.status,
+    {
+      ok: false,
+      code: err.code ?? 'ERR_RATE_LIMITED',
+      error: err.message ?? 'Too many connection-ticket requests. Try again in a minute.'
+    },
+    corsHeader
+  );
+}
+
+/** Issue a guest connection ticket after a Turnstile challenge passes. */
+async function handleAuthTicketIssue(
+  request: Request,
+  env: RelayEnv,
+  corsHeader: string | null,
+  nowMs: number
+): Promise<Response> {
+  if (!(env.SESSION_SIGNING_SECRET ?? '').trim()) {
+    return jsonResponse(
+      503,
+      {
+        ok: false,
+        code: 'ERR_CONFIG_MISSING',
+        error: 'SESSION_SIGNING_SECRET is not configured on the Cloudflare Worker.'
+      },
+      corsHeader
+    );
+  }
+  if (!(env.TURNSTILE_SECRET_KEY ?? '').trim()) {
+    return jsonResponse(
+      503,
+      {
+        ok: false,
+        code: 'ERR_GUEST_DISABLED',
+        error:
+          'Guest connections are disabled: set TURNSTILE_SECRET_KEY on the Worker, or sign in with an account.'
+      },
+      corsHeader
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = await request.json();
+  } catch {
+    return jsonResponse(
+      400,
+      { ok: false, code: 'ERR_TURNSTILE_FAILED', error: 'Invalid JSON request body.' },
+      corsHeader
+    );
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return jsonResponse(
+      400,
+      { ok: false, code: 'ERR_INVALID_TARGET', error: 'A JSON object body is required.' },
+      corsHeader
+    );
+  }
+  const body = parsed as Record<string, unknown>;
+
+  const host = typeof body.host === 'string' ? body.host.trim() : '';
+  const port = Number(body.port ?? 22);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return jsonResponse(
+      400,
+      { ok: false, code: 'ERR_INVALID_TARGET', error: 'A destination host and port are required.' },
+      corsHeader
+    );
+  }
+
+  const turnstileToken =
+    typeof body.turnstileToken === 'string' ? body.turnstileToken.trim() : '';
+  if (!turnstileToken) {
+    return jsonResponse(
+      401,
+      { ok: false, code: 'ERR_TURNSTILE_FAILED', error: 'Complete the human check to continue.' },
+      corsHeader
+    );
+  }
+
+  const rateLimited = await enforceTicketRateLimit(request, env, corsHeader, nowMs);
+  if (rateLimited) return rateLimited;
+
+  const challenge = await verifyTurnstile(turnstileToken, request, env);
+  if (!challenge.ok) {
+    return jsonResponse(
+      401,
+      { ok: false, code: 'ERR_TURNSTILE_FAILED', error: challenge.error ?? 'Turnstile rejected.' },
+      corsHeader
+    );
+  }
+
+  const ttl = Number(env.GUEST_TICKET_TTL_SECONDS ?? DEFAULT_GUEST_TICKET_TTL_SECONDS);
+  try {
+    const { token, claims } = await issueGuestTicket(
+      host,
+      port,
+      env,
+      Number.isFinite(ttl) ? ttl : DEFAULT_GUEST_TICKET_TTL_SECONDS,
+      Math.floor(nowMs / 1000)
+    );
+    return jsonResponse(
+      200,
+      {
+        ok: true,
+        token,
+        kind: 'guest',
+        destination: { host: claims.dst, port: claims.dpt },
+        expiresAt: claims.exp,
+        expiresIn: claims.exp - claims.iat
+      },
+      corsHeader
+    );
+  } catch (err) {
+    return jsonResponse(
+      400,
+      {
+        ok: false,
+        code: 'ERR_INVALID_TARGET',
+        error: err instanceof Error ? err.message : String(err)
+      },
+      corsHeader
+    );
+  }
+}
+
 export async function handleRelayRequest(
   request: Request,
   env: RelayEnv,
@@ -313,6 +559,7 @@ export async function handleRelayRequest(
         authRequired: true,
         authMode: (env.SESSION_SIGNING_SECRET ?? '').trim() ? 'session-jwt' : 'admin-token',
         quotaDurableObjectBound: Boolean(env.USER_QUOTA_DO),
+        guestMode: Boolean((env.TURNSTILE_SECRET_KEY ?? '').trim()),
         targetsConfigured,
         allowedPorts: (env.ALLOWED_SSH_PORTS ?? '22,2222')
           .split(',')
@@ -332,6 +579,17 @@ export async function handleRelayRequest(
       );
     }
     return handleAuthSessionIssue(request, env, corsHeader, nowMs);
+  }
+
+  if (url.pathname === '/auth/ticket' && request.method === 'POST') {
+    if (!originCheck.ok) {
+      return jsonResponse(
+        originCheck.status,
+        { ok: false, code: originCheck.code, error: originCheck.message },
+        null
+      );
+    }
+    return handleAuthTicketIssue(request, env, corsHeader, nowMs);
   }
 
   if (url.pathname !== '/ws') {
@@ -365,7 +623,44 @@ export async function handleRelayRequest(
     }, corsHeader);
   }
 
-  const userId = authCheck.userId ?? 'anonymous';
+  // A guest ticket is bound to one destination; refuse to reuse it elsewhere.
+  const guestClaims = authCheck.claims?.kind === 'guest' ? authCheck.claims : null;
+  if (guestClaims) {
+    const requestedHost = (url.searchParams.get('host') ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/^\[|\]$/g, '');
+    const requestedPort = Number(url.searchParams.get('port') ?? '22');
+    if (guestClaims.dst !== requestedHost || guestClaims.dpt !== requestedPort) {
+      return jsonResponse(
+        403,
+        {
+          ok: false,
+          code: 'ERR_TICKET_SCOPE',
+          error: `This connection ticket is valid only for ${guestClaims.dst}:${guestClaims.dpt}.`
+        },
+        corsHeader
+      );
+    }
+  }
+
+  // Guests have no account, so their quota key is the edge client IP. Without
+  // one the key would be per-ticket, which silently disables the limit.
+  const clientIp = (request.headers.get('CF-Connecting-IP') ?? '').trim();
+  if (guestClaims && !clientIp) {
+    return jsonResponse(
+      403,
+      {
+        ok: false,
+        code: 'ERR_RELAY_AUTH_FAILED',
+        error: 'Guest connections require a client IP; connect through the Cloudflare edge.'
+      },
+      corsHeader
+    );
+  }
+  const userId = guestClaims
+    ? `guest:${clientIp}`
+    : authCheck.userId ?? 'anonymous';
 
   // 3. Centrally enforce per-user connection-attempt and concurrent-session limits via Durable Object
   const maxConcurrent =

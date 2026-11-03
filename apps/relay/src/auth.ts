@@ -7,6 +7,12 @@ export interface VerifiedSessionClaims {
   iat: number;
   exp: number;
   jti: string;
+  /** `guest` tickets are scoped to one destination and need no account. */
+  kind?: 'user' | 'guest';
+  /** Guest ticket: the only host this ticket may reach. */
+  dst?: string;
+  /** Guest ticket: the only port this ticket may reach. */
+  dpt?: number;
 }
 
 export interface AuthVerificationResult extends PolicyCheckResult {
@@ -82,6 +88,16 @@ export async function issueUserSessionToken(
     jti: randomHex(12)
   };
 
+  return {
+    token: await signSessionClaims(claims, secret),
+    claims
+  };
+}
+
+async function signSessionClaims(
+  claims: VerifiedSessionClaims,
+  secret: string
+): Promise<string> {
   const headerB64 = base64UrlEncodeString(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const payloadB64 = base64UrlEncodeString(JSON.stringify(claims));
   const signingInput = `${headerB64}.${payloadB64}`;
@@ -93,11 +109,47 @@ export async function issueUserSessionToken(
       new TextEncoder().encode(signingInput) as BufferSource
     )
   );
-  const sigB64 = base64UrlEncodeBytes(sigBytes);
-  return {
-    token: `${signingInput}.${sigB64}`,
-    claims
+  return `${signingInput}.${base64UrlEncodeBytes(sigBytes)}`;
+}
+
+export const DEFAULT_GUEST_TICKET_TTL_SECONDS = 300; // 5 minutes
+
+/**
+ * Issue a short-lived ticket for one destination. It replaces an account for
+ * the guest flow: possession proves the Turnstile challenge passed, and the
+ * `dst`/`dpt` claims stop it from being replayed against another host.
+ */
+export async function issueGuestTicket(
+  host: string,
+  port: number,
+  env: RelayEnv,
+  ttlSeconds = DEFAULT_GUEST_TICKET_TTL_SECONDS,
+  nowSec = Math.floor(Date.now() / 1000)
+): Promise<{ token: string; claims: VerifiedSessionClaims }> {
+  const secret = (env.SESSION_SIGNING_SECRET ?? '').trim();
+  if (!secret || secret.length < 16) {
+    throw new Error('ERR_CONFIG_MISSING: SESSION_SIGNING_SECRET (min 16 chars) is required to issue tickets.');
+  }
+  const cleanHost = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!cleanHost || cleanHost.length > 253 || !/^[a-z0-9._:-]+$/.test(cleanHost)) {
+    throw new Error('A valid destination host is required.');
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('A valid destination port is required.');
+  }
+  const boundedTtl = Math.max(60, Math.min(ttlSeconds, MAX_SESSION_TTL_SECONDS));
+  const claims: VerifiedSessionClaims = {
+    iss: (env.SESSION_TOKEN_ISSUER ?? DEFAULT_ISSUER).trim() || DEFAULT_ISSUER,
+    aud: (env.SESSION_TOKEN_AUDIENCE ?? DEFAULT_AUDIENCE).trim() || DEFAULT_AUDIENCE,
+    sub: `guest-${randomHex(8)}`,
+    iat: nowSec,
+    exp: nowSec + boundedTtl,
+    jti: randomHex(12),
+    kind: 'guest',
+    dst: cleanHost,
+    dpt: port
   };
+  return { token: await signSessionClaims(claims, secret), claims };
 }
 
 export async function verifyUserSessionToken(
@@ -221,6 +273,31 @@ export async function verifyUserSessionToken(
       status: 401,
       code: 'ERR_RELAY_AUTH_FAILED',
       message: 'Session token iat is in the future.'
+    };
+  }
+  if (claims.kind === 'guest') {
+    if (typeof claims.dst !== 'string' || !claims.dst.trim()) {
+      return {
+        ok: false,
+        status: 401,
+        code: 'ERR_RELAY_AUTH_FAILED',
+        message: 'Guest ticket is missing its destination scope.'
+      };
+    }
+    if (typeof claims.dpt !== 'number' || !Number.isInteger(claims.dpt)) {
+      return {
+        ok: false,
+        status: 401,
+        code: 'ERR_RELAY_AUTH_FAILED',
+        message: 'Guest ticket is missing its destination port.'
+      };
+    }
+  } else if (claims.kind !== undefined && claims.kind !== 'user') {
+    return {
+      ok: false,
+      status: 401,
+      code: 'ERR_RELAY_AUTH_FAILED',
+      message: `Unsupported ticket kind "${String(claims.kind)}".`
     };
   }
   if (claims.exp - claims.iat > MAX_SESSION_TTL_SECONDS) {
