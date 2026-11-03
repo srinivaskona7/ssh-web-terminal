@@ -298,9 +298,17 @@ async function verifyTurnstile(
     });
     const data = (await res.json().catch(() => ({}))) as {
       success?: boolean;
+      hostname?: string;
+      action?: string;
       'error-codes'?: string[];
     };
-    if (res.ok && data.success === true) return { ok: true };
+    if (res.ok && data.success === true) {
+      const expectedHostname = new URL(request.headers.get('Origin') ?? '').hostname;
+      if (data.hostname !== expectedHostname || data.action !== 'ssh_connect') {
+        return { ok: false, error: 'Turnstile verification did not match this site and action.' };
+      }
+      return { ok: true };
+    }
     const codes = data['error-codes'] ?? [];
     return {
       ok: false,
