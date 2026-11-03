@@ -422,7 +422,9 @@ export async function verifyJob(
   const updated: JobRecord = {
     ...job,
     verification: { ran: true, ok, detail },
-    state: ok ? 'succeeded' : 'verification_failed',
+    // Verification is evidence about an install, never its outcome: a passing
+    // check must not turn a failed (or still-running) install into `succeeded`.
+    state: ok ? job.state : 'verification_failed',
     updatedAt: Date.now()
   };
   await jobStore.save(updated);

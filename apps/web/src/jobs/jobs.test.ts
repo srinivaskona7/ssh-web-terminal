@@ -18,6 +18,7 @@ import { buildRecipeScript as buildRecipeJobScript, cancelAndConfirm, parseJobMa
 import { createJobId, isValidJobId, jobDirectory, type JobRecord } from './types.js';
 import type { Recipe } from '../recipes/types.js';
 import type { JobSession } from './remote-job-runner.js';
+import type { RemoteSession } from '../session/remote-session.js';
 
 function jobRecord(id: string): JobRecord {
   return {
@@ -113,7 +114,8 @@ describe('durable job model', () => {
     const verified = await verifyJob(jobRecord('job-verify'), verifyRecipe(), session);
     expect(executed).toHaveLength(1);
     expect(verified.verification).toMatchObject({ ran: true, ok: true });
-    expect(verified.state).toBe('succeeded');
+    // Verification records evidence; it never rewrites the install outcome.
+    expect(verified.state).toBe('running');
   });
 
   it('marks verification failed when a verify step exits non-zero', async () => {
@@ -124,6 +126,27 @@ describe('durable job model', () => {
     const verified = await verifyJob(jobRecord('job-verify-bad'), verifyRecipe(), session);
     expect(verified.verification).toMatchObject({ ran: true, ok: false });
     expect(verified.state).toBe('verification_failed');
+  });
+
+  it('detects a project whose last manifest check is absent', async () => {
+    const commands: string[] = [];
+    const session: RemoteSession = {
+      transport: 'cloudflare-relay',
+      host: 'example.test',
+      user: 'ops',
+      port: 22,
+      isConnected: () => true,
+      exec: async (command) => {
+        commands.push(command);
+        return { stdout: 'package.json\n', stderr: '', exitCode: 0 };
+      }
+    };
+
+    const project = await detectProject(session, '~/app');
+    expect(project.type).toBe('node');
+    // The group must end successfully even though nginx.conf is missing.
+    expect(commands[0]).toContain('true; }');
+    expect(commands[0]).toContain(`"$HOME"/'app'`);
   });
 
   it('parses poll output into running/exited states', () => {

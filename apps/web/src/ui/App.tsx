@@ -2189,30 +2189,6 @@ export function App(): JSX.Element {
         </div>
       ) : null}
 
-      {connectionState !== 'connected' && connectionState !== 'disconnected' ? (
-        <div className="webssh-banner" role="status" data-testid="reconnect-banner">
-          <span>
-            {connectionState === 'reconnecting' && 'Reconnecting…'}
-            {connectionState === 'offline' && 'Offline — queuing input locally (64 KiB cap)'}
-            {connectionState === 'resumed' && 'Session resumed from gateway ring buffer'}
-          </span>
-          {pendingInputBytes > 0 ? (
-            <Badge tone="warning" testId="pending-input-badge">
-              Pending input: {pendingInputBytes} B
-            </Badge>
-          ) : null}
-          <Button
-            variant="ghost"
-            onClick={() => {
-              setConnectionState('connected');
-              setPendingInputBytes(0);
-            }}
-          >
-            Dismiss
-          </Button>
-        </div>
-      ) : null}
-
       <div
         className={`webssh-workspace-body ${
           layoutPreset === 'sidebar-right' ? 'webssh-workspace-body--right' : ''

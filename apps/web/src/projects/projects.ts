@@ -69,8 +69,11 @@ export async function detectProject(
     throw new Error('Project directory must be an absolute path or start with ~/');
   }
   const checks = MANIFESTS.map((file) => `[ -e ${posixQuote(file)} ] && echo ${posixQuote(file)}`).join('; ');
+  // `true` at the end keeps the group successful when the last manifest is
+  // absent: a `{ ...; }` group returns its final command's status, so without
+  // it every project lacking nginx.conf would look unreadable.
   const result = await session.exec(
-    `cd ${shellDirectory(dir)} 2>/dev/null && { ${checks}; } || exit 1`,
+    `cd ${shellDirectory(dir)} 2>/dev/null && { ${checks}; true; } || exit 1`,
     { timeoutMs: 20_000 }
   );
   if (result.exitCode !== 0) {

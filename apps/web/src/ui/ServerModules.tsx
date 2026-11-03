@@ -33,7 +33,7 @@ import {
   type CommandJobStep
 } from '../jobs/job-manager.js';
 import type { JobSession } from '../jobs/remote-job-runner.js';
-import { isActiveJobState, isValidJobId, type JobRecord, type JobState } from '../jobs/types.js';
+import { isActiveJobState, isTerminalJobState, isValidJobId, type JobRecord, type JobState } from '../jobs/types.js';
 import { DockerClient, type ContainerSummary } from '../containers/docker-client.js';
 import { KubernetesClient, type PodSummary } from '../kubernetes/kubectl-client.js';
 import { PythonAutomation, type CronEntry, type PythonEnvironment } from '../automation/python-automation.js';
@@ -785,6 +785,9 @@ function RecipeDetail({
     setPlan(null);
     setMessage(null);
     setError(null);
+    // The previous job belongs to the previous recipe; verifying it with this
+    // recipe's steps would record the wrong outcome.
+    setLastJob(null);
   }, [recipe.id]);
 
   const evaluation = evaluateRecipe(recipe, caps);
@@ -974,7 +977,7 @@ function RecipeDetail({
         >
           {busy ? 'Starting…' : 'Install'}
         </Button>
-        {lastJob ? (
+        {lastJob && isTerminalJobState(lastJob.state) ? (
           <Button
             onClick={() => void runVerification()}
             disabled={busy || !lastJob || session.execStream === undefined}

@@ -15,3 +15,9 @@
 | **Cross-Site WebSocket Hijacking (CSWSH)** | `internal/auth` enforces strict `Origin` allowlisting (`ALLOWED_ORIGINS`) and OIDC token validation before upgrading `/ws`. | `apps/gateway/internal/auth/auth_test.go` |
 | **Memory Exhaustion (Browser or Gateway DoS)** | Protocol enforces a 4 MiB max frame size, per-channel credit-based flow control, a 64 KiB client pending-input cap, a 4 MiB gateway ring buffer, and a browser `StorageGuard` (32 MiB default in-flight buffer, 256 MiB local storage cap). | `packages/protocol/src/protocol.test.ts`, `apps/web/src/files/files.test.ts` |
 | **Sensitive Data Leakage in Logs** | `internal/audit` emits structured JSON events containing only metadata (`timestamp`, `event`, `user_id`, `session_id`, `target_host`, `target_port`, `bytes_rx`, `bytes_tx`) and redacts forbidden keys (`password`, `privateKey`, `passphrase`, `payload`, `token`). | `apps/gateway/internal/audit/audit_test.go` |
+
+## 3. Accepted Risks & Constraints
+
+| Risk | Status | Constraint |
+|---|---|---|
+| **Recipe values reach `sh -c` argv** | Latent — no catalog recipe sets `sensitive: true` today | Job scripts are base64-encoded and passed as a single `sh -c` argument (`apps/web/src/jobs/remote-job-runner.ts`), so anyone able to read `ps` on the target can see the decoded command. `recipes/engine.ts` redacts sensitive values for display only. **Before any field is marked `sensitive: true`, write the job script through SFTP (mode 0700) instead of passing it in argv**, and keep the value out of `variables` in job history. |
