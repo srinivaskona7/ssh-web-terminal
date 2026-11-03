@@ -241,6 +241,46 @@ async function parsePemPrivateKeyForSshAuth(pemText) {
         }
     };
 }
+export async function loginToCloudflareRelay(relayWsUrl, username, password) {
+    const raw = relayWsUrl.trim();
+    if (!raw) {
+        throw new Error('ERR_CONFIG_MISSING: Enter the Cloudflare Worker Relay URL before signing in.');
+    }
+    let target = raw;
+    if (target.startsWith('ws://')) {
+        target = `http://${target.slice('ws://'.length)}`;
+    }
+    else if (target.startsWith('wss://')) {
+        target = `https://${target.slice('wss://'.length)}`;
+    }
+    const u = new URL(target);
+    u.pathname = u.pathname.replace(/\/ws\/?$/, '/auth/session');
+    if (!u.pathname.endsWith('/auth/session')) {
+        u.pathname = '/auth/session';
+    }
+    u.search = '';
+    const res = await fetch(u.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username.trim(), password })
+    });
+    const data = (await res.json().catch(() => ({})));
+    if (!res.ok || !data.ok || !data.token) {
+        throw new Error(`${data.code ?? 'ERR_RELAY_AUTH_FAILED'}: ${data.error ?? `Relay login failed with HTTP ${res.status}`}`);
+    }
+    try {
+        globalThis.sessionStorage?.setItem('webssh.gateway.authToken', data.token);
+    }
+    catch {
+        // ignore storage errors
+    }
+    return {
+        token: data.token,
+        userId: data.userId ?? username.trim(),
+        expiresAt: data.expiresAt ?? Math.floor(Date.now() / 1000) + 900,
+        expiresIn: data.expiresIn ?? 900
+    };
+}
 export const RELAY_RING_BUFFER_MAX_BYTES = 4 * 1024 * 1024; // 4 MiB session replay ring buffer
 export class BrowserSshRelaySessionClient {
     params;
@@ -402,6 +442,10 @@ export class BrowserSshRelaySessionClient {
             if (res.status === 403) {
                 const data = (await res.json().catch(() => ({})));
                 return `${data.code ?? 'ERR_DESTINATION_DENIED'}: ${data.error ?? 'Target host/port or browser Origin is denied by Cloudflare Worker policy.'}`;
+            }
+            if (res.status === 429) {
+                const data = (await res.json().catch(() => ({})));
+                return `${data.code ?? 'ERR_RATE_LIMITED'}: ${data.error ?? 'Per-user connection or rate limit exceeded on Cloudflare Worker Relay.'}`;
             }
             if (res.status === 503 || res.status === 502) {
                 const data = (await res.json().catch(() => ({})));

@@ -5,7 +5,7 @@ import { KeyVault, KnownHostsStore, base64ToBytes, bytesToBase64, validateAndIns
 import { HostRegistry } from '../hosts';
 import { PreferencesStore } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
-import { BrowserSshRelaySessionClient, LiveGatewaySessionClient, deriveGatewayHealthUrl, resolveGatewayWsUrl, validateGatewayWsUrl } from '../transport';
+import { BrowserSshRelaySessionClient, LiveGatewaySessionClient, deriveGatewayHealthUrl, loginToCloudflareRelay, resolveGatewayWsUrl, validateGatewayWsUrl } from '../transport';
 import { AsciicastRecorder, CommandPaletteRegistry, KeybindingRegistry, SPECIAL_KEYS_ROW, SnippetLibrary, interpolateSnippet, parseAsciicastV2, scrubAsciicastOutput } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
 import { computeGhostAutocomplete, computeSideBySideDiff, detectDangerousCommand, formatChmodOctal, redactSecretsInText } from './advanced-features';
@@ -167,6 +167,27 @@ export function App() {
         }
     });
     const [gatewayProbeStatus, setGatewayProbeStatus] = useState(null);
+    const [relayLoginUser, setRelayLoginUser] = useState('');
+    const [relayLoginPass, setRelayLoginPass] = useState('');
+    const [relaySessionUser, setRelaySessionUser] = useState('');
+    const handleRelayLogin = async () => {
+        try {
+            const res = await loginToCloudflareRelay(gatewayUrl, relayLoginUser, relayLoginPass);
+            setGatewayAuthToken(res.token);
+            setRelaySessionUser(res.userId);
+            setRelayLoginPass('');
+            setGatewayProbeStatus({
+                ok: true,
+                message: `Relay Session Active (${res.userId}) · Short-lived JWT expires in ${Math.round(res.expiresIn / 60)}m`
+            });
+        }
+        catch (err) {
+            setGatewayProbeStatus({
+                ok: false,
+                message: err instanceof Error ? err.message : String(err)
+            });
+        }
+    };
     const [negotiatedCipher, setNegotiatedCipher] = useState('chacha20-poly1305@openssh.com');
     const [negotiatedServerVersion, setNegotiatedServerVersion] = useState('');
     const [pendingHostKeyPrompt, setPendingHostKeyPrompt] = useState(null);
@@ -1461,7 +1482,12 @@ export function App() {
                                                                             catch {
                                                                                 // ignore
                                                                             }
-                                                                        }, "data-testid": "welcome-gateway-token-input" })] }), _jsx(Button, { variant: "default", type: "button", testId: "test-gateway-btn", onClick: () => void handleTestGateway(gatewayUrl), children: "Test Gateway" })] }), gatewayProbeStatus ? (_jsx(Badge, { tone: gatewayProbeStatus.ok ? 'success' : 'danger', testId: "gateway-probe-badge", children: gatewayProbeStatus.message })) : null, _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '180px' }, children: [_jsx("label", { htmlFor: "welcome-host-input", children: "Host / IP" }), _jsx("input", { id: "welcome-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or server.example.com", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "welcome-host-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '130px' }, children: [_jsx("label", { htmlFor: "welcome-user-input", children: "Username" }), _jsx("input", { id: "welcome-user-input", type: "text", className: "ui-input", placeholder: "ubuntu / root", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "welcome-user-input" })] }), _jsxs("div", { style: { width: '100px' }, children: [_jsx("label", { htmlFor: "welcome-port-input", children: "Port" }), _jsx("input", { id: "welcome-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "welcome-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Authentication Method" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
+                                                                        }, "data-testid": "welcome-gateway-token-input" })] }), _jsx(Button, { variant: "default", type: "button", testId: "test-gateway-btn", onClick: () => void handleTestGateway(gatewayUrl), children: "Test Gateway" })] }), transportMode === 'cloudflare-relay' ? (_jsxs("div", { style: {
+                                                            display: 'flex',
+                                                            gap: 'var(--space-2)',
+                                                            flexWrap: 'wrap',
+                                                            alignItems: 'flex-end'
+                                                        }, "data-testid": "relay-user-login-bar", children: [_jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "relay-login-user-input", children: "Relay Account Username" }), _jsx("input", { id: "relay-login-user-input", type: "text", className: "ui-input", placeholder: "alice", value: relayLoginUser, onInput: (e) => setRelayLoginUser(e.target.value), "data-testid": "relay-login-user-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "relay-login-pass-input", children: "Relay Account Password" }), _jsx("input", { id: "relay-login-pass-input", type: "password", className: "ui-input", placeholder: "Sign in for 15m session JWT", value: relayLoginPass, onInput: (e) => setRelayLoginPass(e.target.value), "data-testid": "relay-login-pass-input" })] }), _jsx(Button, { variant: "default", type: "button", testId: "relay-login-submit-btn", onClick: () => void handleRelayLogin(), children: relaySessionUser ? `Signed In (${relaySessionUser})` : 'Sign In to Relay' })] })) : null, gatewayProbeStatus ? (_jsx(Badge, { tone: gatewayProbeStatus.ok ? 'success' : 'danger', testId: "gateway-probe-badge", children: gatewayProbeStatus.message })) : null, _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { style: { flex: 2, minWidth: '180px' }, children: [_jsx("label", { htmlFor: "welcome-host-input", children: "Host / IP" }), _jsx("input", { id: "welcome-host-input", type: "text", className: "ui-input", placeholder: "e.g. 192.168.1.10 or server.example.com", value: connectHost, onInput: (e) => setConnectHost(e.target.value), "data-testid": "welcome-host-input" })] }), _jsxs("div", { style: { flex: 1, minWidth: '130px' }, children: [_jsx("label", { htmlFor: "welcome-user-input", children: "Username" }), _jsx("input", { id: "welcome-user-input", type: "text", className: "ui-input", placeholder: "ubuntu / root", value: connectUser, onInput: (e) => setConnectUser(e.target.value), "data-testid": "welcome-user-input" })] }), _jsxs("div", { style: { width: '100px' }, children: [_jsx("label", { htmlFor: "welcome-port-input", children: "Port" }), _jsx("input", { id: "welcome-port-input", type: "number", className: "ui-input", value: connectPort, onInput: (e) => setConnectPort(e.target.value), "data-testid": "welcome-port-input" })] })] }), _jsxs("div", { children: [_jsx("label", { children: "Authentication Method" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: authMethod === 'Password' ? 'primary' : 'default', onClick: () => {
                                                                             setAuthMethod('Password');
                                                                             setConnectErrorMsg('');
                                                                         }, testId: "welcome-auth-password-btn", children: "Username & Password" }), _jsx(Button, { variant: authMethod === 'Private Key (.pem / id_rsa)' ? 'primary' : 'default', onClick: () => {

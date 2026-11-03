@@ -27,6 +27,7 @@ import {
   BrowserSshRelaySessionClient,
   LiveGatewaySessionClient,
   deriveGatewayHealthUrl,
+  loginToCloudflareRelay,
   resolveGatewayWsUrl,
   validateGatewayWsUrl,
   type TransportBackendMode
@@ -278,6 +279,29 @@ export function App(): JSX.Element {
     }
   });
   const [gatewayProbeStatus, setGatewayProbeStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const [relayLoginUser, setRelayLoginUser] = useState<string>('');
+  const [relayLoginPass, setRelayLoginPass] = useState<string>('');
+  const [relaySessionUser, setRelaySessionUser] = useState<string>('');
+
+  const handleRelayLogin = async (): Promise<void> => {
+    try {
+      const res = await loginToCloudflareRelay(gatewayUrl, relayLoginUser, relayLoginPass);
+      setGatewayAuthToken(res.token);
+      setRelaySessionUser(res.userId);
+      setRelayLoginPass('');
+      setGatewayProbeStatus({
+        ok: true,
+        message: `Relay Session Active (${res.userId}) · Short-lived JWT expires in ${Math.round(
+          res.expiresIn / 60
+        )}m`
+      });
+    } catch (err) {
+      setGatewayProbeStatus({
+        ok: false,
+        message: err instanceof Error ? err.message : String(err)
+      });
+    }
+  };
   const [negotiatedCipher, setNegotiatedCipher] = useState<string>('chacha20-poly1305@openssh.com');
   const [negotiatedServerVersion, setNegotiatedServerVersion] = useState<string>('');
   const [pendingHostKeyPrompt, setPendingHostKeyPrompt] = useState<{
@@ -2979,6 +3003,50 @@ export function App(): JSX.Element {
                       Test Gateway
                     </Button>
                   </div>
+                  {transportMode === 'cloudflare-relay' ? (
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: 'var(--space-2)',
+                        flexWrap: 'wrap',
+                        alignItems: 'flex-end'
+                      }}
+                      data-testid="relay-user-login-bar"
+                    >
+                      <div style={{ flex: 1, minWidth: '160px' }}>
+                        <label htmlFor="relay-login-user-input">Relay Account Username</label>
+                        <input
+                          id="relay-login-user-input"
+                          type="text"
+                          className="ui-input"
+                          placeholder="alice"
+                          value={relayLoginUser}
+                          onInput={(e) => setRelayLoginUser((e.target as HTMLInputElement).value)}
+                          data-testid="relay-login-user-input"
+                        />
+                      </div>
+                      <div style={{ flex: 1, minWidth: '160px' }}>
+                        <label htmlFor="relay-login-pass-input">Relay Account Password</label>
+                        <input
+                          id="relay-login-pass-input"
+                          type="password"
+                          className="ui-input"
+                          placeholder="Sign in for 15m session JWT"
+                          value={relayLoginPass}
+                          onInput={(e) => setRelayLoginPass((e.target as HTMLInputElement).value)}
+                          data-testid="relay-login-pass-input"
+                        />
+                      </div>
+                      <Button
+                        variant="default"
+                        type="button"
+                        testId="relay-login-submit-btn"
+                        onClick={() => void handleRelayLogin()}
+                      >
+                        {relaySessionUser ? `Signed In (${relaySessionUser})` : 'Sign In to Relay'}
+                      </Button>
+                    </div>
+                  ) : null}
                   {gatewayProbeStatus ? (
                     <Badge
                       tone={gatewayProbeStatus.ok ? 'success' : 'danger'}

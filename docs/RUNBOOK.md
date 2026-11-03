@@ -125,18 +125,21 @@ Configure in **Cloudflare Dashboard → Compute (Workers) → Create Application
 | **Build Command** | `npm run build` |
 | **Deploy Command** | `npx wrangler deploy` |
 
-### 4.2 Required Cloudflare Worker Secrets & Environment Variables
+### 4.2 Required Cloudflare Worker Secrets, Variables & Durable Object Bindings
 
 In **Cloudflare Dashboard → Workers & Pages → `webssh-studio-relay` → Settings → Variables and Secrets**:
 
-1. **Secrets (Encrypted — NEVER commit to Git)**:
-   - `RELAY_AUTH_TOKEN`: A strong 32-byte random secret (`openssl rand -hex 32`).
-2. **Environment Variables (`apps/relay/wrangler.jsonc` or Dashboard)**:
+1. **Secrets (Encrypted — NEVER commit to Git or embed in GitHub Pages)**:
+   - `SESSION_SIGNING_SECRET`: A strong 32-byte random secret (`openssl rand -hex 32`) used to sign and verify short-lived (`15m`) HS256 user session JWTs (`iss`, `aud`, `sub`, `iat`, `exp`, `jti`).
+   - `AUTH_USERS_JSON`: JSON map of authorized relay users and passphrases for `POST /auth/session` (e.g. `{"alice":"your-strong-passphrase"}`).
+   - `RELAY_AUTH_TOKEN` *(optional admin/CI test secret)*: Only active when `ENABLE_ADMIN_SHARED_TOKEN="1"` is explicitly set.
+2. **Environment Variables (`apps/relay/wrangler.jsonc`)**:
+   - `DESTINATION_MODE`: `"public"` (permits validated globally routable IPv4/IPv6 SSH targets on `ALLOWED_SSH_PORTS` while rejecting all private, loopback, link-local, metadata, CGNAT, multicast, reserved, IPv4-mapped IPv6, alternative encodings, and DNS rebinding answers; set to `"allowlist"` to restrict strictly to `ALLOWED_SSH_TARGETS`).
    - `ALLOWED_ORIGINS`: `https://srinivaskona7.github.io`
-   - `ALLOWED_SSH_TARGETS`: Explicit comma-separated approved SSH hostnames, CIDRs, or glob patterns (e.g. `ec2-54-210-11-99.compute.amazonaws.com,203.0.113.10/32`). **Never `*`** — empty or `*` is rejected by `policy.ts`.
    - `ALLOWED_SSH_PORTS`: `22,2222`
-   - `CONNECT_TIMEOUT_MS`: `8000`
-   - `IDLE_TIMEOUT_MS`: `900000`
+   - `ALLOWED_SSH_TARGETS`: `""` *(optional in `public` mode; required in `allowlist` mode — never `*`)*
+   - `MAX_CONCURRENT_SESSIONS_PER_USER`: `5` *(centrally enforced across all Worker isolates via the `USER_QUOTA_DO` Durable Object)*
+   - `MAX_CONNECTION_ATTEMPTS_PER_MIN`: `20` *(centrally enforced per-user rate limit via `USER_QUOTA_DO`)*
 
 ### 4.3 EC2 Firewall Requirements & Outbound IP Architecture
 

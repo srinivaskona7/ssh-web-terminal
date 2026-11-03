@@ -1,5 +1,5 @@
 {
-  // Cloudflare Worker SSH Relay Configuration (GitHub Pages -> Cloudflare Worker -> Approved SSH Hosts)
+  // Cloudflare Worker SSH Relay Configuration (GitHub Pages -> Cloudflare Worker -> Public SSH Hosts)
   // Deploy via Cloudflare Workers Builds (Root directory: apps/relay) or `npx wrangler deploy`.
   "name": "webssh-studio-relay",
   "main": "src/index.ts",
@@ -8,19 +8,46 @@
   "observability": {
     "enabled": true
   },
+  // Central Per-User Rate & Concurrency Limit Durable Object Binding
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "USER_QUOTA_DO",
+        "class_name": "RelayUserQuotaDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RelayUserQuotaDO"]
+    }
+  ],
   "vars": {
+    // "public" permits validated globally routable IPv4/IPv6 destinations on ALLOWED_SSH_PORTS
+    // while blocking all private, loopback, link-local, metadata, multicast, reserved, mapped, and rebinding IPs.
+    // Set to "allowlist" to restrict strictly to ALLOWED_SSH_TARGETS.
+    "DESTINATION_MODE": "public",
     // Comma-separated allowed browser Origins (never use "*" in production)
     "ALLOWED_ORIGINS": "https://srinivaskona7.github.io,http://localhost:4173,http://127.0.0.1:4173,http://localhost:4273,http://127.0.0.1:4273",
-    // Comma-separated approved SSH target hostnames, IPs, or wildcard patterns (e.g. "ec2-*.compute.amazonaws.com,203.0.113.10").
-    // REQUIRED: Empty ALLOWED_SSH_TARGETS denies all connections by default (never an open TCP proxy).
+    // Optional in "public" mode; required when DESTINATION_MODE="allowlist".
     "ALLOWED_SSH_TARGETS": "",
     // Comma-separated permitted SSH TCP ports
     "ALLOWED_SSH_PORTS": "22,2222",
+    // JWT issuer & audience claims verified on every /ws connection
+    "SESSION_TOKEN_ISSUER": "webssh-studio-relay",
+    "SESSION_TOKEN_AUDIENCE": "webssh-relay",
+    // Central per-user connection & concurrency limits enforced via USER_QUOTA_DO
+    "MAX_CONCURRENT_SESSIONS_PER_USER": "5",
+    "MAX_CONNECTION_ATTEMPTS_PER_MIN": "20",
     // Connection & banner handshake timeout in milliseconds
     "CONNECT_TIMEOUT_MS": "8000",
     // Idle stream timeout in milliseconds (15 minutes)
     "IDLE_TIMEOUT_MS": "900000"
   }
-  // Secrets (configure in Cloudflare Dashboard -> Worker -> Settings -> Variables and Secrets, NEVER commit):
-  // - RELAY_AUTH_TOKEN: Required shared bearer/subprotocol/query token for authenticating WebSocket clients
+  // Required Secrets (configure in Cloudflare Dashboard -> Worker -> Settings -> Variables and Secrets, NEVER commit):
+  // - SESSION_SIGNING_SECRET: 32-byte secret used to sign/verify short-lived HS256 user session JWTs (`openssl rand -hex 32`)
+  // - AUTH_USERS_JSON: JSON map of relay user credentials for POST /auth/session (e.g. `{"alice":"strong-passphrase"}`)
+  // Optional Admin/Test Secrets (only active when ENABLE_ADMIN_SHARED_TOKEN="1"):
+  // - RELAY_AUTH_TOKEN: Explicit admin/test shared token
 }

@@ -1,12 +1,23 @@
 import {
+  authenticateRelayRequest,
+  issueUserSessionToken
+} from './auth.js';
+import {
   DEFAULT_CONNECT_TIMEOUT_MS,
   DEFAULT_IDLE_TIMEOUT_MS,
+  DEFAULT_MAX_ATTEMPTS_PER_MIN,
+  DEFAULT_MAX_CONCURRENT_PER_USER,
   MAX_BUFFERED_AMOUNT_BYTES,
   MAX_WS_MESSAGE_BYTES,
-  validateDestination,
+  constantTimeEqual,
+  defaultDohResolver,
+  resolveAndValidateDestination,
   validateOrigin,
-  validateRelayAuthToken,
   verifySshServerBanner,
+  type DnsResolverFn,
+  type DurableObjectIdLike,
+  type DurableObjectNamespaceLike,
+  type DurableObjectStubLike,
   type RelayEnv
 } from './policy.js';
 
@@ -23,11 +34,115 @@ export type SocketConnectFn = (
   options?: { secureTransport?: 'off' | 'on' | 'starttls'; allowHalfOpen?: boolean }
 ) => TcpSocketLike;
 
+export interface RelayRequestOptions {
+  connectImpl?: SocketConnectFn;
+  dnsResolver?: DnsResolverFn;
+  nowMs?: number;
+}
+
+/**
+ * Cloudflare Durable Object enforcing centralized per-user connection-attempt rate limits
+ * and concurrent active SSH session limits across all Worker isolates.
+ */
+export class RelayUserQuotaDO {
+  private attemptTimestamps: number[] = [];
+  private activeSessions = new Set<string>();
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const body = (await request.json().catch(() => ({}))) as {
+      connId?: string;
+      maxConcurrent?: number;
+      maxAttemptsPerMin?: number;
+      nowMs?: number;
+    };
+    const nowMs = typeof body.nowMs === 'number' ? body.nowMs : Date.now();
+    const connId = (body.connId ?? '').trim();
+
+    if (url.pathname === '/acquire') {
+      const maxConcurrent = body.maxConcurrent ?? DEFAULT_MAX_CONCURRENT_PER_USER;
+      const maxAttempts = body.maxAttemptsPerMin ?? DEFAULT_MAX_ATTEMPTS_PER_MIN;
+
+      // Prune attempts older than 60s
+      this.attemptTimestamps = this.attemptTimestamps.filter((ts) => nowMs - ts < 60_000);
+      if (this.attemptTimestamps.length >= maxAttempts) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            code: 'ERR_RATE_LIMITED',
+            message: `Per-user connection rate limit exceeded (max ${maxAttempts} attempts/minute).`
+          }),
+          { status: 429, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      this.attemptTimestamps.push(nowMs);
+
+      if (this.activeSessions.size >= maxConcurrent) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            code: 'ERR_RATE_LIMITED',
+            message: `Per-user concurrent SSH session limit exceeded (max ${maxConcurrent} active sessions).`
+          }),
+          { status: 429, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (connId) {
+        this.activeSessions.add(connId);
+      }
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          activeSessions: this.activeSessions.size,
+          attemptsLastMin: this.attemptTimestamps.length
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (url.pathname === '/release') {
+      if (connId) {
+        this.activeSessions.delete(connId);
+      }
+      return new Response(
+        JSON.stringify({ ok: true, activeSessions: this.activeSessions.size }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    return new Response(JSON.stringify({ ok: false, error: 'Unknown DO action' }), { status: 404 });
+  }
+}
+
+/**
+ * Helper for local Vitest / Playwright testing of centralized per-user Durable Object quotas.
+ */
+export function createLocalUserQuotaNamespace(): DurableObjectNamespaceLike {
+  const instances = new Map<string, RelayUserQuotaDO>();
+  return {
+    idFromName(name: string): DurableObjectIdLike {
+      return { toString: () => name };
+    },
+    get(id: DurableObjectIdLike): DurableObjectStubLike {
+      const key = id.toString();
+      let inst = instances.get(key);
+      if (!inst) {
+        inst = new RelayUserQuotaDO();
+        instances.set(key, inst);
+      }
+      return {
+        fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+          inst.fetch(input instanceof Request ? input : new Request(String(input), init))
+      };
+    }
+  };
+}
+
 async function defaultCloudflareConnect(
   address: { hostname: string; port: number },
   options?: { secureTransport?: 'off' | 'on' | 'starttls'; allowHalfOpen?: boolean }
 ): Promise<TcpSocketLike> {
-  // Dynamically import cloudflare:sockets in Cloudflare Workers runtime
   const spec = ['cloudflare', 'sockets'].join(':');
   const mod = (await import(/* @vite-ignore */ spec)) as {
     connect: SocketConnectFn;
@@ -48,16 +163,98 @@ function jsonResponse(
     headers.set('Access-Control-Allow-Origin', corsOrigin);
     headers.set('Vary', 'Origin');
   }
-  headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   headers.set('Access-Control-Allow-Headers', 'Authorization, X-Relay-Token, Content-Type');
   return new Response(JSON.stringify(body), { status, headers });
+}
+
+async function handleAuthSessionIssue(
+  request: Request,
+  env: RelayEnv,
+  corsHeader: string | null,
+  nowMs: number
+): Promise<Response> {
+  if (!(env.SESSION_SIGNING_SECRET ?? '').trim()) {
+    return jsonResponse(
+      503,
+      {
+        ok: false,
+        code: 'ERR_CONFIG_MISSING',
+        error: 'SESSION_SIGNING_SECRET is not configured on the Cloudflare Worker.'
+      },
+      corsHeader
+    );
+  }
+
+  let body: { username?: string; password?: string };
+  try {
+    body = (await request.json()) as { username?: string; password?: string };
+  } catch {
+    return jsonResponse(
+      400,
+      { ok: false, code: 'ERR_RELAY_AUTH_FAILED', error: 'Invalid JSON request body.' },
+      corsHeader
+    );
+  }
+
+  const username = (body.username ?? '').trim();
+  const password = body.password ?? '';
+  if (!username || !password) {
+    return jsonResponse(
+      401,
+      { ok: false, code: 'ERR_RELAY_AUTH_FAILED', error: 'Username and password are required.' },
+      corsHeader
+    );
+  }
+
+  let usersMap: Record<string, string> = {};
+  try {
+    usersMap = JSON.parse(env.AUTH_USERS_JSON ?? '{}') as Record<string, string>;
+  } catch {
+    return jsonResponse(
+      503,
+      { ok: false, code: 'ERR_CONFIG_MISSING', error: 'AUTH_USERS_JSON secret is malformed.' },
+      corsHeader
+    );
+  }
+
+  const expectedPass = usersMap[username];
+  if (typeof expectedPass !== 'string' || !constantTimeEqual(password, expectedPass)) {
+    return jsonResponse(
+      401,
+      { ok: false, code: 'ERR_RELAY_AUTH_FAILED', error: 'Invalid relay login credentials.' },
+      corsHeader
+    );
+  }
+
+  const nowSec = Math.floor(nowMs / 1000);
+  const { token, claims } = await issueUserSessionToken(username, env, undefined, nowSec);
+  return jsonResponse(
+    200,
+    {
+      ok: true,
+      token,
+      userId: claims.sub,
+      expiresAt: claims.exp,
+      expiresIn: claims.exp - claims.iat
+    },
+    corsHeader
+  );
 }
 
 export async function handleRelayRequest(
   request: Request,
   env: RelayEnv,
-  connectImpl?: SocketConnectFn
+  optionsOrConnect?: SocketConnectFn | RelayRequestOptions
 ): Promise<Response> {
+  const opts: RelayRequestOptions =
+    typeof optionsOrConnect === 'function'
+      ? { connectImpl: optionsOrConnect }
+      : optionsOrConnect ?? {};
+  const connectImpl = opts.connectImpl;
+  const dnsResolver = opts.dnsResolver ?? defaultDohResolver;
+  const nowMs = opts.nowMs ?? Date.now();
+
   const url = new URL(request.url);
   const origin = request.headers.get('Origin');
   const originCheck = validateOrigin(origin, env.ALLOWED_ORIGINS);
@@ -65,29 +262,43 @@ export async function handleRelayRequest(
 
   if (request.method === 'OPTIONS') {
     if (!originCheck.ok) {
-      return jsonResponse(originCheck.status, { ok: false, code: originCheck.code, error: originCheck.message });
+      return jsonResponse(originCheck.status, {
+        ok: false,
+        code: originCheck.code,
+        error: originCheck.message
+      });
     }
     return new Response(null, {
       status: 204,
       headers: {
         'Access-Control-Allow-Origin': corsHeader ?? '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Authorization, X-Relay-Token, Content-Type',
         Vary: 'Origin'
       }
     });
   }
 
-  if (url.pathname === '/healthz') {
-    const targetsConfigured = Boolean((env.ALLOWED_SSH_TARGETS ?? '').trim());
-    const authConfigured = Boolean((env.RELAY_AUTH_TOKEN ?? '').trim() || env.ALLOW_UNAUTHENTICATED_DEV === '1');
+  if (url.pathname === '/healthz' && request.method === 'GET') {
+    const destMode = env.DESTINATION_MODE === 'public' ? 'public' : 'allowlist';
+    const targetsConfigured =
+      destMode === 'public' || Boolean((env.ALLOWED_SSH_TARGETS ?? '').trim());
+    const authConfigured = Boolean(
+      (env.SESSION_SIGNING_SECRET ?? '').trim() ||
+        (env.ENABLE_ADMIN_SHARED_TOKEN === '1' && (env.RELAY_AUTH_TOKEN ?? '').trim()) ||
+        env.ALLOW_UNAUTHENTICATED_DEV === '1'
+    );
     return jsonResponse(
       200,
       {
         status: targetsConfigured && authConfigured ? 'ok' : 'misconfigured',
         mode: 'cloudflare-relay',
-        tlsEnabled: url.protocol === 'https:' || request.headers.get('X-Forwarded-Proto') === 'https',
-        authRequired: Boolean((env.RELAY_AUTH_TOKEN ?? '').trim()),
+        destinationMode: destMode,
+        tlsEnabled:
+          url.protocol === 'https:' || request.headers.get('X-Forwarded-Proto') === 'https',
+        authRequired: true,
+        authMode: (env.SESSION_SIGNING_SECRET ?? '').trim() ? 'session-jwt' : 'admin-token',
+        quotaDurableObjectBound: Boolean(env.USER_QUOTA_DO),
         targetsConfigured,
         allowedPorts: (env.ALLOWED_SSH_PORTS ?? '22,2222')
           .split(',')
@@ -98,10 +309,22 @@ export async function handleRelayRequest(
     );
   }
 
+  if (url.pathname === '/auth/session' && request.method === 'POST') {
+    if (!originCheck.ok) {
+      return jsonResponse(
+        originCheck.status,
+        { ok: false, code: originCheck.code, error: originCheck.message },
+        null
+      );
+    }
+    return handleAuthSessionIssue(request, env, corsHeader, nowMs);
+  }
+
   if (url.pathname !== '/ws') {
     return jsonResponse(404, { ok: false, code: 'ERR_NOT_FOUND', error: 'Not Found' }, corsHeader);
   }
 
+  // 1. Validate Origin first
   if (!originCheck.ok) {
     return jsonResponse(
       originCheck.status,
@@ -110,7 +333,8 @@ export async function handleRelayRequest(
     );
   }
 
-  const authCheck = validateRelayAuthToken(request, env);
+  // 2. Require authentication BEFORE any DNS resolution or TCP connection
+  const authCheck = await authenticateRelayRequest(request, env, Math.floor(nowMs / 1000));
   if (!authCheck.ok) {
     return jsonResponse(
       authCheck.status,
@@ -119,10 +343,74 @@ export async function handleRelayRequest(
     );
   }
 
+  const userId = authCheck.userId ?? 'anonymous';
+
+  // 3. Centrally enforce per-user connection-attempt and concurrent-session limits via Durable Object
+  const maxConcurrent =
+    Number(env.MAX_CONCURRENT_SESSIONS_PER_USER ?? DEFAULT_MAX_CONCURRENT_PER_USER) ||
+    DEFAULT_MAX_CONCURRENT_PER_USER;
+  const maxAttemptsPerMin =
+    Number(env.MAX_CONNECTION_ATTEMPTS_PER_MIN ?? DEFAULT_MAX_ATTEMPTS_PER_MIN) ||
+    DEFAULT_MAX_ATTEMPTS_PER_MIN;
+
+  const connId = `conn_${nowMs}_${Math.random().toString(36).slice(2, 10)}`;
+  let releaseQuota: () => Promise<void> = async () => {};
+
+  if (env.USER_QUOTA_DO) {
+    const doId = env.USER_QUOTA_DO.idFromName(userId);
+    const stub = env.USER_QUOTA_DO.get(doId);
+    const quotaRes = await stub.fetch('https://quota.internal/acquire', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        connId,
+        maxConcurrent,
+        maxAttemptsPerMin,
+        nowMs
+      })
+    });
+    if (!quotaRes.ok) {
+      const quotaErr = (await quotaRes.json().catch(() => ({}))) as {
+        code?: string;
+        message?: string;
+      };
+      return jsonResponse(
+        quotaRes.status,
+        {
+          ok: false,
+          code: quotaErr.code ?? 'ERR_RATE_LIMITED',
+          error: quotaErr.message ?? 'Per-user connection limit exceeded.'
+        },
+        corsHeader
+      );
+    }
+    let released = false;
+    releaseQuota = async () => {
+      if (released) return;
+      released = true;
+      try {
+        await stub.fetch('https://quota.internal/release', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connId })
+        });
+      } catch {
+        // ignore release errors
+      }
+    };
+  }
+
+  // 4. Resolve A/AAAA records & validate destination IP against bogon/SSRF/rebinding rules
   const targetHost = (url.searchParams.get('host') ?? '').trim();
   const targetPort = Number(url.searchParams.get('port') ?? '22');
-  const destCheck = validateDestination(targetHost, targetPort, env);
-  if (!destCheck.ok) {
+  const destCheck = await resolveAndValidateDestination(
+    targetHost,
+    targetPort,
+    env,
+    dnsResolver
+  );
+  if (!destCheck.ok || !destCheck.resolvedIp) {
+    await releaseQuota();
     return jsonResponse(
       destCheck.status,
       { ok: false, code: destCheck.code, error: destCheck.message },
@@ -130,45 +418,59 @@ export async function handleRelayRequest(
     );
   }
 
+  const validatedConnectIp = destCheck.resolvedIp;
+
   const upgradeHeader = request.headers.get('Upgrade') ?? '';
   if (upgradeHeader.toLowerCase() !== 'websocket') {
+    await releaseQuota();
     return jsonResponse(
       426,
       {
         ok: false,
         code: 'OK',
         status: 'upgrade_required',
+        resolvedIp: validatedConnectIp,
         message: 'WebSocket Upgrade header required for SSH relay.'
       },
       corsHeader
     );
   }
 
-  const connectTimeoutMs = Number(env.CONNECT_TIMEOUT_MS ?? DEFAULT_CONNECT_TIMEOUT_MS) || DEFAULT_CONNECT_TIMEOUT_MS;
-  const idleTimeoutMs = Number(env.IDLE_TIMEOUT_MS ?? DEFAULT_IDLE_TIMEOUT_MS) || DEFAULT_IDLE_TIMEOUT_MS;
+  const connectTimeoutMs =
+    Number(env.CONNECT_TIMEOUT_MS ?? DEFAULT_CONNECT_TIMEOUT_MS) || DEFAULT_CONNECT_TIMEOUT_MS;
+  const idleTimeoutMs =
+    Number(env.IDLE_TIMEOUT_MS ?? DEFAULT_IDLE_TIMEOUT_MS) || DEFAULT_IDLE_TIMEOUT_MS;
 
+  // 5. Connect directly to the validated IP (NEVER re-resolve targetHost during connect)
   let tcpSocket: TcpSocketLike;
   try {
     tcpSocket = connectImpl
-      ? connectImpl({ hostname: targetHost, port: targetPort }, { secureTransport: 'off', allowHalfOpen: false })
+      ? connectImpl(
+          { hostname: validatedConnectIp, port: targetPort },
+          { secureTransport: 'off', allowHalfOpen: false }
+        )
       : await defaultCloudflareConnect(
-          { hostname: targetHost, port: targetPort },
+          { hostname: validatedConnectIp, port: targetPort },
           { secureTransport: 'off', allowHalfOpen: false }
         );
 
     await Promise.race([
       tcpSocket.opened,
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`TCP connection to ${targetHost}:${targetPort} timed out`)), connectTimeoutMs)
+        setTimeout(
+          () => reject(new Error(`TCP connection to ${validatedConnectIp}:${targetPort} timed out`)),
+          connectTimeoutMs
+        )
       )
     ]);
   } catch (err) {
+    await releaseQuota();
     return jsonResponse(
       502,
       {
         ok: false,
         code: 'ERR_RELAY_UNREACHABLE',
-        error: `Failed to connect to SSH host ${targetHost}:${targetPort}: ${
+        error: `Failed to connect to SSH host ${targetHost} (${validatedConnectIp}:${targetPort}): ${
           err instanceof Error ? err.message : String(err)
         }`
       },
@@ -176,13 +478,13 @@ export async function handleRelayRequest(
     );
   }
 
-  // Cloudflare Workers WebSocketPair upgrade
   const WebSocketPairCtor = (globalThis as unknown as {
     WebSocketPair?: new () => { 0: WebSocket; 1: WebSocket & { accept(): void } };
   }).WebSocketPair;
 
   if (!WebSocketPairCtor) {
     await tcpSocket.close();
+    await releaseQuota();
     return jsonResponse(
       500,
       { ok: false, code: 'ERR_CONFIG_MISSING', error: 'WebSocketPair runtime API not available' },
@@ -195,7 +497,7 @@ export async function handleRelayRequest(
   const serverWs = pair[1];
   serverWs.accept();
 
-  bridgeWebSocketAndTcp(serverWs, tcpSocket, idleTimeoutMs);
+  bridgeWebSocketAndTcp(serverWs, tcpSocket, idleTimeoutMs, releaseQuota);
 
   const responseHeaders = new Headers();
   if (corsHeader) {
@@ -206,17 +508,26 @@ export async function handleRelayRequest(
     responseHeaders.set('Sec-WebSocket-Protocol', 'webssh-relay.v1');
   }
 
-  return new Response(null, {
-    status: 101,
-    webSocket: clientWs,
-    headers: responseHeaders
-  } as ResponseInit & { webSocket: WebSocket });
+  try {
+    return new Response(null, {
+      status: 101,
+      webSocket: clientWs,
+      headers: responseHeaders
+    } as ResponseInit & { webSocket: WebSocket });
+  } catch {
+    // Node.js / undici Response constructor only allows status 200..599 outside Cloudflare workerd
+    const fallback = new Response(null, { status: 200, headers: responseHeaders });
+    Object.defineProperty(fallback, 'status', { value: 101 });
+    Object.defineProperty(fallback, 'webSocket', { value: clientWs });
+    return fallback;
+  }
 }
 
 export function bridgeWebSocketAndTcp(
   ws: WebSocket & { bufferedAmount?: number },
   tcpSocket: TcpSocketLike,
-  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+  onCleanup?: () => Promise<void> | void
 ): void {
   const writer = tcpSocket.writable.getWriter();
   const reader = tcpSocket.readable.getReader();
@@ -231,6 +542,11 @@ export function bridgeWebSocketAndTcp(
     if (idleTimer) {
       clearTimeout(idleTimer);
       idleTimer = null;
+    }
+    try {
+      void onCleanup?.();
+    } catch {
+      // ignore
     }
     try {
       void reader.cancel();
@@ -328,7 +644,6 @@ export function bridgeWebSocketAndTcp(
           bannerVerified = true;
         }
 
-        // Bounded buffering & backpressure check on outbound WebSocket
         while (!closed && (ws.bufferedAmount ?? 0) > MAX_BUFFERED_AMOUNT_BYTES) {
           await new Promise((r) => setTimeout(r, 15));
         }

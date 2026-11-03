@@ -1,5 +1,12 @@
 import type { ControlMessage } from '@webssh/protocol';
 import type { ConnectedSessionMetadata, LiveConnectParams } from './transport.js';
+export interface RelaySessionLoginResult {
+    token: string;
+    userId: string;
+    expiresAt: number;
+    expiresIn: number;
+}
+export declare function loginToCloudflareRelay(relayWsUrl: string, username: string, password: string): Promise<RelaySessionLoginResult>;
 export declare const RELAY_RING_BUFFER_MAX_BYTES: number;
 export declare class BrowserSshRelaySessionClient {
     private readonly params;
