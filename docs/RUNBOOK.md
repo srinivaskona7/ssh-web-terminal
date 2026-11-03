@@ -111,7 +111,7 @@ When you want to connect from the static **GitHub Pages** frontend (`https://sri
 
 In this mode:
 - **Browser (`apps/web/src/transport/browser-ssh-client.ts`)** executes the full RFC 4251–4254 SSH-2.0 protocol (`ecdh-sha2-nistp256` key exchange, `ssh-ed25519` / `ecdsa-sha2-nistp256` / `rsa-sha2-256` host-key verification with TOFU pinning, `aes128-ctr` + `hmac-sha2-256` encryption, password / PEM private key / WebCrypto KeyVault authentication, and multiplexed PTY & `exec` channels). **Private keys never leave the browser.**
-- **Cloudflare Worker (`apps/relay`)** authenticates the WebSocket request (`Origin` + `RELAY_AUTH_TOKEN`), enforces the destination allowlist (`ALLOWED_SSH_TARGETS` + `ALLOWED_SSH_PORTS`) and SSRF guard, verifies the remote server's `SSH-2.0-` banner, and bridges encrypted SSH packets over `cloudflare:sockets` `connect()`.
+- **Cloudflare Worker (`apps/relay`)** authenticates the WebSocket request using a short-lived relay session JWT and strict Origin checks, enforces `DESTINATION_MODE` and `ALLOWED_SSH_PORTS` with an SSRF guard, verifies the remote server's `SSH-2.0-` banner, and bridges encrypted SSH packets over `cloudflare:sockets` `connect()`.
 
 ### 4.1 Exact Cloudflare Workers Builds (Git Integration) Settings
 
@@ -122,7 +122,7 @@ Configure in **Cloudflare Dashboard → Compute (Workers) → Create Application
 | **Project / Worker Name** | `webssh-studio-relay` |
 | **Production Branch** | `main` |
 | **Root Directory** | `apps/relay` |
-| **Build Command** | `npm run build` |
+| **Build Command** | `npm ci --include=dev && npm run build` |
 | **Deploy Command** | `npx wrangler deploy` |
 
 ### 4.2 Required Cloudflare Worker Secrets, Variables & Durable Object Bindings
@@ -143,11 +143,11 @@ In **Cloudflare Dashboard → Workers & Pages → `webssh-studio-relay` → Sett
 
 ### 4.3 EC2 Firewall Requirements & Outbound IP Architecture
 
-Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `cloudflare:sockets` `connect()` do not have a single fixed outbound IPv4 address** on standard Workers plans (traffic egresses from Cloudflare's edge IP ranges).
+Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `cloudflare:sockets` `connect()` do not have a single fixed outbound IPv4 address** on standard Workers plans (TCP egress uses a prefix outside Cloudflare's published HTTP proxy IP ranges).
 
 - **Do NOT blindly open TCP 22 to `0.0.0.0/0` with password authentication enabled.**
 - Use one of the following hardened EC2 Security Group patterns:
-  1. **Key-Only OpenSSH + Cloudflare Egress CIDRs**: Disable password authentication in `/etc/ssh/sshd_config` (`PasswordAuthentication no`, `PermitRootLogin no`), optionally run `sshd` on port `2222`, and restrict the EC2 Security Group inbound rule for TCP `22`/`2222` to Cloudflare's published egress ranges (`https://www.cloudflare.com/ips-v4/` and `https://www.cloudflare.com/ips-v6/`).
+  1. **Key-Only OpenSSH**: Disable password authentication in `/etc/ssh/sshd_config` (`PasswordAuthentication no`, `PermitRootLogin no`), optionally run `sshd` on port `2222`. Do not use Cloudflare's published HTTP proxy ranges as a TCP Worker egress allowlist; see https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/. Use a gateway with a fixed egress IP when strict source-IP restrictions are required.
   2. **Dedicated Bastion Go Gateway (`apps/gateway`)**: If your EC2 Security Group requires a single `/32` source IP, deploy `apps/gateway` on a single micro EC2 bastion with an Elastic IP and use **Go SSH/SFTP Gateway** mode.
 
 ### 4.4 Transport Mode Feature Matrix (`Go Gateway` vs `Cloudflare Worker Relay`)
@@ -166,3 +166,12 @@ Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `clou
 | Server-Side TCP Tunnel HTTP Preview | Supported (Tested) | Supported (Tested via RFC 4254 `direct-tcpip`) |
 | 4 MiB Ring-Buffer Session Replay & Resume | Supported (Tested) | Supported (Tested via 4 MiB Client Ring Buffer) |
 
+
+## 5. Current Pages and Relay Connection Setup
+
+- GitHub Pages Source: **GitHub Actions**. The Pages workflow defaults to `wss://webssh-studio-relay.life-magic.workers.dev/ws`. Repository Actions variable `GATEWAY_URL` overrides it; `TRANSPORT_MODE` optionally selects `cloudflare-relay` or `go-gateway` (needed for custom relay domains). Worker endpoints select relay mode automatically for new users. Existing explicit browser preferences are preserved.
+- Cloudflare Git build root: `apps/relay`; build: `npm ci --include=dev && npm run build`; deploy: `npx wrangler deploy`. Wrangler is pinned in the root lockfile. `SKIP_DEPENDENCY_INSTALL=1` is supported because the build command installs dependencies explicitly.
+- Runtime secrets must be entered directly in Cloudflare: `SESSION_SIGNING_SECRET` and `AUTH_USERS_JSON`. These are separate from the EC2 SSH credentials. No secret belongs in Pages variables or source control.
+- `USER_QUOTA_DO` and migration `v1` are defined in `apps/relay/wrangler.jsonc`. Missing binding blocks SSH connections. `/healthz` lists missing configuration names without exposing secret values.
+- Target for this setup: host `13.238.115.195`, user `ec2-user`, port `22`. Select Cloudflare relay mode, use **Relay Login** first, then supply the EC2 key directly in the browser's SSH form. Successful relay login alone does not establish SSH authentication.
+- Verify HTTPS `/healthz`, CORS from `https://srinivaskona7.github.io`, rejected foreign Origins and unauthenticated requests, relay login, host-key verification, then PTY and SFTP on the EC2 target. A successful static deployment or health check alone does not prove an authenticated SSH connection.

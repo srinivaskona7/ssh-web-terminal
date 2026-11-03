@@ -5,7 +5,7 @@ import { KeyVault, KnownHostsStore, base64ToBytes, bytesToBase64, validateAndIns
 import { HostRegistry } from '../hosts';
 import { PreferencesStore } from '../prefs';
 import { XtermPaneAdapter } from '../terminal/xterm-adapter';
-import { BrowserSshRelaySessionClient, LiveGatewaySessionClient, deriveGatewayHealthUrl, loginToCloudflareRelay, resolveGatewayWsUrl, validateGatewayWsUrl } from '../transport';
+import { BrowserSshRelaySessionClient, LiveGatewaySessionClient, deriveGatewayHealthUrl, loginToCloudflareRelay, resolveGatewayWsUrl, resolveTransportBackendMode, validateGatewayWsUrl } from '../transport';
 import { AsciicastRecorder, CommandPaletteRegistry, KeybindingRegistry, SPECIAL_KEYS_ROW, SnippetLibrary, interpolateSnippet, parseAsciicastV2, scrubAsciicastOutput } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
 import { computeGhostAutocomplete, computeSideBySideDiff, detectDangerousCommand, formatChmodOctal, redactSecretsInText } from './advanced-features';
@@ -146,17 +146,7 @@ export function App() {
     const [editorContent, setEditorContent] = useState('');
     const [editorSaved, setEditorSaved] = useState(true);
     const [showDiffViewer, setShowDiffViewer] = useState(false);
-    const [transportMode, setTransportMode] = useState(() => {
-        try {
-            const saved = globalThis.localStorage?.getItem('webssh.transport.mode');
-            if (saved === 'cloudflare-relay' || saved === 'go-gateway')
-                return saved;
-        }
-        catch {
-            // ignore
-        }
-        return 'go-gateway';
-    });
+    const [transportMode, setTransportMode] = useState(() => resolveTransportBackendMode());
     const [gatewayUrl, setGatewayUrl] = useState(() => resolveGatewayWsUrl());
     const [gatewayAuthToken, setGatewayAuthToken] = useState(() => {
         try {
@@ -367,9 +357,20 @@ export function App() {
                 return;
             }
             const data = (await res.json());
+            if (data.status !== 'ok') {
+                setGatewayProbeStatus({
+                    ok: false,
+                    message: `Backend setup incomplete: ${data.missingConfiguration?.join(', ') || data.status || 'invalid health response'}`
+                });
+                return;
+            }
+            if ((data.mode === 'cloudflare-relay') !== (transportMode === 'cloudflare-relay')) {
+                setGatewayProbeStatus({ ok: false, message: 'Transport mode does not match this endpoint. Select the matching SSH Transport Mode.' });
+                return;
+            }
             setGatewayProbeStatus({
-                ok: data.status === 'ok',
-                message: `Gateway Online (${healthUrl}) · Active Sessions: ${data.activeSessions ?? 0} · TLS: ${data.tlsEnabled ? 'WSS Enabled' : 'HTTP/WS'} · Auth: ${data.authRequired ? 'Token Required' : 'Open'}`
+                ok: true,
+                message: `Backend Online (${healthUrl}) · Active Sessions: ${data.activeSessions ?? 0} · TLS: ${data.tlsEnabled ? 'WSS Enabled' : 'HTTP/WS'} · Auth: ${data.authRequired ? 'Token Required' : 'Open'}`
             });
         }
         catch (err) {

@@ -440,6 +440,25 @@ export function deriveGatewayHealthUrl(wsUrl: string): string {
   }
 }
 
+/** Select the protocol that matches the configured endpoint; preserve explicit user choices. */
+export function resolveTransportBackendMode(endpoint = resolveGatewayWsUrl()): TransportBackendMode {
+  try {
+    const saved = globalThis.localStorage?.getItem('webssh.transport.mode');
+    if (saved === 'cloudflare-relay' || saved === 'go-gateway') return saved;
+  } catch {
+    // Storage can be unavailable in private browsing.
+  }
+  const configured = (import.meta as unknown as { env?: Record<string, string | undefined> })
+    .env?.VITE_TRANSPORT_MODE;
+  if (configured === 'cloudflare-relay' || configured === 'go-gateway') return configured;
+  try {
+    if (new URL(endpoint).hostname.endsWith('.workers.dev')) return 'cloudflare-relay';
+  } catch {
+    // URL validation reports invalid endpoints when connecting.
+  }
+  return 'go-gateway';
+}
+
 export function resolveGatewayWsUrl(explicitUrl?: string): string {
   const trimmed = explicitUrl?.trim();
   if (trimmed) {

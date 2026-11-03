@@ -15,3 +15,7 @@
 .DS_Store
 .env
 .env.local
+
+/apps/relay/.wrangler/
+/apps/relay/.dev.vars
+/apps/relay/.dev.vars.*

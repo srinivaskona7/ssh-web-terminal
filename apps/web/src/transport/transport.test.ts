@@ -10,6 +10,7 @@ import {
   deriveGatewayHealthUrl,
   isStaticPagesHost,
   resolveGatewayWsUrl,
+  resolveTransportBackendMode,
   validateGatewayWsUrl
 } from './index.js';
 
@@ -35,6 +36,15 @@ describe('Transport Resilience & Sequence Replay (M4)', () => {
     const resolved = resolveGatewayWsUrl();
     expect(resolved).not.toContain('github.io');
     expect(globalThis.localStorage?.getItem('webssh.gateway.wsUrl')).toBeNull();
+  });
+
+  it('selects the relay protocol for Worker endpoints and preserves explicit user choices', () => {
+    globalThis.localStorage?.removeItem('webssh.transport.mode');
+    expect(resolveTransportBackendMode('wss://webssh-studio-relay.life-magic.workers.dev/ws')).toBe('cloudflare-relay');
+    expect(resolveTransportBackendMode('wss://gateway.example.com/ws')).toBe('go-gateway');
+    globalThis.localStorage?.setItem('webssh.transport.mode', 'go-gateway');
+    expect(resolveTransportBackendMode('wss://webssh-studio-relay.life-magic.workers.dev/ws')).toBe('go-gateway');
+    globalThis.localStorage?.removeItem('webssh.transport.mode');
   });
 
   it('computes exponential backoff with jitter within expected bounds', () => {

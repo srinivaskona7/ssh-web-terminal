@@ -97,6 +97,8 @@ export interface GatewayUrlValidationResult {
 }
 export declare function validateGatewayWsUrl(rawUrl: string): GatewayUrlValidationResult;
 export declare function deriveGatewayHealthUrl(wsUrl: string): string;
+/** Select the protocol that matches the configured endpoint; preserve explicit user choices. */
+export declare function resolveTransportBackendMode(endpoint?: string): TransportBackendMode;
 export declare function resolveGatewayWsUrl(explicitUrl?: string): string;
 export type TransportBackendMode = 'go-gateway' | 'cloudflare-relay';
 export interface LiveConnectParams {

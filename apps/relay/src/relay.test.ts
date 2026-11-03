@@ -76,6 +76,27 @@ describe('Cloudflare Worker SSH Relay: Public Mode, Anti-Rebinding DNS, Session 
     ALLOWED_SSH_TARGETS: 'ec2-*.compute.amazonaws.com,203.0.113.0/24,ssh.example.com'
   };
 
+  it('reports missing deployment configuration and refuses to bypass absent quota enforcement', async () => {
+    const health = (env: RelayEnv) => handleRelayRequest(new Request('https://relay.example/healthz'), env);
+    const incomplete = await (await health(publicEnv)).json() as any;
+    expect(incomplete.status).toBe('misconfigured');
+    expect(incomplete.missingConfiguration).toContain('USER_QUOTA_DO');
+    const ready = { ...publicEnv, USER_QUOTA_DO: createLocalUserQuotaNamespace() };
+    expect((await (await health(ready)).json() as any).status).toBe('ok');
+    for (const users of ['{}', 'null', '[]', 'invalid-json']) {
+      const body = await (await health({ ...ready, AUTH_USERS_JSON: users })).json() as any;
+      expect(body.status).toBe('misconfigured');
+      expect(body.missingConfiguration).toContain('AUTH_USERS_JSON');
+    }
+    const { token } = await issueUserSessionToken('alice', publicEnv);
+    let tcpCalled = false;
+    const response = await handleRelayRequest(new Request('https://relay.example/ws?host=13.238.115.195', {
+      headers: { Origin: 'https://srinivaskona7.github.io', Authorization: `Bearer ${token}` }
+    }), publicEnv, { connectImpl: () => { tcpCalled = true; throw new Error('must not connect'); } });
+    expect(response.status).toBe(503);
+    expect(tcpCalled).toBe(false);
+  });
+
   it('permits multiple globally routable public IPv4 and IPv6 servers in DESTINATION_MODE="public" without per-IP allowlisting, while preserving allowlist mode', () => {
     // Public mode accepts any globally routable public IPv4/IPv6 on port 22 or 2222
     expect(validateDestination('8.8.8.8', 22, publicEnv).ok).toBe(true);

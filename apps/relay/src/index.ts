@@ -283,15 +283,29 @@ export async function handleRelayRequest(
     const destMode = env.DESTINATION_MODE === 'public' ? 'public' : 'allowlist';
     const targetsConfigured =
       destMode === 'public' || Boolean((env.ALLOWED_SSH_TARGETS ?? '').trim());
-    const authConfigured = Boolean(
-      (env.SESSION_SIGNING_SECRET ?? '').trim() ||
-        (env.ENABLE_ADMIN_SHARED_TOKEN === '1' && (env.RELAY_AUTH_TOKEN ?? '').trim()) ||
-        env.ALLOW_UNAUTHENTICATED_DEV === '1'
-    );
+    const missingConfiguration: string[] = [];
+    if (!targetsConfigured) missingConfiguration.push('ALLOWED_SSH_TARGETS');
+    if (!(env.ALLOWED_ORIGINS ?? '').trim()) missingConfiguration.push('ALLOWED_ORIGINS');
+    const sessionAuth = (env.SESSION_SIGNING_SECRET ?? '').trim().length >= 16;
+    const adminAuth = env.ENABLE_ADMIN_SHARED_TOKEN === '1' && Boolean((env.RELAY_AUTH_TOKEN ?? '').trim());
+    if (!sessionAuth && !adminAuth) missingConfiguration.push('SESSION_SIGNING_SECRET');
+    if (sessionAuth && !adminAuth) {
+      try {
+        const users = JSON.parse(env.AUTH_USERS_JSON ?? '{}') as unknown;
+        if (!users || typeof users !== 'object' || Array.isArray(users) ||
+            !Object.values(users).some((value) => typeof value === 'string' && value.length > 0)) {
+          missingConfiguration.push('AUTH_USERS_JSON');
+        }
+      } catch {
+        missingConfiguration.push('AUTH_USERS_JSON');
+      }
+    }
+    if (!env.USER_QUOTA_DO) missingConfiguration.push('USER_QUOTA_DO');
     return jsonResponse(
       200,
       {
-        status: targetsConfigured && authConfigured ? 'ok' : 'misconfigured',
+        status: missingConfiguration.length === 0 ? 'ok' : 'misconfigured',
+        missingConfiguration,
         mode: 'cloudflare-relay',
         destinationMode: destMode,
         tlsEnabled:
@@ -341,6 +355,14 @@ export async function handleRelayRequest(
       { ok: false, code: authCheck.code, error: authCheck.message },
       corsHeader
     );
+  }
+
+  if (!env.USER_QUOTA_DO) {
+    return jsonResponse(503, {
+      ok: false,
+      code: 'ERR_CONFIG_MISSING',
+      error: 'USER_QUOTA_DO binding is required before SSH connections are enabled.'
+    }, corsHeader);
   }
 
   const userId = authCheck.userId ?? 'anonymous';

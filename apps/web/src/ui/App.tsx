@@ -29,6 +29,7 @@ import {
   deriveGatewayHealthUrl,
   loginToCloudflareRelay,
   resolveGatewayWsUrl,
+  resolveTransportBackendMode,
   validateGatewayWsUrl,
   type TransportBackendMode
 } from '../transport';
@@ -261,15 +262,9 @@ export function App(): JSX.Element {
   const [editorContent, setEditorContent] = useState('');
   const [editorSaved, setEditorSaved] = useState(true);
   const [showDiffViewer, setShowDiffViewer] = useState(false);
-  const [transportMode, setTransportMode] = useState<TransportBackendMode>(() => {
-    try {
-      const saved = globalThis.localStorage?.getItem('webssh.transport.mode');
-      if (saved === 'cloudflare-relay' || saved === 'go-gateway') return saved;
-    } catch {
-      // ignore
-    }
-    return 'go-gateway';
-  });
+  const [transportMode, setTransportMode] = useState<TransportBackendMode>(() =>
+    resolveTransportBackendMode()
+  );
   const [gatewayUrl, setGatewayUrl] = useState<string>(() => resolveGatewayWsUrl());
   const [gatewayAuthToken, setGatewayAuthToken] = useState<string>(() => {
     try {
@@ -530,10 +525,23 @@ export function App(): JSX.Element {
         activeSessions?: number;
         tlsEnabled?: boolean;
         authRequired?: boolean;
+        mode?: string;
+        missingConfiguration?: string[];
       };
+      if (data.status !== 'ok') {
+        setGatewayProbeStatus({
+          ok: false,
+          message: `Backend setup incomplete: ${data.missingConfiguration?.join(', ') || data.status || 'invalid health response'}`
+        });
+        return;
+      }
+      if ((data.mode === 'cloudflare-relay') !== (transportMode === 'cloudflare-relay')) {
+        setGatewayProbeStatus({ ok: false, message: 'Transport mode does not match this endpoint. Select the matching SSH Transport Mode.' });
+        return;
+      }
       setGatewayProbeStatus({
-        ok: data.status === 'ok',
-        message: `Gateway Online (${healthUrl}) · Active Sessions: ${data.activeSessions ?? 0} · TLS: ${
+        ok: true,
+        message: `Backend Online (${healthUrl}) · Active Sessions: ${data.activeSessions ?? 0} · TLS: ${
           data.tlsEnabled ? 'WSS Enabled' : 'HTTP/WS'
         } · Auth: ${data.authRequired ? 'Token Required' : 'Open'}`
       });

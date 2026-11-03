@@ -361,6 +361,29 @@ export function deriveGatewayHealthUrl(wsUrl) {
         return 'http://127.0.0.1:8080/healthz';
     }
 }
+/** Select the protocol that matches the configured endpoint; preserve explicit user choices. */
+export function resolveTransportBackendMode(endpoint = resolveGatewayWsUrl()) {
+    try {
+        const saved = globalThis.localStorage?.getItem('webssh.transport.mode');
+        if (saved === 'cloudflare-relay' || saved === 'go-gateway')
+            return saved;
+    }
+    catch {
+        // Storage can be unavailable in private browsing.
+    }
+    const configured = import.meta
+        .env?.VITE_TRANSPORT_MODE;
+    if (configured === 'cloudflare-relay' || configured === 'go-gateway')
+        return configured;
+    try {
+        if (new URL(endpoint).hostname.endsWith('.workers.dev'))
+            return 'cloudflare-relay';
+    }
+    catch {
+        // URL validation reports invalid endpoints when connecting.
+    }
+    return 'go-gateway';
+}
 export function resolveGatewayWsUrl(explicitUrl) {
     const trimmed = explicitUrl?.trim();
     if (trimmed) {

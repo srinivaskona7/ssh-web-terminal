@@ -39,7 +39,8 @@ jobs:
 
       - name: Build tokens, static web bundle, and verify all referenced assets
         env:
-          VITE_GATEWAY_URL: ${{ vars.GATEWAY_URL || '' }}
+          VITE_GATEWAY_URL: ${{ vars.GATEWAY_URL || 'wss://webssh-studio-relay.life-magic.workers.dev/ws' }}
+          VITE_TRANSPORT_MODE: ${{ vars.TRANSPORT_MODE || '' }}
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
         run: npm run build
 
