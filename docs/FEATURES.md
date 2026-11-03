@@ -33,8 +33,13 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 
 | Capability | Module | Status | Proof / prerequisite |
 |---|---|---|---|
-| xterm.js PTY rendering | `apps/web/src/terminal/xterm-adapter.ts` | Implemented | needs a connected PTY channel |
+| One emulator per pane, mounted on DOM availability | `apps/web/src/terminal/TerminalPane.tsx` | Verified (unit) | `TerminalPane.test.tsx`; real-host keyboard/Vim/top proof not re-run in this pass |
+| PTY input/output and per-channel resize | `apps/web/src/terminal/TerminalPane.tsx`, `xterm-adapter.ts` | Verified (unit) | `TerminalPane.test.tsx`; needs a connected PTY channel to prove end to end |
+| WebGL → canvas → DOM renderer fallback | `apps/web/src/terminal/xterm-adapter.ts` | Implemented | context loss reloads a real fallback and reports the mode; not exercised on a GPU-reset host |
+| Independent connections and channel→pane routing | `apps/web/src/session/connection-registry.ts` | Verified (unit) | `connection-registry.test.ts` |
 | Tabs, split panes, workspace state | `apps/web/src/terminal/workspace-state.ts` | Verified | `terminal.test.ts` |
+| Tab status is opening/ready/error, never guessed | `apps/web/src/ui/App.tsx` | Verified (unit) | `app.test.tsx` (second tab waits for `channel_opened`) |
+| Local command output lives in an inspector, not the terminal | `apps/web/src/ui/App.tsx`, `app.css` | Verified (unit) | `app.test.tsx` asserts the viewport never contains exec output |
 | Workspace presets Terminal / Develop / Operate | `apps/web/src/prefs/index.ts`, `apps/web/src/ui/App.tsx` | Implemented | persisted through `PreferencesStore` |
 | Resizable navigation rail (pointer + keyboard) | `apps/web/src/ui/App.tsx`, `railWidthPx` preference | Implemented | width persists across reloads |
 | Command palette, snippets, keybindings | `apps/web/src/ui/productivity.ts` | Verified | `productivity.test.ts` |

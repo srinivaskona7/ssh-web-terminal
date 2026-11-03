@@ -13,6 +13,8 @@ export interface XtermAdapterOptions {
     preferredRenderer?: 'auto' | TerminalRendererMode;
     onData?: (data: string) => void;
     onResize?: (cols: number, rows: number) => void;
+    /** Reports the renderer actually in use, including after a context loss. */
+    onRendererChange?: (mode: TerminalRendererMode) => void;
 }
 export declare class XtermPaneAdapter {
     readonly terminal: Terminal;
@@ -20,6 +22,7 @@ export declare class XtermPaneAdapter {
     readonly searchAddon: SearchAddon;
     private activeRenderer;
     private resizeObserver;
+    private readonly onRendererChange?;
     constructor(options: XtermAdapterOptions);
     get rendererMode(): TerminalRendererMode;
     mount(container: HTMLElement, preferred?: 'auto' | TerminalRendererMode): Promise<TerminalRendererMode>;

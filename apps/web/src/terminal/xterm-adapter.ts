@@ -17,6 +17,8 @@ export interface XtermAdapterOptions {
   preferredRenderer?: 'auto' | TerminalRendererMode;
   onData?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
+  /** Reports the renderer actually in use, including after a context loss. */
+  onRendererChange?: (mode: TerminalRendererMode) => void;
 }
 
 export class XtermPaneAdapter {
@@ -25,8 +27,10 @@ export class XtermPaneAdapter {
   public readonly searchAddon: SearchAddon;
   private activeRenderer: TerminalRendererMode = 'dom';
   private resizeObserver: ResizeObserver | null = null;
+  private readonly onRendererChange?: (mode: TerminalRendererMode) => void;
 
   constructor(options: XtermAdapterOptions) {
+    this.onRendererChange = options.onRendererChange;
     this.terminal = new Terminal({
       fontFamily: options.fontFamily,
       fontSize: options.fontSize,
@@ -69,8 +73,17 @@ export class XtermPaneAdapter {
         const { WebglAddon } = await import('@xterm/addon-webgl');
         const webgl = new WebglAddon();
         webgl.onContextLoss(() => {
-          webgl.dispose();
-          this.activeRenderer = 'canvas';
+          // Context loss is expected on GPU resets and tab suspension. Drop the
+          // dead renderer and mount a real fallback rather than relabelling.
+          try {
+            webgl.dispose();
+          } catch {
+            // Already gone.
+          }
+          void this.tryCanvasFallback().then(() => {
+            if (this.activeRenderer !== 'canvas') this.activeRenderer = 'dom';
+            this.onRendererChange?.(this.activeRenderer);
+          });
         });
         this.terminal.loadAddon(webgl);
         this.activeRenderer = 'webgl';
@@ -98,6 +111,7 @@ export class XtermPaneAdapter {
     });
     this.resizeObserver.observe(container);
 
+    this.onRendererChange?.(this.activeRenderer);
     return this.activeRenderer;
   }
 

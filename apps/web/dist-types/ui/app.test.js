@@ -63,6 +63,13 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         const termViewport = container.querySelector('[data-testid="terminal-viewport"]');
         expect(termViewport.style.fontSize).toBe('17px');
         expect(termViewport.style.fontFamily).toContain('JetBrains Mono');
+        // Local command output lives in the inspector, never duplicated inside the
+        // terminal surface.
+        const inspectorToggle = container.querySelector('[data-testid="toggle-command-inspector"]');
+        inspectorToggle.click();
+        await new Promise((r) => setTimeout(r, 10));
+        const commandInspector = container.querySelector('[data-testid="command-inspector"]');
+        expect(commandInspector).toBeTruthy();
         const incBtn = container.querySelector('[data-testid="font-size-inc-btn"]');
         incBtn.click();
         await new Promise((r) => setTimeout(r, 10));
@@ -77,7 +84,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         }
         termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
         await new Promise((r) => setTimeout(r, 10));
-        expect(termViewport.textContent).toContain('Available local commands: connect <user@host>');
+        expect(commandInspector.textContent).toContain('Available local commands: connect <user@host>');
         // 5. Test 'connect root@10.0.0.5' command opening simple Connection modal
         for (const ch of 'connect root@10.0.0.5') {
             termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
@@ -100,13 +107,13 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         expect(container.querySelector('[data-testid="stop-red-square"]')).toBeTruthy();
         expect(container.querySelector('[data-testid="popout-terminal-btn"]')).toBeTruthy();
         expect(container.querySelector('[data-testid="more-options-menu-btn"]')).toBeTruthy();
-        const asciiBanner = container.querySelector('[data-testid="terminal-ascii-banner"]');
-        expect(asciiBanner?.textContent).toContain('Welcome to the WebSSH Studio Interactive Terminal.');
-        expect(asciiBanner?.textContent).not.toContain('All rights reserved');
-        expect(container.querySelector('[data-testid="prompt-username"]')?.textContent).toBe('root');
-        expect(container.querySelector('[data-testid="prompt-hostname"]')?.textContent).toBe('10.0.0.5');
-        expect(container.querySelector('[data-testid="prompt-directory"]')?.textContent).toBe('~');
-        expect(container.querySelector('[data-testid="prompt-arrow"]')?.textContent).toContain('➜');
+        // The terminal surface is the emulator alone: no ASCII banner, no
+        // synthetic prompt and no DOM transcription of remote output.
+        expect(container.querySelector('[data-testid="terminal-ascii-banner"]')).toBeNull();
+        expect(container.querySelector('[data-testid="prompt-username"]')).toBeNull();
+        expect(container.querySelector('[data-testid="terminal-panes"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="xterm-engine-mount"]')).toBeTruthy();
+        expect(container.querySelector('[data-testid="terminal-disconnected-state"]')).toBeNull();
         const workspaceAxe = await axe.run(container, {
             runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] },
             rules: { 'color-contrast': { enabled: false } }
@@ -142,16 +149,21 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         const sendKey = (key) => {
             viewport.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
         };
-        // 1. Ghost-text autocomplete: type "tele" -> accept with Tab -> "telemetry"
+        const inspectorToggle = container.querySelector('[data-testid="toggle-command-inspector"]');
+        inspectorToggle.click();
+        await new Promise((r) => setTimeout(r, 10));
+        // 1. Local completion: typing "tele" then Tab completes to "telemetry",
+        // which the command engine resolves to the Live control screen. That is
+        // observable proof of completion, and nothing is echoed into the terminal.
         for (const ch of 'tele')
             sendKey(ch);
-        await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="terminal-ghost-suggestion"]')?.textContent).toBe('metry');
         sendKey('Tab');
+        sendKey('Enter');
         await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="terminal-current-input"]')?.textContent).toBe('telemetry');
-        for (let i = 0; i < 9; i++)
-            sendKey('Backspace');
+        expect(container.querySelector('[data-testid="screen-overview"]')).toBeTruthy();
+        expect(viewport.textContent).not.toContain('telemetry');
+        navWorkspace.click();
+        await new Promise((r) => setTimeout(r, 10));
         // 2. Dangerous Command Safety Guard intercepts "rm -rf /"
         for (const ch of 'rm -rf /')
             sendKey(ch);
@@ -167,7 +179,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
             sendKey(ch);
         sendKey('Enter');
         await new Promise((r) => setTimeout(r, 10));
-        expect(container.querySelector('[data-testid="command-blocks-list"]')?.textContent).toContain('$ help');
+        expect(container.querySelector('[data-testid="command-inspector"]')?.textContent).toContain('$ help');
         const redactBtn = container.querySelector('[data-testid="toggle-redaction-btn"]');
         redactBtn.click();
         await new Promise((r) => setTimeout(r, 10));
@@ -319,7 +331,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         }
         viewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
         await new Promise((r) => setTimeout(r, 15));
-        expect(viewport.textContent).toContain('Not connected to an SSH server');
+        expect(viewport.textContent).toContain('No server connected.');
         expect(viewport.textContent).not.toContain('Executed remote/shell command');
         // 2. Connect via New Connection modal with GitHub Pages URL -> must reject immediately
         const newConnBtn = container.querySelector('[data-testid="new-connection-btn"]');
@@ -351,13 +363,19 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
         submitBtn.click();
         await new Promise((r) => setTimeout(r, 30));
         expect(container.querySelector('[data-testid="tab-session-1"]')?.textContent).toContain('ubuntu@127.0.0.1');
+        // Explicit exec jobs report through the inspector; interactive PTY output
+        // belongs to the emulator and is never transcribed into the DOM.
+        const inspectorToggle = container.querySelector('[data-testid="toggle-command-inspector"]');
+        inspectorToggle.click();
+        await new Promise((r) => setTimeout(r, 10));
         const termViewport = container.querySelector('[data-testid="terminal-viewport"]');
         for (const ch of 'uname -s') {
             termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
         }
         termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
         await new Promise((r) => setTimeout(r, 25));
-        expect(termViewport.textContent).toContain('Linux');
+        expect(container.querySelector('[data-testid="command-inspector"]')?.textContent).toContain('Linux');
+        expect(termViewport.textContent).not.toContain('Linux');
         // 4. Open second tab while connected -> allocates secondary PTY channel
         const addTabBtn = container.querySelector('[data-testid="add-tab-btn"]');
         addTabBtn.click();

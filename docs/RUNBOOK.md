@@ -200,3 +200,29 @@ Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `clou
 ### Verification limits for relay file tools
 
 The relay SSH terminal and command execution have been verified against EC2 OpenSSH, not just the isolated fixture. The current relay `sftpOp` implementation is shell-command based, not the SFTP subsystem: it invokes `ls`/`cat` and a fixture-only `write-file` command. Relay editor saves/uploads therefore must not be considered production-ready. Use the Go gateway for real SFTP, binary transfers, and editor saves. Likewise, a browser-side replay buffer does not retain a remote process across a new SSH connection, and relay tunnel start does not bind a TCP listener on the user's computer. The feature matrix above describes intended/fixture behavior for those relay capabilities, not verified production support.
+
+## 6. Terminal verification (one emulator per pane)
+
+The terminal surface must show exactly one xterm per pane. jsdom cannot prove this — the pane
+deliberately skips mounting there — so verify in a real browser.
+
+1. Build and preview locally with the root base:
+   `npm run build && (cd apps/web && npx vite preview --port 4178)`
+2. Open `http://localhost:4178/`, click the `Terminal 1` tab to enter the workspace.
+3. In the console:
+   ```js
+   document.querySelectorAll('.webssh-xterm-pane').length            // > 0
+   [...document.querySelectorAll('.webssh-xterm-pane')].map(p => !!p.querySelector('.xterm'))
+   document.querySelector('[data-testid="terminal-renderer-notice"]').textContent
+   ```
+   Expect one mounted emulator per pane and a `Renderer: webgl|canvas|dom` notice matching what
+   actually loaded.
+4. Keyboard: click inside the terminal and type. Keys go to the pane's PTY channel; the local
+   line editor must not echo them. Local command output appears only in the **Inspector** panel
+   (topbar), never inside the terminal.
+5. Split (`splitPanes > 1`) opens a second channel; resizing pane 2 must send `resize` for pane
+   2's channel, not channel 1.
+
+Known limits: a WebGL context loss reloads a real canvas/DOM fallback and updates the notice;
+this has not been exercised on a GPU-reset host. Two connections are independent in the registry,
+but the global status bar still reports the active connection only.

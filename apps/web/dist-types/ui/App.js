@@ -4,7 +4,8 @@ import { Badge, Button, Card, ComponentGallery, EmptyState, Icon, Modal, THEME_I
 import { KeyVault, KnownHostsStore, base64ToBytes, bytesToBase64, validateAndInspectPrivateKeyPem } from '../vault';
 import { HostRegistry } from '../hosts';
 import { PreferencesStore } from '../prefs';
-import { XtermPaneAdapter } from '../terminal/xterm-adapter';
+import { TerminalPane } from '../terminal/TerminalPane';
+import { ConnectionRegistry, nextConnectionId } from '../session/connection-registry';
 import { BrowserSshRelaySessionClient, LiveGatewaySessionClient, deriveGatewayHealthUrl, loginToCloudflareRelay, requestConnectionTicket, resolveGatewayWsUrl, resolveTransportBackendMode, validateGatewayWsUrl } from '../transport';
 import { AsciicastRecorder, CommandPaletteRegistry, KeybindingRegistry, SPECIAL_KEYS_ROW, SnippetLibrary, interpolateSnippet, parseAsciicastV2, scrubAsciicastOutput } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
@@ -99,14 +100,17 @@ function TurnstileWidget({ siteKey, resetNonce, onToken }) {
 export function App() {
     const rootRef = useRef(null);
     const terminalViewRef = useRef(null);
-    const xtermHostRef = useRef(null);
-    const xtermAdapterRef = useRef(null);
+    // One adapter per pane; incoming PTY bytes are routed by channel, never to a
+    // single shared terminal.
+    const paneAdaptersRef = useRef(new Map());
     const turnstileSiteKey = resolveTurnstileSiteKey();
     const prefsStore = useMemo(() => new PreferencesStore(), []);
     const hostRegistry = useMemo(() => new HostRegistry(), []);
     const vault = useMemo(() => new KeyVault(), []);
     const knownHosts = useMemo(() => new KnownHostsStore(), []);
     const liveSessionRef = useRef(null);
+    // Every live transport, so opening a second server never closes the first.
+    const connectionRegistryRef = useRef(new ConnectionRegistry());
     // A guest ticket is bound to one host/port and expires quickly, so it is
     // cached here instead of in the administrator token state.
     const guestTicketRef = useRef(null);
@@ -146,6 +150,16 @@ export function App() {
     const [activeTabId, setActiveTabId] = useState('tab-1');
     const [splitPanes, setSplitPanes] = useState(1);
     const [broadcastInput, setBroadcastInput] = useState(false);
+    const [splitPaneChannel, setSplitPaneChannel] = useState(null);
+    const [showCommandInspector, setShowCommandInspector] = useState(false);
+    const [rendererNotice, setRendererNotice] = useState('');
+    const tabsRef = useRef(tabs);
+    tabsRef.current = tabs;
+    const activeTabIdRef = useRef(activeTabId);
+    activeTabIdRef.current = activeTabId;
+    const splitChannelRef = useRef(null);
+    splitChannelRef.current = splitPaneChannel;
+    const splitOwnerRef = useRef(undefined);
     // Default to clean Welcome screen & Minimal Mode (IDE mode disabled until requested)
     const [activeScreen, setActiveScreen] = useState('welcome');
     const [ideMode, setIdeMode] = useState(false);
@@ -347,7 +361,6 @@ export function App() {
     const [, setHistoryIndex] = useState(-1);
     const historyIndexRef = useRef(-1);
     const [copiedSnippet, setCopiedSnippet] = useState(false);
-    const ghostSuggestion = useMemo(() => computeGhostAutocomplete(currentInput, history), [currentInput, history]);
     const chmodFormatted = useMemo(() => formatChmodOctal(chmodPerms), [chmodPerms]);
     const diffEntries = useMemo(() => computeSideBySideDiff(editorOriginalContent, editorContent), [editorOriginalContent, editorContent]);
     const updateCurrentInput = (next) => {
@@ -367,17 +380,29 @@ export function App() {
     const [keyPermissionMode, setKeyPermissionMode] = useState('0400');
     const [connectErrorMsg, setConnectErrorMsg] = useState('');
     const authorizedKeysSnippet = useMemo(() => `echo "${generatedPubKey}" >> ~/.ssh/authorized_keys`, [generatedPubKey]);
+    const terminalPalette = THEMES[activeTheme] ?? THEMES.dark;
+    const activeConnection = connectionRegistryRef.current.get(tabs.find((t) => t.id === activeTabId)?.connectionId);
+    const splitPaneTransport = activeConnection?.client ?? null;
     const activeSessionTitle = useMemo(() => {
         const found = tabs.find((t) => t.id === activeTabId);
         return found ? found.title : sessionTabLabel;
     }, [tabs, activeTabId, sessionTabLabel]);
     const writeToXterm = (text) => {
         try {
-            xtermAdapterRef.current?.writeText(text);
+            paneAdaptersRef.current.get(activeTabIdRef.current)?.writeText(text);
         }
         catch {
             // Ignore in headless environments without canvas
         }
+    };
+    const registerPaneAdapter = (paneId, adapter) => {
+        if (adapter)
+            paneAdaptersRef.current.set(paneId, adapter);
+        else
+            paneAdaptersRef.current.delete(paneId);
+    };
+    const handleRendererChange = (_paneId, mode) => {
+        setRendererNotice((prev) => (prev === mode ? prev : mode));
     };
     const copyToClipboard = (text) => {
         if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
@@ -666,49 +691,77 @@ export function App() {
     const handleAddTab = () => {
         const nextNum = tabs.length + 1;
         const newId = `tab-${Date.now()}-${nextNum}`;
-        const isLive = Boolean(liveSessionRef.current?.isConnected);
-        const newTitle = isLive
-            ? `Terminal ${nextNum} (${connectedUser}@${connectedHost})`
+        const activeTab = tabs.find((t) => t.id === activeTabId);
+        const connection = connectionRegistryRef.current.get(activeTab?.connectionId);
+        const newTitle = connection
+            ? `Terminal ${nextNum} (${connection.user}@${connection.host})`
             : `Terminal ${nextNum}`;
-        setTabs((prev) => [...prev, { id: newId, title: newTitle, connected: isLive, channelId: nextNum }]);
+        // A new tab is "opening" until the server acknowledges its PTY channel. It
+        // is never labelled connected before that acknowledgement.
+        setTabs((prev) => [
+            ...prev,
+            {
+                id: newId,
+                title: newTitle,
+                connected: false,
+                status: connection && connection.client.isConnected ? 'opening' : 'idle',
+                connectionId: connection?.id
+            }
+        ]);
         setActiveTabId(newId);
         setSessionTabLabel(newTitle);
         setActiveScreen('workspace');
-        if (liveSessionRef.current?.isConnected) {
-            void liveSessionRef.current
-                .openChannel(cols, rows)
-                .then((res) => {
-                if (res.ok && res.channel) {
-                    setTabs((prev) => prev.map((t) => (t.id === newId ? { ...t, channelId: res.channel, connected: true } : t)));
-                }
-            })
-                .catch(() => {
-                // Ignore channel open errors
-            });
-        }
+        if (!connection || !connection.client.isConnected)
+            return;
+        void connection.client
+            .openChannel(cols, rows)
+            .then((res) => {
+            const channel = res.channel;
+            if (!channel) {
+                const message = res.error ?? 'The server did not open a new terminal channel.';
+                setTabs((prev) => prev.map((t) => t.id === newId ? { ...t, connected: false, status: 'error', errorMessage: message } : t));
+                return;
+            }
+            connectionRegistryRef.current.addChannel(connection.id, channel);
+            setTabs((prev) => prev.map((t) => t.id === newId
+                ? { ...t, channelId: channel, connected: true, status: 'ready', errorMessage: undefined }
+                : t));
+        })
+            .catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            setTabs((prev) => prev.map((t) => t.id === newId ? { ...t, connected: false, status: 'error', errorMessage: message } : t));
+        });
     };
     const handleCloseTab = (tabId, e) => {
         if (e)
             e.stopPropagation();
         const closingTab = tabs.find((t) => t.id === tabId);
-        if (closingTab?.channelId && liveSessionRef.current?.isConnected && tabs.length > 1) {
-            liveSessionRef.current.closeChannel(closingTab.channelId);
+        if (closingTab) {
+            const registry = connectionRegistryRef.current;
+            const connection = registry.get(closingTab.connectionId);
+            if (connection) {
+                if (closingTab.channelId !== undefined) {
+                    registry.closeChannel(connection.id, closingTab.channelId);
+                }
+                const remaining = tabs.filter((t) => t.id !== tabId && t.connectionId === connection.id);
+                // Only the last pane of a connection closes its transport; other
+                // servers in the workspace are left alone.
+                if (remaining.length === 0)
+                    registry.close(connection.id);
+                if (splitPaneChannel !== null && connection.channels.has(splitPaneChannel)) {
+                    registry.closeChannel(connection.id, splitPaneChannel);
+                    setSplitPaneChannel(null);
+                }
+            }
         }
         if (tabs.length <= 1) {
-            liveSessionRef.current?.close();
-            liveSessionRef.current = null;
             setConnectionState('disconnected');
             setSessionTabLabel('Terminal 1');
-            setConnectedUser('bob');
-            setConnectedHost('caleston-lp10');
-            setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false, channelId: 1 }]);
+            setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false, status: 'idle' }]);
             setActiveTabId('tab-1');
             setSftpRawEntries([]);
             setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
-            setTerminalLines([
-                'WebSSH Studio v1.0.0',
-                "Type 'help' for local commands or click 'New Connection' to authenticate."
-            ]);
+            setTerminalLines([]);
             return;
         }
         const nextTabs = tabs.filter((t) => t.id !== tabId);
@@ -716,22 +769,25 @@ export function App() {
         if (activeTabId === tabId && nextTabs[0]) {
             setActiveTabId(nextTabs[0].id);
             setSessionTabLabel(nextTabs[0].title);
+            liveSessionRef.current =
+                connectionRegistryRef.current.get(nextTabs[0].connectionId)?.client ?? null;
         }
     };
     const handleDisconnect = () => {
-        liveSessionRef.current?.close();
+        const activeTab = tabs.find((t) => t.id === activeTabId);
+        const connection = connectionRegistryRef.current.get(activeTab?.connectionId);
+        if (connection)
+            connectionRegistryRef.current.close(connection.id);
         liveSessionRef.current = null;
         setConnectionState('disconnected');
         setPendingInputBytes(0);
         setSftpRawEntries([]);
         setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
-        setTerminalLines((prev) => [...prev, `Disconnected from ${sessionTabLabel}.`]);
-        writeToXterm(`${String.fromCharCode(13, 10)}Disconnected from ${sessionTabLabel}.${String.fromCharCode(13, 10)}webssh:~$ `);
-        const resetTitle = 'Terminal 1';
-        setSessionTabLabel(resetTitle);
-        setConnectedUser('bob');
-        setConnectedHost('caleston-lp10');
-        setTabs((prev) => prev.map((t) => ({ ...t, title: t.id === activeTabId ? resetTitle : t.title, connected: false })));
+        setTabs((prev) => prev.map((t) => connection && t.connectionId === connection.id
+            ? { ...t, connected: false, status: 'idle', channelId: undefined, connectionId: undefined }
+            : t));
+        setSessionTabLabel('Terminal 1');
+        setTerminalLines([]);
     };
     const handlePrivateKeyFileUpload = async (e) => {
         const input = e.currentTarget;
@@ -789,7 +845,6 @@ export function App() {
                         return;
                     }
                 }
-                liveSessionRef.current?.close();
                 const protocolAuthMethod = authMethod === 'Password'
                     ? 'password'
                     : authMethod === 'Private Key (.pem / id_rsa)'
@@ -853,6 +908,7 @@ export function App() {
                     }
                     effectiveGatewayToken = guestTicketRef.current?.token ?? '';
                 }
+                const connectionId = nextConnectionId();
                 const sessionParams = {
                     transportMode,
                     gatewayUrl: gwValidation.normalizedUrl,
@@ -867,22 +923,22 @@ export function App() {
                     keyFingerprint: generatedFp,
                     cols,
                     rows,
-                    onPtyData: (_channel, data) => {
+                    onPtyData: (channel, data) => {
+                        // The remote shell is the only writer to its terminal. Output is
+                        // routed to the pane that owns this channel; it is never copied into
+                        // a DOM transcription or stripped of escape sequences.
+                        const tab = tabsRef.current.find((t) => t.connectionId === connectionId && t.channelId === channel);
+                        const paneId = tab?.id ??
+                            (splitOwnerRef.current === connectionId && splitChannelRef.current === channel
+                                ? 'split-2'
+                                : null);
+                        if (!paneId)
+                            return;
                         try {
-                            xtermAdapterRef.current?.writeBytes(data);
+                            paneAdaptersRef.current.get(paneId)?.writeBytes(data);
                         }
                         catch {
-                            // ignore
-                        }
-                        const rawText = new TextDecoder().decode(data);
-                        const cleaned = rawText
-                            .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-                            .replace(/\r/g, '')
-                            .split('\n')
-                            .map((l) => l.trimEnd())
-                            .filter((l) => l.length > 0);
-                        if (cleaned.length > 0) {
-                            setTerminalLines((prev) => [...prev.slice(-200), ...cleaned]);
+                            // A pane disposed mid-write must not break the transport.
                         }
                     },
                     onHostKeyPrompt: async (prompt) => {
@@ -916,12 +972,18 @@ export function App() {
                         return '';
                     },
                     onChannelClosed: (channel) => {
-                        setTabs((prev) => prev.map((t) => (t.channelId === channel ? { ...t, connected: false } : t)));
+                        setTabs((prev) => prev.map((t) => t.connectionId === connectionId && t.channelId === channel
+                            ? { ...t, connected: false, status: 'idle' }
+                            : t));
                     },
                     onStateChange: (st) => {
                         if (st === 'disconnected') {
-                            setConnectionState('disconnected');
-                            setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
+                            setTabs((prev) => prev.map((t) => t.connectionId === connectionId
+                                ? { ...t, connected: false, status: 'idle', channelId: undefined }
+                                : t));
+                            if (tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId === connectionId) {
+                                setConnectionState('disconnected');
+                            }
                         }
                     }
                 };
@@ -948,9 +1010,47 @@ export function App() {
                     setSessionTabLabel(tabTitle);
                     setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
                     setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
-                    setTabs((prev) => prev.map((t) => t.id === activeTabId
-                        ? { ...t, title: tabTitle, connected: true, channelId: meta.ptyChannel || 1 }
-                        : t));
+                    const initialChannel = meta.ptyChannel || 1;
+                    connectionRegistryRef.current.add({
+                        id: connectionId,
+                        host: hostVal,
+                        port: portNum,
+                        user: userVal,
+                        transport: transportMode === 'cloudflare-relay' ? 'cloudflare-relay' : 'go-gateway',
+                        client,
+                        channels: new Set([initialChannel])
+                    });
+                    const occupiedTab = tabsRef.current.find((t) => t.id === activeTabId);
+                    const occupiedConnection = connectionRegistryRef.current.get(occupiedTab?.connectionId);
+                    if (occupiedConnection && occupiedConnection.client.isConnected) {
+                        // The active tab already owns a live transport. Give the new server
+                        // its own tab instead of rewiring the pane onto a different client.
+                        const newTabId = `tab-${Date.now()}`;
+                        setTabs((prev) => [
+                            ...prev,
+                            {
+                                id: newTabId,
+                                title: tabTitle,
+                                connected: true,
+                                status: 'ready',
+                                connectionId,
+                                channelId: initialChannel
+                            }
+                        ]);
+                        setActiveTabId(newTabId);
+                    }
+                    else {
+                        setTabs((prev) => prev.map((t) => t.id === activeTabId
+                            ? {
+                                ...t,
+                                title: tabTitle,
+                                connected: true,
+                                status: 'ready',
+                                connectionId,
+                                channelId: initialChannel
+                            }
+                            : t));
+                    }
                     setConnectionState('connected');
                     setConnectModalOpen(false);
                     setActiveScreen('workspace');
@@ -1032,7 +1132,7 @@ export function App() {
         if (cmd === 'clear') {
             setTerminalLines([]);
             try {
-                xtermAdapterRef.current?.terminal.clear();
+                paneAdaptersRef.current.get(activeTabIdRef.current)?.terminal.clear();
             }
             catch {
                 // Ignore
@@ -1132,8 +1232,8 @@ export function App() {
         const activeClient = liveSessionRef.current;
         if (activeClient && activeClient.isConnected) {
             setTerminalLines((prev) => [...prev, `${connectedUser}@${connectedHost}:~$ ${trimmed}`]);
-            if (broadcastInput && splitPanes > 1) {
-                activeClient.sendPtyText(2, trimmed + String.fromCharCode(13));
+            if (broadcastInput && splitPanes > 1 && splitPaneChannel !== null) {
+                activeClient.sendPtyText(splitPaneChannel, trimmed + String.fromCharCode(13));
             }
             void activeClient
                 .execCommand(trimmed)
@@ -1170,6 +1270,12 @@ export function App() {
             setActiveScreen('welcome');
             return;
         }
+        const eventTarget = e.target;
+        if (eventTarget && typeof eventTarget.closest === 'function' && eventTarget.closest('.xterm')) {
+            // xterm forwards these keys to the shell itself. Intercepting them here
+            // double-echoed input into the local line editor.
+            return;
+        }
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
             // Allow global Cmd+K handler or clear buffer when Shift is held
             return;
@@ -1189,7 +1295,7 @@ export function App() {
             e.preventDefault();
             setTerminalLines([]);
             try {
-                xtermAdapterRef.current?.terminal.clear();
+                paneAdaptersRef.current.get(activeTabIdRef.current)?.terminal.clear();
             }
             catch {
                 // Ignore
@@ -1250,76 +1356,49 @@ export function App() {
             updateCurrentInput((prev) => prev + e.key);
         }
     };
-    // 4. Mount @xterm/xterm engine into xtermHostRef when available in browser
+    // A split pane is a real second channel on the active connection. It opens
+    // only after the server acknowledges it, and it is closed with the pane.
     useEffect(() => {
-        const hostEl = xtermHostRef.current;
-        if (!hostEl)
-            return;
-        const isJsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent);
-        if (isJsdom)
-            return;
-        const palette = THEMES[activeTheme] ?? THEMES.dark;
-        let disposed = false;
-        try {
-            const adapter = new XtermPaneAdapter({
-                fontFamily,
-                fontSize,
-                lineHeight: 1.45,
-                cursorStyle: cursorShape,
-                cursorBlink: true,
-                scrollback: 10000,
-                theme: {
-                    background: palette.terminalBg,
-                    foreground: palette.terminalFg,
-                    cursor: palette.terminalCursor
-                },
-                onResize: (c, r) => {
-                    if (!disposed) {
-                        setCols(c);
-                        setRows(r);
-                        liveSessionRef.current?.resizeChannel(1, c, r);
-                    }
-                }
-            });
-            xtermAdapterRef.current = adapter;
-            void adapter.mount(hostEl, 'dom').then(() => {
-                if (disposed)
-                    return;
-                const helperTextarea = hostEl.querySelector('.xterm-helper-textarea');
-                if (helperTextarea) {
-                    helperTextarea.setAttribute('aria-label', 'Terminal xterm input');
-                    helperTextarea.setAttribute('tabindex', '-1');
-                }
-            });
+        const owner = splitOwnerRef.current;
+        const activeTab = tabsRef.current.find((t) => t.id === activeTabId);
+        const connection = connectionRegistryRef.current.get(activeTab?.connectionId);
+        // A split belongs to one connection. Closing it, or switching to another
+        // server, must release that remote PTY instead of leaking it.
+        if (owner && owner !== connection?.id && splitChannelRef.current !== null) {
+            connectionRegistryRef.current.closeChannel(owner, splitChannelRef.current);
+            splitOwnerRef.current = undefined;
+            setSplitPaneChannel(null);
         }
-        catch {
-            // Fallback to DOM viewport when canvas/matchMedia is unavailable
+        if (splitPanes <= 1) {
+            if (splitChannelRef.current !== null && splitOwnerRef.current) {
+                connectionRegistryRef.current.closeChannel(splitOwnerRef.current, splitChannelRef.current);
+            }
+            splitOwnerRef.current = undefined;
+            setSplitPaneChannel(null);
+            return;
         }
+        if (!connection || !connection.client.isConnected)
+            return;
+        if (splitPaneChannel !== null && connection.channels.has(splitPaneChannel))
+            return;
+        let cancelled = false;
+        void connection.client
+            .openChannel(cols, rows)
+            .then((res) => {
+            const channel = res.channel;
+            if (cancelled || !channel)
+                return;
+            connectionRegistryRef.current.addChannel(connection.id, channel);
+            splitOwnerRef.current = connection.id;
+            setSplitPaneChannel(channel);
+        })
+            .catch(() => {
+            // The split stays closed when the server refuses a second channel.
+        });
         return () => {
-            disposed = true;
-            try {
-                xtermAdapterRef.current?.dispose();
-            }
-            catch {
-                // Ignore dispose errors
-            }
-            xtermAdapterRef.current = null;
+            cancelled = true;
         };
-    }, []);
-    useEffect(() => {
-        const adapter = xtermAdapterRef.current;
-        if (!adapter)
-            return;
-        try {
-            adapter.terminal.options.fontSize = fontSize;
-            adapter.terminal.options.fontFamily = fontFamily;
-            adapter.terminal.options.cursorStyle = cursorShape;
-            adapter.fitAddon.fit();
-        }
-        catch {
-            // Ignore fit error in headless tests
-        }
-    }, [fontSize, fontFamily, cursorShape]);
+    }, [splitPanes, activeTabId, cols, rows, splitPaneChannel]);
     const demoCast = useMemo(() => {
         const nl = String.fromCharCode(10);
         const rec = new AsciicastRecorder(80, 24, 'Production Incident Check');
@@ -1587,8 +1666,16 @@ export function App() {
                                             setActiveTabId(tab.id);
                                             setSessionTabLabel(tab.title);
                                             setActiveScreen('workspace');
-                                        }, "data-testid": idx === 0 ? 'tab-session-1' : `tab-session-${idx + 1}`, children: [_jsx("span", { className: `webssh-status-dot ${statusDotClass}`.trim() }), _jsx("span", { children: idx === 0 ? sessionTabLabel : tab.title }), _jsx("span", { "aria-hidden": "true", className: "webssh-tab-close", "data-testid": `close-tab-${tab.id}`, onClick: (e) => handleCloseTab(tab.id, e), children: "\u00D7" })] }, tab.id));
-                                }) }), _jsx("span", { className: "webssh-studio-tab-separator", "data-testid": "tab-separator", "aria-hidden": "true" }), _jsx("button", { type: "button", className: "webssh-studio-add-btn", "aria-label": "New terminal tab", title: "Add Terminal Session", "data-testid": "add-tab-btn", onClick: handleAddTab, children: "+" })] }), _jsxs("div", { "data-testid": "topbar-quick-controls", className: "webssh-studio-controls", children: [_jsxs("select", { className: "ui-select", "aria-label": "Terminal font family", "data-testid": "font-family-select", value: fontFamily, onChange: (e) => setFontFamily(e.currentTarget.value), style: { width: 'auto' }, children: [_jsx("option", { value: "'DejaVu Sans Mono', Menlo, monospace", children: "DejaVu Sans Mono" }), _jsx("option", { value: "SF Mono", children: "SF Mono" }), _jsx("option", { value: "'JetBrains Mono', 'Fira Code', monospace", children: "JetBrains Mono" }), _jsx("option", { value: "Fira Code", children: "Fira Code" }), _jsx("option", { value: "Menlo", children: "Menlo" }), _jsx("option", { value: "Monaco", children: "Monaco" }), _jsx("option", { value: "Courier New", children: "Courier New" })] }), _jsxs("div", { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }, children: [_jsx(Button, { variant: "ghost", ariaLabel: "Decrease font size", testId: "font-size-dec-btn", onClick: () => setFontSize((s) => Math.max(11, s - 1)), children: "A-" }), _jsxs("span", { className: "font-size-badge", "data-testid": "font-size-badge", children: [fontSize, "px"] }), _jsx(Button, { variant: "ghost", ariaLabel: "Increase font size", testId: "font-size-inc-btn", onClick: () => setFontSize((s) => Math.min(36, s + 1)), children: "A+" })] }), _jsx("span", { className: `webssh-status-dot ${statusDotClass}`.trim(), title: `Connection state: ${connectionState}`, "data-testid": "connection-status-dot" }), connectionState === 'disconnected' ? (_jsx(Button, { variant: "primary", onClick: () => setConnectModalOpen(true), testId: "new-connection-btn", children: "New Connection" })) : null, _jsxs("button", { type: "button", className: "webssh-studio-stop-btn", onClick: handleDisconnect, "data-testid": connectionState === 'connected' ? 'disconnect-btn' : 'stop-session-btn', title: "Stop Session / Disconnect", children: [_jsx("span", { className: "webssh-studio-stop-square", "data-testid": "stop-red-square", "aria-hidden": "true" }), _jsx("span", { children: connectionState === 'connected' ? 'Stop Session (Disconnect)' : 'Stop Session' })] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', onClick: () => setIdeMode((m) => !m), testId: "toggle-ide-mode-btn", children: ideMode ? 'IDE Mode: ON' : 'Open IDE' }), ideMode ? (_jsx(Button, { variant: redactionMode ? 'primary' : 'ghost', onClick: () => setRedactionMode((r) => !r), testId: "toggle-redaction-btn", children: redactionMode ? 'Redaction: ON' : 'Redact Secrets' })) : null, _jsxs(Button, { variant: "ghost", onClick: () => setPaletteOpen(true), testId: "open-palette-btn", children: [_jsx(Icon, { name: "search" }), " Command Palette (Cmd+K)"] }), _jsx(Button, { variant: "ghost", onClick: () => setZenMode((z) => !z), testId: "toggle-zen-btn", children: "Zen" }), _jsxs("button", { type: "button", className: "webssh-studio-icon-btn", onClick: toggleFullscreen, "aria-label": "Expand terminal fullscreen", title: "Full Screen (F11)", "data-testid": "toggle-fullscreen-btn", children: [_jsx(Icon, { name: "maximize" }), _jsx("span", { children: "Full Screen" })] }), _jsxs("button", { type: "button", className: "webssh-studio-icon-btn", "aria-label": "Pop out terminal view", title: "Open Terminal Workspace View", "data-testid": "popout-terminal-btn", onClick: () => {
+                                            liveSessionRef.current =
+                                                connectionRegistryRef.current.get(tab.connectionId)?.client ?? null;
+                                        }, "data-testid": idx === 0 ? 'tab-session-1' : `tab-session-${idx + 1}`, children: [_jsx("span", { className: `webssh-status-dot ${tab.status === 'error'
+                                                    ? 'webssh-status-dot--offline'
+                                                    : tab.status === 'opening'
+                                                        ? 'webssh-status-dot--reconnecting'
+                                                        : tab.status === 'idle'
+                                                            ? 'webssh-status-dot--disconnected'
+                                                            : statusDotClass}`.trim(), "aria-label": `Status: ${tab.status ?? (tab.connected ? 'ready' : 'idle')}` }), _jsx("span", { children: idx === 0 ? sessionTabLabel : tab.title }), tab.status === 'opening' ? _jsx("span", { "aria-live": "polite", children: "opening\u2026" }) : null, tab.status === 'error' ? (_jsx("span", { role: "status", title: tab.errorMessage, children: "failed" })) : null, _jsx("span", { "aria-hidden": "true", className: "webssh-tab-close", "data-testid": `close-tab-${tab.id}`, onClick: (e) => handleCloseTab(tab.id, e), children: "\u00D7" })] }, tab.id));
+                                }) }), _jsx("span", { className: "webssh-studio-tab-separator", "data-testid": "tab-separator", "aria-hidden": "true" }), _jsx("button", { type: "button", className: "webssh-studio-add-btn", "aria-label": "New terminal tab", title: "Add Terminal Session", "data-testid": "add-tab-btn", onClick: handleAddTab, children: "+" })] }), _jsxs("div", { "data-testid": "topbar-quick-controls", className: "webssh-studio-controls", children: [_jsx(Button, { variant: showCommandInspector ? 'primary' : 'ghost', onClick: () => setShowCommandInspector((v) => !v), testId: "toggle-command-inspector", children: showCommandInspector ? 'Hide Inspector' : 'Inspector' }), _jsxs("select", { className: "ui-select", "aria-label": "Terminal font family", "data-testid": "font-family-select", value: fontFamily, onChange: (e) => setFontFamily(e.currentTarget.value), style: { width: 'auto' }, children: [_jsx("option", { value: "'DejaVu Sans Mono', Menlo, monospace", children: "DejaVu Sans Mono" }), _jsx("option", { value: "SF Mono", children: "SF Mono" }), _jsx("option", { value: "'JetBrains Mono', 'Fira Code', monospace", children: "JetBrains Mono" }), _jsx("option", { value: "Fira Code", children: "Fira Code" }), _jsx("option", { value: "Menlo", children: "Menlo" }), _jsx("option", { value: "Monaco", children: "Monaco" }), _jsx("option", { value: "Courier New", children: "Courier New" })] }), _jsxs("div", { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }, children: [_jsx(Button, { variant: "ghost", ariaLabel: "Decrease font size", testId: "font-size-dec-btn", onClick: () => setFontSize((s) => Math.max(11, s - 1)), children: "A-" }), _jsxs("span", { className: "font-size-badge", "data-testid": "font-size-badge", children: [fontSize, "px"] }), _jsx(Button, { variant: "ghost", ariaLabel: "Increase font size", testId: "font-size-inc-btn", onClick: () => setFontSize((s) => Math.min(36, s + 1)), children: "A+" })] }), _jsx("span", { className: `webssh-status-dot ${statusDotClass}`.trim(), title: `Connection state: ${connectionState}`, "data-testid": "connection-status-dot" }), connectionState === 'disconnected' ? (_jsx(Button, { variant: "primary", onClick: () => setConnectModalOpen(true), testId: "new-connection-btn", children: "New Connection" })) : null, _jsxs("button", { type: "button", className: "webssh-studio-stop-btn", onClick: handleDisconnect, "data-testid": connectionState === 'connected' ? 'disconnect-btn' : 'stop-session-btn', title: "Stop Session / Disconnect", children: [_jsx("span", { className: "webssh-studio-stop-square", "data-testid": "stop-red-square", "aria-hidden": "true" }), _jsx("span", { children: connectionState === 'connected' ? 'Stop Session (Disconnect)' : 'Stop Session' })] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', onClick: () => setIdeMode((m) => !m), testId: "toggle-ide-mode-btn", children: ideMode ? 'IDE Mode: ON' : 'Open IDE' }), ideMode ? (_jsx(Button, { variant: redactionMode ? 'primary' : 'ghost', onClick: () => setRedactionMode((r) => !r), testId: "toggle-redaction-btn", children: redactionMode ? 'Redaction: ON' : 'Redact Secrets' })) : null, _jsxs(Button, { variant: "ghost", onClick: () => setPaletteOpen(true), testId: "open-palette-btn", children: [_jsx(Icon, { name: "search" }), " Command Palette (Cmd+K)"] }), _jsx(Button, { variant: "ghost", onClick: () => setZenMode((z) => !z), testId: "toggle-zen-btn", children: "Zen" }), _jsxs("button", { type: "button", className: "webssh-studio-icon-btn", onClick: toggleFullscreen, "aria-label": "Expand terminal fullscreen", title: "Full Screen (F11)", "data-testid": "toggle-fullscreen-btn", children: [_jsx(Icon, { name: "maximize" }), _jsx("span", { children: "Full Screen" })] }), _jsxs("button", { type: "button", className: "webssh-studio-icon-btn", "aria-label": "Pop out terminal view", title: "Open Terminal Workspace View", "data-testid": "popout-terminal-btn", onClick: () => {
                                     setActiveScreen('workspace');
                                     terminalViewRef.current?.focus();
                                 }, children: [_jsx("span", { "aria-hidden": "true", children: "\u2197" }), _jsx("span", { children: "Pop-out" })] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: "webssh-studio-icon-btn", "aria-label": "More terminal options", title: "More Custom Options", "data-testid": "more-options-menu-btn", onClick: () => setOpenMenu((m) => (m === 'more' ? null : 'more')), children: _jsx("span", { "aria-hidden": "true", children: "\u2022\u2022\u2022" }) }), openMenu === 'more' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "more-options-dropdown", style: { right: 0, left: 'auto' }, children: [_jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
@@ -1647,15 +1734,36 @@ export function App() {
                                     };
                                     target.addEventListener('pointermove', onMove);
                                     target.addEventListener('pointerup', onUp);
-                                } })] })) : null, _jsxs("main", { className: "webssh-main", children: [activeScreen === 'workspace' ? (_jsx("div", { className: "webssh-studio-outer", "data-testid": "terminal-studio-outer", children: _jsx("div", { className: "webssh-studio-container", "data-testid": "terminal-studio-container", children: _jsxs("div", { className: "webssh-split-container", children: [_jsxs("div", { ref: terminalViewRef, tabIndex: 0, role: "region", "aria-label": "SSH Terminal Viewport", "data-testid": "terminal-viewport", className: "webssh-terminal-viewport", style: { fontSize: `${fontSize}px`, fontFamily }, onClick: () => terminalViewRef.current?.focus(), onKeyDown: handleTerminalKeyDown, children: [_jsxs("div", { className: "webssh-ascii-banner", "data-testid": "terminal-ascii-banner", children: [_jsx("div", { className: "webssh-ascii-welcome-line", "data-testid": "terminal-welcome-banner-text", children: "Welcome to the WebSSH Studio Interactive Terminal." }), _jsxs("pre", { className: "webssh-ascii-art", "aria-label": "WEBSSH STUDIO ASCII Art", children: [_jsx("span", { className: "webssh-logo-col-1", children: '██╗    ██╗███████╗' }), _jsx("span", { className: "webssh-logo-col-2", children: '██████╗ ███████╗' }), _jsx("span", { className: "webssh-logo-col-3", children: '███████╗██╗  ██╗' }), _jsx("span", { className: "webssh-logo-col-4", children: ' ███████╗████████╗' }), _jsx("span", { className: "webssh-logo-col-5", children: '██╗   ██╗██████╗ ' }), String.fromCharCode(10), _jsx("span", { className: "webssh-logo-col-1", children: '██║    ██║██╔════╝' }), _jsx("span", { className: "webssh-logo-col-2", children: '██╔══██╗██╔════╝' }), _jsx("span", { className: "webssh-logo-col-3", children: '██╔════╝██║  ██║' }), _jsx("span", { className: "webssh-logo-col-4", children: ' ██╔════╝╚══██╔══╝' }), _jsx("span", { className: "webssh-logo-col-5", children: '██║   ██║██╔══██╗' }), String.fromCharCode(10), _jsx("span", { className: "webssh-logo-col-1", children: '██║ █╗ ██║█████╗  ' }), _jsx("span", { className: "webssh-logo-col-2", children: '██████╔╝███████╗' }), _jsx("span", { className: "webssh-logo-col-3", children: '███████╗███████║' }), _jsx("span", { className: "webssh-logo-col-4", children: ' ███████╗   ██║   ' }), _jsx("span", { className: "webssh-logo-col-5", children: '██║   ██║██║  ██║' }), String.fromCharCode(10), _jsx("span", { className: "webssh-logo-col-1", children: '██║███╗██║██╔══╝  ' }), _jsx("span", { className: "webssh-logo-col-2", children: '██╔══██╗╚════██║' }), _jsx("span", { className: "webssh-logo-col-3", children: '╚════██║██╔══██║' }), _jsx("span", { className: "webssh-logo-col-4", children: ' ╚════██║   ██║   ' }), _jsx("span", { className: "webssh-logo-col-5", children: '██║   ██║██║  ██║' }), String.fromCharCode(10), _jsx("span", { className: "webssh-logo-col-1", children: '╚███╔███╔╝███████╗' }), _jsx("span", { className: "webssh-logo-col-2", children: '██████╔╝███████║' }), _jsx("span", { className: "webssh-logo-col-3", children: '███████║██║  ██║' }), _jsx("span", { className: "webssh-logo-col-4", children: ' ███████║   ██║   ' }), _jsx("span", { className: "webssh-logo-col-5", children: '╚██████╔╝██████╔╝' })] })] }), terminalLines.map((line, i) => (_jsx("div", { children: redactSecretsInText(line, redactionMode) }, i))), _jsxs("div", { className: "webssh-prompt-line", "data-testid": "terminal-prompt-line", children: [_jsx("span", { className: "webssh-prompt-user", "data-testid": "prompt-username", children: connectedUser }), _jsx("span", { children: "@" }), _jsx("span", { className: "webssh-prompt-host", "data-testid": "prompt-hostname", children: connectedHost }), _jsx("span", { children: " " }), _jsx("span", { className: "webssh-prompt-dir", "data-testid": "prompt-directory", children: "~" }), _jsx("span", { className: "webssh-prompt-arrow", "data-testid": "prompt-arrow", children: ' ➜ ' }), _jsx("span", { className: "webssh-prompt-input", "data-testid": "terminal-current-input", children: currentInput }), ghostSuggestion ? (_jsx("span", { className: "webssh-ghost-text", "data-testid": "terminal-ghost-suggestion", children: ghostSuggestion })) : null, _jsx("span", { className: `webssh-terminal-cursor ${cursorShape === 'bar'
-                                                                    ? 'webssh-terminal-cursor--bar'
-                                                                    : cursorShape === 'underline'
-                                                                        ? 'webssh-terminal-cursor--underline'
-                                                                        : ''}`.trim(), "aria-hidden": "true" })] }), _jsx("div", { className: "webssh-cmd-blocks", "data-testid": "command-blocks-list", children: commandBlocks.map((block) => (_jsxs("div", { className: "webssh-cmd-block", "data-testid": `cmd-block-${block.id}`, children: [_jsxs("div", { className: "webssh-cmd-block-header", children: [_jsxs("span", { children: [_jsxs("strong", { children: ["$ ", redactSecretsInText(block.command, redactionMode)] }), " \u00B7", ' ', block.timestamp, " (", block.durationMs, "ms)"] }), _jsxs("div", { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }, children: [_jsxs(Badge, { tone: block.exitCode === 0 ? 'success' : 'danger', children: ["exit ", block.exitCode] }), _jsx(Button, { variant: "ghost", onClick: () => setCommandBlocks((prev) => prev.map((b) => (b.id === block.id ? { ...b, collapsed: !b.collapsed } : b))), testId: `toggle-block-${block.id}`, children: block.collapsed ? 'Expand' : 'Fold' }), _jsx(Button, { variant: "ghost", onClick: () => copyToClipboard(block.outputLines.join(String.fromCharCode(10))), children: "Copy Output" }), _jsx(Button, { variant: "ghost", onClick: () => executeTerminalCommand(block.command), children: "Re-run" })] })] }), !block.collapsed ? (_jsx("div", { style: { marginTop: 'var(--space-1)' }, children: block.outputLines.map((outLine, idx) => (_jsx("div", { children: redactSecretsInText(outLine, redactionMode) }, idx))) })) : null] }, block.id))) }), _jsx("div", { ref: xtermHostRef, className: "webssh-xterm-mount", "aria-hidden": "true", "data-testid": "xterm-engine-mount" })] }), splitPanes > 1 ? (_jsxs("div", { tabIndex: 0, role: "region", "aria-label": "Secondary Split Terminal Viewport", "data-testid": "terminal-split-pane-2", className: "webssh-terminal-viewport", style: {
-                                                    fontSize: `${fontSize}px`,
-                                                    fontFamily,
-                                                    borderLeft: 'var(--border-hairline)'
-                                                }, children: [_jsxs("div", { children: ["Split Pane #2 (", broadcastInput ? 'Broadcast Input ON' : 'Independent Shell', ")"] }), _jsxs("div", { className: "webssh-prompt-line", children: [_jsx("span", { className: "webssh-prompt-user", children: connectedUser }), _jsx("span", { children: "@" }), _jsx("span", { className: "webssh-prompt-host", children: connectedHost }), _jsx("span", { children: " " }), _jsx("span", { className: "webssh-prompt-dir", children: "~" }), _jsx("span", { className: "webssh-prompt-arrow", children: ' ➜ ' }), _jsx("span", { children: broadcastInput ? currentInput : '' }), _jsx("span", { className: "webssh-terminal-cursor", "aria-hidden": "true" })] })] })) : null] }) }) })) : null, activeScreen === 'overview' ? _jsx(OverviewPanel, { ctx: moduleContext }) : null, activeScreen === 'software' ? _jsx(SoftwarePanel, { ctx: moduleContext }) : null, activeScreen === 'containers' ? _jsx(ContainersPanel, { ctx: moduleContext }) : null, activeScreen === 'kubernetes' ? _jsx(KubernetesPanel, { ctx: moduleContext }) : null, activeScreen === 'automations' ? _jsx(AutomationsPanel, { ctx: moduleContext }) : null, activeScreen === 'deployments' ? _jsx(DeploymentsPanel, { ctx: moduleContext }) : null, activeScreen === 'activity' ? _jsx(ActivityPanel, { ctx: moduleContext }) : null, activeScreen === 'features' ? _jsx(CapabilityMatrixPanel, {}) : null, activeScreen === 'tunnels' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-tunnels", children: [_jsx("h1", { children: "Port Forwarding & Network Tunneling Studio (-L / -R / -D SOCKS5)" }), _jsxs(Card, { children: [_jsx("h2", { children: "Create Custom SSH Port Forward Rule" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("label", { htmlFor: "new-tunnel-local", children: "Local Port" }), _jsx("input", { id: "new-tunnel-local", type: "number", className: "ui-input", value: newTunnelLocalPort, onInput: (e) => setNewTunnelLocalPort(e.target.value), "data-testid": "new-tunnel-local-input", style: { width: '110px' } }), _jsx("label", { htmlFor: "new-tunnel-remote", children: "Remote Port" }), _jsx("input", { id: "new-tunnel-remote", type: "number", className: "ui-input", value: newTunnelRemotePort, onInput: (e) => setNewTunnelRemotePort(e.target.value), "data-testid": "new-tunnel-remote-input", style: { width: '110px' } }), _jsx(Button, { variant: "primary", testId: "add-tunnel-btn", onClick: () => {
+                                } })] })) : null, _jsxs("main", { className: "webssh-main", children: [activeScreen === 'workspace' ? (_jsx("div", { className: "webssh-studio-outer", "data-testid": "terminal-studio-outer", children: _jsxs("div", { className: "webssh-studio-container", "data-testid": "terminal-studio-container", children: [_jsx("div", { className: "webssh-split-container", children: _jsx("div", { ref: terminalViewRef, tabIndex: 0, role: "region", "aria-label": "SSH Terminal Viewport", "data-testid": "terminal-viewport", className: "webssh-terminal-viewport", style: { fontSize: `${fontSize}px`, fontFamily }, onClick: (e) => {
+                                                    const target = e.target;
+                                                    if (target && typeof target.closest === 'function' && target.closest('.xterm')) {
+                                                        // xterm already focused its helper textarea on mousedown.
+                                                        return;
+                                                    }
+                                                    terminalViewRef.current?.focus();
+                                                }, onKeyDown: handleTerminalKeyDown, children: _jsxs("div", { className: "webssh-terminal-panes", "data-testid": "terminal-panes", children: [tabs.map((tab) => {
+                                                            const isActive = tab.id === activeTabId;
+                                                            return (_jsx("div", { className: "webssh-terminal-pane-slot", style: {
+                                                                    display: isActive ? 'block' : 'none',
+                                                                    position: 'relative',
+                                                                    width: '100%',
+                                                                    height: '100%'
+                                                                }, "data-testid": `pane-slot-${tab.id}`, children: _jsx(TerminalPane, { paneId: tab.id, channelId: tab.channelId ?? null, transport: connectionRegistryRef.current.get(tab.connectionId)
+                                                                        ?.client ?? null, active: isActive, label: `${tab.title} terminal`, fontFamily: fontFamily, fontSize: fontSize, lineHeight: 1.45, cursorStyle: cursorShape, cursorBlink: true, scrollback: 10000, theme: {
+                                                                        background: terminalPalette.terminalBg,
+                                                                        foreground: terminalPalette.terminalFg,
+                                                                        cursor: terminalPalette.terminalCursor
+                                                                    }, onAdapter: registerPaneAdapter, onRendererChange: handleRendererChange, testId: "xterm-engine-mount" }) }, tab.id));
+                                                        }), splitPanes > 1 && splitPaneChannel !== null ? (_jsx("div", { className: "webssh-terminal-pane-slot", style: {
+                                                                position: 'relative',
+                                                                width: '100%',
+                                                                height: '100%',
+                                                                borderLeft: 'var(--border-hairline)'
+                                                            }, "data-testid": "terminal-split-pane-2", children: _jsx(TerminalPane, { paneId: "split-2", channelId: splitPaneChannel, transport: splitPaneTransport, active: true, label: `${sessionTabLabel} split terminal`, fontFamily: fontFamily, fontSize: fontSize, lineHeight: 1.45, cursorStyle: cursorShape, cursorBlink: true, scrollback: 10000, theme: {
+                                                                    background: terminalPalette.terminalBg,
+                                                                    foreground: terminalPalette.terminalFg,
+                                                                    cursor: terminalPalette.terminalCursor
+                                                                }, onAdapter: registerPaneAdapter, onRendererChange: handleRendererChange, testId: "xterm-engine-mount-2" }) })) : null, connectionState !== 'connected' ? (_jsxs("div", { className: "webssh-terminal-disconnected", "data-testid": "terminal-disconnected-state", children: [_jsx("p", { children: "No server connected." }), _jsx("p", { children: "Enter a host, user and port, then press Connect." })] })) : null, rendererNotice ? (_jsxs("div", { role: "status", "data-testid": "terminal-renderer-notice", style: { position: 'absolute', right: 'var(--space-2)', bottom: 'var(--space-2)' }, children: ["Renderer: ", rendererNotice] })) : null] }) }) }), showCommandInspector ? (_jsxs("section", { className: "webssh-command-inspector", "data-testid": "command-inspector", "aria-label": "Local command inspector", children: [_jsxs("header", { className: "webssh-command-inspector-header", children: [_jsx("strong", { children: "Local command inspector" }), _jsx("span", { children: "Output of explicit local commands only. Interactive shell output belongs to the terminal above." })] }), _jsx("div", { "data-testid": "local-command-output", children: terminalLines.map((line, i) => (_jsx("div", { children: redactSecretsInText(line, redactionMode) }, i))) }), commandBlocks.map((block) => (_jsxs("div", { className: "webssh-cmd-block", "data-testid": `cmd-block-${block.id}`, children: [_jsxs("div", { className: "webssh-cmd-block-header", children: [_jsxs("span", { children: [_jsxs("strong", { children: ["$ ", redactSecretsInText(block.command, redactionMode)] }), " \u00B7", ' ', block.timestamp, " (", block.durationMs, "ms)"] }), _jsxs(Badge, { tone: block.exitCode === 0 ? 'success' : 'danger', children: ["exit ", block.exitCode] })] }), block.outputLines.map((outLine, idx) => (_jsx("div", { children: redactSecretsInText(outLine, redactionMode) }, idx)))] }, block.id))), terminalLines.length === 0 && commandBlocks.length === 0 ? (_jsx("p", { children: "No local commands have run in this session." })) : null] })) : null] }) })) : null, activeScreen === 'overview' ? _jsx(OverviewPanel, { ctx: moduleContext }) : null, activeScreen === 'software' ? _jsx(SoftwarePanel, { ctx: moduleContext }) : null, activeScreen === 'containers' ? _jsx(ContainersPanel, { ctx: moduleContext }) : null, activeScreen === 'kubernetes' ? _jsx(KubernetesPanel, { ctx: moduleContext }) : null, activeScreen === 'automations' ? _jsx(AutomationsPanel, { ctx: moduleContext }) : null, activeScreen === 'deployments' ? _jsx(DeploymentsPanel, { ctx: moduleContext }) : null, activeScreen === 'activity' ? _jsx(ActivityPanel, { ctx: moduleContext }) : null, activeScreen === 'features' ? _jsx(CapabilityMatrixPanel, {}) : null, activeScreen === 'tunnels' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-tunnels", children: [_jsx("h1", { children: "Port Forwarding & Network Tunneling Studio (-L / -R / -D SOCKS5)" }), _jsxs(Card, { children: [_jsx("h2", { children: "Create Custom SSH Port Forward Rule" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("label", { htmlFor: "new-tunnel-local", children: "Local Port" }), _jsx("input", { id: "new-tunnel-local", type: "number", className: "ui-input", value: newTunnelLocalPort, onInput: (e) => setNewTunnelLocalPort(e.target.value), "data-testid": "new-tunnel-local-input", style: { width: '110px' } }), _jsx("label", { htmlFor: "new-tunnel-remote", children: "Remote Port" }), _jsx("input", { id: "new-tunnel-remote", type: "number", className: "ui-input", value: newTunnelRemotePort, onInput: (e) => setNewTunnelRemotePort(e.target.value), "data-testid": "new-tunnel-remote-input", style: { width: '110px' } }), _jsx(Button, { variant: "primary", testId: "add-tunnel-btn", onClick: () => {
                                                             const lPort = Number.parseInt(newTunnelLocalPort, 10) || 8080;
                                                             const rPort = Number.parseInt(newTunnelRemotePort, 10) || 80;
                                                             const tunId = `tunnel-${Date.now()}`;

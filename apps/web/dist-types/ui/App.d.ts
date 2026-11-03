@@ -9,6 +9,11 @@ export interface SessionTabItem {
     title: string;
     connected: boolean;
     channelId?: number;
+    /** The transport this pane belongs to. */
+    connectionId?: string;
+    /** A pane is ready only after the server acknowledged the PTY channel. */
+    status?: 'idle' | 'opening' | 'ready' | 'error';
+    errorMessage?: string;
 }
 export declare function App(): JSX.Element;
 //# sourceMappingURL=App.d.ts.map
