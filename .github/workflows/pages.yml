@@ -35,7 +35,7 @@ jobs:
         uses: actions/configure-pages@v6
 
       - name: Install dependencies
-        run: npm ci --silent
+        run: npm ci --no-audit --no-fund
 
       - name: Build tokens, static web bundle, and verify all referenced assets
         env:

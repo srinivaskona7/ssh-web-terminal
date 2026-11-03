@@ -24,7 +24,7 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm ci --silent
+        run: npm ci --no-audit --no-fund
 
       - name: Build design tokens
         run: npm run tokens:build
@@ -86,7 +86,7 @@ jobs:
           cache-dependency-path: apps/gateway/go.sum
 
       - name: Install dependencies
-        run: npm ci --silent
+        run: npm ci --no-audit --no-fund
 
       - name: Install Playwright browser (${{ matrix.browser }})
         run: npx playwright install --with-deps ${{ matrix.browser }}
