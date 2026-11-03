@@ -16,7 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const relayDir = resolve(here, '..');
-const tscArgs = ['-p', resolve(relayDir, 'tsconfig.json'), '--noEmit'];
+// Production builds exclude tests; root CI still checks the test configuration.
+const tscArgs = ['-p', resolve(relayDir, 'tsconfig.build.json'), '--noEmit'];
 
 const candidates = [
   resolve(relayDir, '../../node_modules/typescript/bin/tsc'),
