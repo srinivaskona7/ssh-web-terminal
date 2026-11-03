@@ -312,6 +312,7 @@ export class BrowserSshRelaySessionClient {
     nextLocalChannel = 1;
     channels = new Map();
     pendingChannelOpen = new Map();
+    pendingChannelRequests = new Map();
     opCounter = 0;
     ptySeq = 0;
     ringBuffer = [];
@@ -758,9 +759,20 @@ export class BrowserSshRelaySessionClient {
                 }
                 return;
             }
-            case SSH_MSG_CHANNEL_WINDOW_ADJUST:
             case SSH_MSG_CHANNEL_SUCCESS:
-            case SSH_MSG_CHANNEL_FAILURE:
+            case SSH_MSG_CHANNEL_FAILURE: {
+                const localId = reader.readUint32();
+                const request = this.pendingChannelRequests.get(localId);
+                if (request) {
+                    this.pendingChannelRequests.delete(localId);
+                    if (msgType === SSH_MSG_CHANNEL_SUCCESS)
+                        request.resolve();
+                    else
+                        request.reject(new Error('SSH server rejected the terminal channel request'));
+                }
+                return;
+            }
+            case SSH_MSG_CHANNEL_WINDOW_ADJUST:
             case SSH_MSG_CHANNEL_EOF:
             case SSH_MSG_UNIMPLEMENTED:
                 return;
@@ -892,12 +904,28 @@ export class BrowserSshRelaySessionClient {
         this.channels.set(localId, chState);
         return chState;
     }
+    requestChannelAcknowledgement(localId, packet) {
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this.pendingChannelRequests.delete(localId);
+                reject(new Error('SSH terminal channel request timed out'));
+            }, 10000);
+            this.pendingChannelRequests.set(localId, {
+                resolve: () => { clearTimeout(timer); resolve(); },
+                reject: (error) => { clearTimeout(timer); reject(error); }
+            });
+            void this.sendPacket(packet).catch((error) => {
+                this.pendingChannelRequests.get(localId)?.reject(error);
+                this.pendingChannelRequests.delete(localId);
+            });
+        });
+    }
     async openInteractivePtyChannel(cols, rows) {
         const ch = await this.openRawSessionChannel('pty');
         // Request PTY
-        await this.sendPacket(concatBytes(new Uint8Array([SSH_MSG_CHANNEL_REQUEST]), writeUint32BE(ch.remoteId), sshString('pty-req'), new Uint8Array([1]), sshString('xterm-256color'), writeUint32BE(cols), writeUint32BE(rows), writeUint32BE(0), writeUint32BE(0), sshString(new Uint8Array([0]))));
+        await this.requestChannelAcknowledgement(ch.localId, concatBytes(new Uint8Array([SSH_MSG_CHANNEL_REQUEST]), writeUint32BE(ch.remoteId), sshString('pty-req'), new Uint8Array([1]), sshString('xterm-256color'), writeUint32BE(cols), writeUint32BE(rows), writeUint32BE(0), writeUint32BE(0), sshString(new Uint8Array([0]))));
         // Start shell
-        await this.sendPacket(concatBytes(new Uint8Array([SSH_MSG_CHANNEL_REQUEST]), writeUint32BE(ch.remoteId), sshString('shell'), new Uint8Array([1])));
+        await this.requestChannelAcknowledgement(ch.localId, concatBytes(new Uint8Array([SSH_MSG_CHANNEL_REQUEST]), writeUint32BE(ch.remoteId), sshString('shell'), new Uint8Array([1])));
         return ch.localId;
     }
     sendPtyText(channel, text) {
@@ -961,6 +989,10 @@ export class BrowserSshRelaySessionClient {
         this.encryptedOut = false;
         this.channels.clear();
         this.pendingChannelOpen.clear();
+        for (const request of this.pendingChannelRequests.values()) {
+            request.reject(new Error('SSH session closed'));
+        }
+        this.pendingChannelRequests.clear();
         const meta = await this.connect();
         for (const frame of this.getReplayFramesAfter(lastSeq)) {
             this.params.onPtyData(frame.channel, frame.data);
@@ -1206,6 +1238,10 @@ export class BrowserSshRelaySessionClient {
             waiter.reject(new Error('SSH session closed'));
         }
         this.pendingChannelOpen.clear();
+        for (const request of this.pendingChannelRequests.values()) {
+            request.reject(new Error('SSH session closed'));
+        }
+        this.pendingChannelRequests.clear();
     }
 }
 //# sourceMappingURL=browser-ssh-client.js.map

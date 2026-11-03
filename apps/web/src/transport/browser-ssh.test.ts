@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
 import { BrowserSshRelaySessionClient } from './browser-ssh-client.js';
 import { bytesToBase64 } from '../vault/ssh-wire.js';
@@ -634,8 +634,7 @@ describe('BrowserSshRelaySessionClient + Cloudflare Worker Relay End-to-End SSH-
 
       // Resize PTY channel
       client.resizeChannel(1, 132, 42);
-      await new Promise((r) => setTimeout(r, 15));
-      expect(activeFixture!.lastResize).toEqual({ cols: 132, rows: 42 });
+      await vi.waitFor(() => expect(activeFixture!.lastResize).toEqual({ cols: 132, rows: 42 }));
 
       // Open independent second PTY channel (Tab 2)
       const tab2 = await client.openChannel(100, 30);

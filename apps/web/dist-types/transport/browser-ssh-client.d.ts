@@ -38,6 +38,7 @@ export declare class BrowserSshRelaySessionClient {
     private nextLocalChannel;
     private channels;
     private pendingChannelOpen;
+    private pendingChannelRequests;
     private opCounter;
     private ptySeq;
     private ringBuffer;
@@ -60,6 +61,7 @@ export declare class BrowserSshRelaySessionClient {
     private handlePacket;
     private sendUserauthRequest;
     private openRawSessionChannel;
+    private requestChannelAcknowledgement;
     private openInteractivePtyChannel;
     sendPtyText(channel: number, text: string): boolean;
     sendPtyBytes(channel: number, bytes: Uint8Array): boolean;

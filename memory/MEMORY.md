@@ -20,3 +20,4 @@
 - Run token generation before type checking, tests, and builds (root scripts already do this). Validate with `npm run lint`, `npm test`, `npm run build`; build with `VITE_BASE_PATH=/ssh-web-terminal/` for Pages. Ignore artifacts using root-anchored rules, including `/apps/relay/.wrangler/` and `/apps/relay/.dev.vars*`.
 - Operational setup and target connection checks are documented in `docs/RUNBOOK.md`, section 5.
 - `.npmrc` pins the public npm registry; all `package-lock.json` download URLs must use `registry.npmjs.org` so GitHub and Cloudflare runners can install without corporate network access. Keep dependency-install failures visible in CI logs.
+- Relay PTY creation must wait for server acknowledgements of both `pty-req` and `shell`; `connected`/`channel_opened` must not be reported before acceptance. Production limitations of relay file tools and process resumption are recorded in `docs/RUNBOOK.md`.

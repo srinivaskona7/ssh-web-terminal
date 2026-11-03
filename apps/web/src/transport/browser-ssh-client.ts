@@ -398,6 +398,7 @@ export class BrowserSshRelaySessionClient {
     number,
     { resolve: (remoteId: number) => void; reject: (err: Error) => void }
   >();
+  private pendingChannelRequests = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
   private opCounter = 0;
 
   private ptySeq = 0;
@@ -1043,9 +1044,19 @@ export class BrowserSshRelaySessionClient {
         return;
       }
 
-      case SSH_MSG_CHANNEL_WINDOW_ADJUST:
       case SSH_MSG_CHANNEL_SUCCESS:
-      case SSH_MSG_CHANNEL_FAILURE:
+      case SSH_MSG_CHANNEL_FAILURE: {
+        const localId = reader.readUint32();
+        const request = this.pendingChannelRequests.get(localId);
+        if (request) {
+          this.pendingChannelRequests.delete(localId);
+          if (msgType === SSH_MSG_CHANNEL_SUCCESS) request.resolve();
+          else request.reject(new Error('SSH server rejected the terminal channel request'));
+        }
+        return;
+      }
+
+      case SSH_MSG_CHANNEL_WINDOW_ADJUST:
       case SSH_MSG_CHANNEL_EOF:
       case SSH_MSG_UNIMPLEMENTED:
         return;
@@ -1242,10 +1253,27 @@ export class BrowserSshRelaySessionClient {
     return chState;
   }
 
+  private requestChannelAcknowledgement(localId: number, packet: Uint8Array): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingChannelRequests.delete(localId);
+        reject(new Error('SSH terminal channel request timed out'));
+      }, 10000);
+      this.pendingChannelRequests.set(localId, {
+        resolve: () => { clearTimeout(timer); resolve(); },
+        reject: (error) => { clearTimeout(timer); reject(error); }
+      });
+      void this.sendPacket(packet).catch((error: Error) => {
+        this.pendingChannelRequests.get(localId)?.reject(error);
+        this.pendingChannelRequests.delete(localId);
+      });
+    });
+  }
+
   private async openInteractivePtyChannel(cols: number, rows: number): Promise<number> {
     const ch = await this.openRawSessionChannel('pty');
     // Request PTY
-    await this.sendPacket(
+    await this.requestChannelAcknowledgement(ch.localId,
       concatBytes(
         new Uint8Array([SSH_MSG_CHANNEL_REQUEST]),
         writeUint32BE(ch.remoteId),
@@ -1260,7 +1288,7 @@ export class BrowserSshRelaySessionClient {
       )
     );
     // Start shell
-    await this.sendPacket(
+    await this.requestChannelAcknowledgement(ch.localId,
       concatBytes(
         new Uint8Array([SSH_MSG_CHANNEL_REQUEST]),
         writeUint32BE(ch.remoteId),
@@ -1365,6 +1393,10 @@ export class BrowserSshRelaySessionClient {
     this.encryptedOut = false;
     this.channels.clear();
     this.pendingChannelOpen.clear();
+    for (const request of this.pendingChannelRequests.values()) {
+      request.reject(new Error('SSH session closed'));
+    }
+    this.pendingChannelRequests.clear();
     const meta = await this.connect();
     for (const frame of this.getReplayFramesAfter(lastSeq)) {
       this.params.onPtyData(frame.channel, frame.data);
@@ -1655,5 +1687,9 @@ export class BrowserSshRelaySessionClient {
       waiter.reject(new Error('SSH session closed'));
     }
     this.pendingChannelOpen.clear();
+    for (const request of this.pendingChannelRequests.values()) {
+      request.reject(new Error('SSH session closed'));
+    }
+    this.pendingChannelRequests.clear();
   }
 }
