@@ -1939,7 +1939,7 @@ export function App(): JSX.Element {
                   }}
                   data-testid="menu-features-btn"
                 >
-                  Features (50)
+                  Features
                 </button>
               </div>
             </nav>
@@ -2354,7 +2354,7 @@ export function App(): JSX.Element {
                   onClick={() => setActiveScreen('features')}
                   testId="nav-features"
                 >
-                  Features (50)
+                  Features
                 </Button>
                 <Button
                   variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}
