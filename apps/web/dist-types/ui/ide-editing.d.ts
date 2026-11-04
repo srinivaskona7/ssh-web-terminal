@@ -4,6 +4,10 @@
  */
 export declare function joinPath(base: string, name: string): string;
 export declare function parentPath(path: string): string;
+/** Line ending used by a file; the editor keeps buffers in LF. */
+export declare function detectEol(text: string): '\r\n' | '\n';
+/** Rewrite a buffer to the requested line ending. */
+export declare function normalizeEol(text: string, eol: '\r\n' | '\n'): string;
 export declare function baseName(path: string): string;
 /** A NUL byte is the practical signal that a file is not editable text. */
 export declare function isProbablyBinary(content: string): boolean;
@@ -70,4 +74,12 @@ export interface DiffLine {
     text: string;
 }
 export declare function parseDiff(output: string, limit?: number): DiffLine[];
+/**
+ * Indentation to insert when Enter is pressed at `offset`. Returns null when
+ * the default newline is already correct (no indentation and no open bracket).
+ */
+export declare function newlineIndent(text: string, offset: number, unit: string): {
+    text: string;
+    offset: number;
+} | null;
 //# sourceMappingURL=ide-editing.d.ts.map

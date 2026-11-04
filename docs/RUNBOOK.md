@@ -173,7 +173,7 @@ Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `clou
 | Host-Key Verification (TOFU Pinning & Mismatch Blocker) | Supported (Tested) | Supported (Tested) |
 | Password, RSA/Ed25519 PEM & In-Browser WebCrypto KeyVault Auth | Supported (Tested) | Supported (Tested) |
 | Private Keys Kept Strictly in Browser | Supported (Tested) | Supported (Tested) |
-| Dual-Pane SFTP Browser, Chmod & 256 KiB Chunked Transfers | Supported (Tested) | Supported (Tested via SSH-2.0 Channels) |
+| SFTP Browser, Chmod & 256 KiB Chunked Transfers | Supported (Tested) | Supported (Tested via SSH-2.0 Channels) |
 | Remote File Editor (Atomic SFTP Save) | Supported (Tested) | Supported (Tested via SSH-2.0 Channels) |
 | Server-Side TCP Tunnel HTTP Preview | Supported (Tested) | Supported (Tested via RFC 4254 `direct-tcpip`) |
 | 4 MiB Ring-Buffer Session Replay & Resume | Supported (Tested) | Supported (Tested via 4 MiB Client Ring Buffer) |

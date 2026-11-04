@@ -136,8 +136,22 @@ export class GatewaySessionTransport {
     get connectionState() {
         return this.state;
     }
-    attachSender(sendFn) {
+    attachSender(sendFn, options = {}) {
+        const { markConnected = true, flush = true } = options;
         this.sendRawFn = sendFn;
+        if (markConnected) {
+            this.setState('connected');
+        }
+        if (flush) {
+            this.flushQueuedInput();
+        }
+    }
+    /**
+     * The server acknowledged `connect`/`resume`. Only now is it safe to send the
+     * keystrokes typed while the socket was down: before the ack the gateway has
+     * no PTY channel to write them to.
+     */
+    confirmConnected() {
         this.setState('connected');
         this.flushQueuedInput();
     }
@@ -492,6 +506,7 @@ export class LiveGatewaySessionClient {
         switch (msg.type) {
             case 'connected':
                 this.metadata = msg;
+                this.transport.confirmConnected();
                 if (this.connectResolve) {
                     const resolve = this.connectResolve;
                     this.connectResolve = null;
@@ -547,14 +562,14 @@ export class LiveGatewaySessionClient {
                 break;
         }
     }
-    async connect() {
+    resolveEndpoint() {
         const rawWsUrl = resolveGatewayWsUrl(this.params.gatewayUrl);
         const validation = validateGatewayWsUrl(rawWsUrl);
         if (!validation.valid) {
             throw new GatewayUnreachableError(rawWsUrl, validation.error);
         }
         let wsUrl = validation.normalizedUrl;
-        const authToken = this.params.gatewayAuthToken?.trim();
+        const authToken = this.params.gatewayAuthToken?.trim() ?? '';
         if (authToken) {
             try {
                 const parsed = new URL(wsUrl);
@@ -567,6 +582,68 @@ export class LiveGatewaySessionClient {
                 // Keep normalizedUrl if URL parsing fails
             }
         }
+        return { wsUrl, authToken };
+    }
+    async connect() {
+        const { wsUrl, authToken } = this.resolveEndpoint();
+        return this.openSocket(wsUrl, () => {
+            this.transport.sendControl({
+                type: 'hello',
+                protocolVersion: 1,
+                clientVersion: '1.0.0',
+                oidcToken: authToken || undefined
+            });
+            this.transport.sendControl({
+                type: 'connect',
+                host: this.params.host,
+                port: this.params.port,
+                user: this.params.user,
+                authMethod: this.params.authMethod,
+                password: this.params.password,
+                privateKeyPem: this.params.privateKeyPem,
+                privateKeyPassphrase: this.params.privateKeyPassphrase,
+                publicKey: this.params.publicKey,
+                keyFingerprint: this.params.keyFingerprint ?? '',
+                cols: this.params.cols,
+                rows: this.params.rows
+            });
+        });
+    }
+    /**
+     * Re-open the socket and resume the server-side session that was detached
+     * when the previous socket closed. The gateway replays every frame sent
+     * after the last one we processed, so terminal output survives the drop.
+     */
+    async reconnect() {
+        const meta = this.metadata;
+        if (!meta) {
+            throw new Error('No detached session to resume.');
+        }
+        const { wsUrl, authToken } = this.resolveEndpoint();
+        this.rejectAllPending(new Error('SSH session reconnecting.'));
+        this.transport.detachSender(true);
+        const stale = this.ws;
+        this.ws = null;
+        try {
+            stale?.close();
+        }
+        catch {
+            // The socket is already gone.
+        }
+        return this.openSocket(wsUrl, () => {
+            this.transport.sendControl({
+                type: 'hello',
+                protocolVersion: 1,
+                clientVersion: '1.0.0',
+                oidcToken: authToken || undefined
+            });
+            this.transport.sendControl(this.transport.seqTracker.buildResumeMessage(meta.sessionId, meta.resumeToken));
+        });
+    }
+    canResume() {
+        return this.metadata !== null;
+    }
+    openSocket(wsUrl, onOpen) {
         return new Promise((resolve, reject) => {
             this.connectResolve = resolve;
             this.connectReject = reject;
@@ -606,27 +683,8 @@ export class LiveGatewaySessionClient {
                     if (socket.readyState === WebSocket.OPEN) {
                         socket.send(bytes);
                     }
-                });
-                this.transport.sendControl({
-                    type: 'hello',
-                    protocolVersion: 1,
-                    clientVersion: '1.0.0',
-                    oidcToken: authToken || undefined
-                });
-                this.transport.sendControl({
-                    type: 'connect',
-                    host: this.params.host,
-                    port: this.params.port,
-                    user: this.params.user,
-                    authMethod: this.params.authMethod,
-                    password: this.params.password,
-                    privateKeyPem: this.params.privateKeyPem,
-                    privateKeyPassphrase: this.params.privateKeyPassphrase,
-                    publicKey: this.params.publicKey,
-                    keyFingerprint: this.params.keyFingerprint ?? '',
-                    cols: this.params.cols,
-                    rows: this.params.rows
-                });
+                }, { markConnected: false, flush: false });
+                onOpen();
                 this.transport.sendPing();
                 this.pingTimer = setInterval(() => {
                     if (socket.readyState === WebSocket.OPEN) {
@@ -643,6 +701,8 @@ export class LiveGatewaySessionClient {
                 }
             };
             socket.onerror = () => {
+                if (this.ws !== socket)
+                    return;
                 clearTimeout(openTimeout);
                 if (!wsOpened && this.connectReject) {
                     const rej = this.connectReject;
@@ -652,6 +712,10 @@ export class LiveGatewaySessionClient {
                 }
             };
             socket.onclose = () => {
+                // A reconnect replaces this.ws before the old socket's close event
+                // arrives; ignore it so it cannot tear down the new session state.
+                if (this.ws !== socket)
+                    return;
                 clearTimeout(openTimeout);
                 if (this.pingTimer) {
                     clearInterval(this.pingTimer);

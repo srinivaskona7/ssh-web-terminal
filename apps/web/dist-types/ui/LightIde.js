@@ -2,7 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "preact/jsx-ru
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Badge, Button } from '@webssh/ui-kit';
 import { posixQuote } from '../recipes/engine';
-import { baseName, commentPrefixFor, duplicateLine, findMatches, formatBytes, hasRemoteConflict, indentSelection, isProbablyBinary, joinPath, lineColumnAt, lineStartOffset, moveLine, parentPath, parseDiff, parseGitStatus, parseGrepMatches, replaceAll, replaceFirst, sortEntries, textStats, toggleLineComment } from './ide-editing';
+import { baseName, commentPrefixFor, detectEol, duplicateLine, findMatches, formatBytes, hasRemoteConflict, indentSelection, newlineIndent, isProbablyBinary, joinPath, lineColumnAt, lineStartOffset, moveLine, normalizeEol, parentPath, parseDiff, parseGitStatus, parseGrepMatches, replaceAll, replaceFirst, sortEntries, textStats, toggleLineComment } from './ide-editing';
 const AUTO_SAVE_DELAY_MS = 1200;
 const MAX_OUTPUT_LINES = 400;
 const INDENT_UNIT = '  ';
@@ -56,6 +56,7 @@ export function LightIde({ session, connectedLabel }) {
     const [replaceValue, setReplaceValue] = useState('');
     const [caseSensitive, setCaseSensitive] = useState(false);
     const [matchIndex, setMatchIndex] = useState(0);
+    const [selectionTick, setSelectionTick] = useState(0);
     const [gotoLine, setGotoLine] = useState('');
     const [command, setCommand] = useState('');
     const [output, setOutput] = useState([]);
@@ -213,13 +214,13 @@ export function LightIde({ session, connectedLabel }) {
         try {
             if (!force) {
                 const remote = await session.readFile(path);
-                if (hasRemoteConflict(buffer.original, remote)) {
+                if (hasRemoteConflict(buffer.original, normalizeEol(remote, '\n'))) {
                     updateFile(path, { saving: false, conflict: true });
                     setStatus(`${path} changed on the server — not saved.`);
                     return;
                 }
             }
-            await session.writeFile(path, new TextEncoder().encode(content));
+            await session.writeFile(path, new TextEncoder().encode(normalizeEol(content, buffer.eol)));
             const latest = filesRef.current.find((f) => f.path === path);
             const unchanged = !latest || latest.content === content;
             updateFile(path, {
@@ -253,25 +254,40 @@ export function LightIde({ session, connectedLabel }) {
         const existing = filesRef.current.find((f) => f.path === path);
         if (existing) {
             setActivePath(path);
-            if (line)
+            if (line) {
                 pendingGotoLine.current = line;
+                setSelectionTick((tick) => tick + 1);
+            }
             return;
         }
         setBusy(true);
         try {
-            const content = await session.readFile(path);
+            const raw = await session.readFile(path);
+            const eol = detectEol(raw);
+            const content = normalizeEol(raw, '\n');
             if (isProbablyBinary(content)) {
                 setStatus(`${baseName(path)} looks binary — not opened in the text editor.`);
                 return;
             }
             setFiles((prev) => [
                 ...prev,
-                { path, content, original: content, dirty: false, saving: false, conflict: false, error: null }
+                {
+                    path,
+                    content,
+                    original: content,
+                    eol,
+                    dirty: false,
+                    saving: false,
+                    conflict: false,
+                    error: null
+                }
             ]);
             setActivePath(path);
             rememberFile(path);
-            if (line)
+            if (line) {
                 pendingGotoLine.current = line;
+                setSelectionTick((tick) => tick + 1);
+            }
             setStatus(`Opened ${path}`);
         }
         catch (err) {
@@ -305,6 +321,16 @@ export function LightIde({ session, connectedLabel }) {
             armTimer(path);
     };
     const active = activePath ? files.find((f) => f.path === activePath) ?? null : null;
+    // A diff belongs to one file; switching tabs must not leave the old one on
+    // screen looking like it describes the new file.
+    useEffect(() => {
+        setDiff([]);
+    }, [activePath]);
+    const changeFontSize = (next) => {
+        const clamped = Math.max(11, Math.min(24, next));
+        setFontSize(clamped);
+        saveValue('fontSize', clamped);
+    };
     // Apply a pending caret position after a programmatic edit re-renders.
     useEffect(() => {
         const editor = editorRef.current;
@@ -325,7 +351,7 @@ export function LightIde({ session, connectedLabel }) {
         editor.focus();
         editor.setSelectionRange(pending.start, pending.end);
         setCursor(lineColumnAt(active?.content ?? '', pending.start));
-    }, [active?.content, active?.path]);
+    }, [active?.content, active?.path, selectionTick]);
     const matches = active ? findMatches(active.content, findQuery, caseSensitive) : [];
     const focusMatch = (index) => {
         if (!active || matches.length === 0)
@@ -411,6 +437,22 @@ export function LightIde({ session, connectedLabel }) {
             applyEdit(active.path, result.text, result.offset);
             return;
         }
+        if (key === 'Enter' &&
+            start === end &&
+            !event.isComposing &&
+            !event.shiftKey &&
+            !event.altKey &&
+            !event.ctrlKey &&
+            !event.metaKey) {
+            // Carry the current indentation onto the next line and open one extra
+            // level after a bracket, so multi-line edits do not need manual spacing.
+            const result = newlineIndent(active.content, start, INDENT_UNIT);
+            if (result) {
+                event.preventDefault();
+                applyEdit(active.path, result.text, result.offset);
+                return;
+            }
+        }
         if (key === 'Tab') {
             event.preventDefault();
             const result = indentSelection(active.content, start, end, INDENT_UNIT, Boolean(event.shiftKey));
@@ -469,15 +511,26 @@ export function LightIde({ session, connectedLabel }) {
             setStatus('Renaming is unavailable on this connection.');
             return;
         }
+        if (active.saving) {
+            setStatus('Wait for the current save to finish before renaming.');
+            return;
+        }
         const next = window.prompt('Rename to', baseName(active.path))?.trim();
         if (!next || next === baseName(active.path))
             return;
         const target = joinPath(parentPath(active.path), next);
+        const wasDirty = active.dirty;
         try {
             await session.renamePath(active.path, target);
-            setFiles((prev) => prev.map((f) => (f.path === active.path ? { ...f, path: target, dirty: false } : f)));
+            // The buffer keeps its edits and dirty flag: moving a file must not make
+            // unsaved text look saved, or the pending save lands on a path that no
+            // longer exists.
+            clearTimer(active.path);
+            setFiles((prev) => prev.map((f) => (f.path === active.path ? { ...f, path: target } : f)));
             setActivePath(target);
-            setStatus(`Renamed to ${target}`);
+            if (wasDirty && autoSave)
+                armTimer(target);
+            setStatus(`Renamed to ${target}${wasDirty ? ' — unsaved edits still pending' : ''}`);
             await refresh(root);
         }
         catch (err) {
@@ -695,41 +748,40 @@ export function LightIde({ session, connectedLabel }) {
             : sftpState === 'ready'
                 ? 'SFTP ready'
                 : 'SFTP unavailable';
-    return (_jsxs("section", { className: "ws-mod", "data-testid": "screen-ide", children: [_jsxs("header", { className: "ws-mod-head", children: [_jsxs("div", { children: [_jsx("h2", { children: "Workspace editor" }), _jsxs("p", { className: "ws-mod-muted", children: [connectedLabel || 'Not connected', " \u00B7 files are read and written over SFTP; nothing is installed on the server."] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx(Badge, { tone: badgeTone, children: badgeText }), _jsx("label", { htmlFor: "ide-auto-save", children: "Auto-save" }), _jsx("input", { id: "ide-auto-save", type: "checkbox", checked: autoSave, "data-testid": "ide-auto-save", onChange: (e) => {
-                                    const next = e.currentTarget.checked;
-                                    setAutoSave(next);
-                                    saveValue('autoSave', next);
-                                    if (!next) {
-                                        for (const handle of timers.current.values())
-                                            window.clearTimeout(handle);
-                                        timers.current.clear();
-                                    }
-                                } }), _jsx(Button, { variant: "ghost", onClick: () => setFontSize((s) => Math.max(11, s - 1)), testId: "ide-font-dec", children: "A-" }), _jsxs("span", { "data-testid": "ide-font-size", children: [fontSize, "px"] }), _jsx(Button, { variant: "ghost", onClick: () => setFontSize((s) => Math.min(24, s + 1)), testId: "ide-font-inc", children: "A+" })] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsxs("select", { className: "ui-input", "aria-label": "Saved projects", "data-testid": "ide-projects", value: projects.includes(root) ? root : '', onChange: (e) => void refresh(e.currentTarget.value), children: [_jsx("option", { value: "", children: "Recent projects\u2026" }), projects.map((project) => (_jsx("option", { value: project, children: project }, project)))] }), _jsx("input", { className: "ui-input", "aria-label": "Project folder", "data-testid": "ide-root-input", value: root, onInput: (e) => setRoot(e.currentTarget.value), style: { flex: '1 1 240px' } }), _jsx(Button, { onClick: () => void refresh(root), testId: "ide-open-project", children: "Open folder" }), _jsx(Button, { variant: "ghost", onClick: () => void refresh(parentPath(root)), testId: "ide-up", children: "Up" }), _jsx(Button, { variant: "ghost", onClick: () => void refresh('.'), testId: "ide-home", children: "Home" }), _jsx(Button, { variant: "ghost", testId: "ide-forget-project", onClick: () => {
+    return (_jsxs("section", { className: "ws-mod", "data-testid": "screen-ide", children: [_jsxs("header", { className: "ws-mod-head", children: [_jsxs("div", { children: [_jsx("h2", { children: "Workspace editor" }), _jsxs("p", { className: "ws-mod-muted", children: [connectedLabel || 'Not connected', " \u00B7 files are read and written over SFTP; nothing is installed on the server."] })] }), _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Badge, { tone: badgeTone, children: badgeText }), _jsxs("label", { className: "ws-mod-check", htmlFor: "ide-auto-save", children: ["Auto-save", _jsx("input", { id: "ide-auto-save", type: "checkbox", checked: autoSave, "data-testid": "ide-auto-save", onChange: (e) => {
+                                            const next = e.currentTarget.checked;
+                                            setAutoSave(next);
+                                            saveValue('autoSave', next);
+                                            if (!next) {
+                                                for (const handle of timers.current.values())
+                                                    window.clearTimeout(handle);
+                                                timers.current.clear();
+                                            }
+                                        } })] }), _jsx(Button, { variant: "ghost", onClick: () => changeFontSize(fontSize - 1), testId: "ide-font-dec", children: "A-" }), _jsxs("span", { "data-testid": "ide-font-size", children: [fontSize, "px"] }), _jsx(Button, { variant: "ghost", onClick: () => changeFontSize(fontSize + 1), testId: "ide-font-inc", children: "A+" })] })] }), _jsxs("div", { className: "ws-mod-filters", children: [_jsxs("select", { className: "ui-input", "aria-label": "Saved projects", "data-testid": "ide-projects", value: projects.includes(root) ? root : '', onChange: (e) => void refresh(e.currentTarget.value), children: [_jsx("option", { value: "", children: "Recent projects\u2026" }), projects.map((project) => (_jsx("option", { value: project, children: project }, project)))] }), _jsx("input", { className: "ui-input", "aria-label": "Project folder", "data-testid": "ide-root-input", value: root, onInput: (e) => setRoot(e.currentTarget.value), style: { flex: '1 1 240px' } }), _jsx(Button, { onClick: () => void refresh(root), testId: "ide-open-project", children: "Open folder" }), _jsx(Button, { variant: "ghost", onClick: () => void refresh(parentPath(root)), testId: "ide-up", children: "Up" }), _jsx(Button, { variant: "ghost", onClick: () => void refresh('.'), testId: "ide-home", children: "Home" }), _jsx(Button, { variant: "ghost", testId: "ide-forget-project", onClick: () => {
                             const next = projects.filter((p) => p !== root);
                             setProjects(next);
                             saveValue('projects', next);
                             setStatus(`Forgot ${root}`);
-                        }, children: "Forget" })] }), listError ? (_jsx("p", { role: "status", "data-testid": "ide-list-error", children: listError })) : null, _jsxs("div", { style: { display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-start' }, children: [_jsxs("div", { style: { flex: '0 1 300px', minWidth: '220px' }, children: [_jsx("h3", { children: root }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: "ghost", onClick: () => void newFile(), testId: "ide-new-file", children: "New file" }), _jsx(Button, { variant: "ghost", onClick: () => void newFolder(), testId: "ide-new-folder", children: "New folder" }), _jsx(Button, { variant: "ghost", onClick: () => uploadRef.current?.click(), testId: "ide-upload", children: "Upload" }), _jsx("input", { ref: (el) => {
+                        }, children: "Forget" })] }), listError ? (_jsx("p", { className: "ws-mod-error", role: "status", "data-testid": "ide-list-error", children: listError })) : null, _jsxs("div", { className: "ws-mod-split ide-workspace-split", children: [_jsxs("aside", { className: "ws-mod-list", "aria-label": "Project files", style: { overflowX: 'hidden' }, children: [_jsx("h3", { children: root }), _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { variant: "ghost", onClick: () => void newFile(), testId: "ide-new-file", children: "New file" }), _jsx(Button, { variant: "ghost", onClick: () => void newFolder(), testId: "ide-new-folder", children: "New folder" }), _jsx(Button, { variant: "ghost", onClick: () => uploadRef.current?.click(), testId: "ide-upload", children: "Upload" }), _jsx("input", { ref: (el) => {
                                             uploadRef.current = el;
                                         }, type: "file", "aria-label": "Upload a file into the open folder", "data-testid": "ide-upload-input", style: { display: 'none' }, onChange: (e) => {
                                             const file = e.currentTarget.files?.[0];
                                             if (file)
                                                 void uploadFile(file);
                                             e.currentTarget.value = '';
-                                        } })] }), _jsxs("ul", { "data-testid": "ide-file-list", style: { listStyle: 'none', padding: 0, margin: 0 }, children: [entries.map((entry) => (_jsx("li", { children: _jsxs("button", { type: "button", className: "ui-button", "data-testid": `ide-entry-${entry.name}`, onClick: () => void (entry.isDir ? refresh(entry.path) : openFile(entry.path)), style: { width: '100%', textAlign: 'left' }, children: [entry.isDir ? '▸ ' : '  ', entry.name, entry.isSymlink ? ' (link)' : '', !entry.isDir && entry.size > 0 ? ` · ${formatBytes(entry.size)}` : ''] }) }, entry.path))), entries.length === 0 && !busy ? _jsx("li", { children: "No entries listed." }) : null, busy ? _jsx("li", { children: "Loading\u2026" }) : null] }), _jsx("h4", { style: { marginBottom: 'var(--space-1)' }, children: "Quick open" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-1)' }, children: [_jsx("input", { className: "ui-input", "aria-label": "Find a file by name", "data-testid": "ide-quick-open", value: quickOpen, onInput: (e) => setQuickOpen(e.currentTarget.value) }), _jsx(Button, { variant: "ghost", onClick: () => void quickFind(), testId: "ide-quick-open-run", children: "Find" })] }), quickResults.length > 0 ? (_jsx("ul", { "data-testid": "ide-quick-results", style: { listStyle: 'none', padding: 0 }, children: quickResults.map((path) => (_jsx("li", { children: _jsx("button", { type: "button", onClick: () => void openFile(path), children: path }) }, path))) })) : null, recentFiles.length > 0 ? (_jsxs(_Fragment, { children: [_jsx("h4", { style: { marginBottom: 'var(--space-1)' }, children: "Recent files" }), _jsx("ul", { "data-testid": "ide-recent-files", style: { listStyle: 'none', padding: 0 }, children: recentFiles.slice(0, 8).map((path) => (_jsx("li", { children: _jsx("button", { type: "button", onClick: () => void openFile(path), children: baseName(path) }) }, path))) })] })) : null] }), _jsxs("div", { style: { flex: '1 1 auto', minWidth: 0 }, children: [_jsx("div", { role: "tablist", "aria-label": "Open files", "data-testid": "ide-tabs", children: files.map((file) => (_jsxs("span", { children: [_jsxs("button", { type: "button", role: "tab", "aria-selected": file.path === activePath, onClick: () => setActivePath(file.path), "data-testid": `ide-tab-${baseName(file.path)}`, children: [baseName(file.path), file.dirty ? ' *' : '', file.conflict ? ' ⚠' : '', file.error ? ' !' : ''] }), _jsx("button", { type: "button", "aria-label": `Close ${baseName(file.path)}`, onClick: () => closeFile(file.path), children: "\u00D7" })] }, file.path))) }), active ? (_jsxs("div", { children: [_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("span", { "data-testid": "ide-active-path", children: active.path }), _jsx(Badge, { tone: active.conflict ? 'danger' : active.dirty ? 'warning' : 'success', children: active.conflict ? 'Remote changed' : active.dirty ? 'Unsaved' : 'Saved' }), active.saving ? _jsx("span", { children: "Saving\u2026" }) : null, _jsx(Button, { onClick: () => void save(active.path), testId: "ide-save", children: "Save now" }), active.conflict ? (_jsx(Button, { variant: "danger", onClick: () => void save(active.path, true), testId: "ide-overwrite", children: "Overwrite with my version" })) : null, _jsx(Button, { variant: "ghost", onClick: () => setDiff([]), testId: "ide-clear-diff", children: "Clear diff" })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-1)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("input", { className: "ui-input", "aria-label": "Find in file", "data-testid": "ide-find-input", placeholder: "Find", value: findQuery, onInput: (e) => {
+                                        } })] }), _jsxs("ul", { "data-testid": "ide-file-list", style: { listStyle: 'none', padding: 0, margin: 0 }, children: [entries.map((entry) => (_jsx("li", { children: _jsxs("button", { type: "button", className: "ui-button", "data-testid": `ide-entry-${entry.name}`, onClick: () => void (entry.isDir ? refresh(entry.path) : openFile(entry.path)), style: { width: '100%', textAlign: 'left' }, children: [entry.isDir ? '▸ ' : '  ', entry.name, !entry.isDir && entry.size > 0 ? ` · ${formatBytes(entry.size)}` : ''] }) }, entry.path))), entries.length === 0 && !busy ? _jsx("li", { children: "No entries listed." }) : null, busy ? _jsx("li", { children: "Loading\u2026" }) : null] }), _jsx("h4", { style: { marginBottom: 'var(--space-1)' }, children: "Quick open" }), _jsxs("div", { className: "ws-mod-filters", children: [_jsx("input", { className: "ui-input", "aria-label": "Find a file by name", "data-testid": "ide-quick-open", value: quickOpen, onInput: (e) => setQuickOpen(e.currentTarget.value) }), _jsx(Button, { variant: "ghost", onClick: () => void quickFind(), testId: "ide-quick-open-run", children: "Find" })] }), quickResults.length > 0 ? (_jsx("ul", { "data-testid": "ide-quick-results", style: { listStyle: 'none', padding: 0 }, children: quickResults.map((path) => (_jsx("li", { children: _jsx("button", { type: "button", onClick: () => void openFile(path), children: path }) }, path))) })) : null, recentFiles.length > 0 ? (_jsxs(_Fragment, { children: [_jsx("h4", { style: { marginBottom: 'var(--space-1)' }, children: "Recent files" }), _jsx("ul", { "data-testid": "ide-recent-files", style: { listStyle: 'none', padding: 0 }, children: recentFiles.slice(0, 8).map((path) => (_jsx("li", { children: _jsx("button", { type: "button", onClick: () => void openFile(path), children: baseName(path) }) }, path))) })] })) : null] }), _jsxs("section", { className: "ws-mod-content", "aria-label": "Editor", children: [_jsx("div", { role: "tablist", "aria-label": "Open files", "data-testid": "ide-tabs", children: files.map((file) => (_jsxs("span", { children: [_jsxs("button", { type: "button", role: "tab", "aria-selected": file.path === activePath, onClick: () => setActivePath(file.path), "data-testid": `ide-tab-${baseName(file.path)}`, children: [baseName(file.path), file.dirty ? ' *' : '', file.conflict ? ' ⚠' : '', file.error ? ' !' : ''] }), _jsx("button", { type: "button", "aria-label": `Close ${baseName(file.path)}`, onClick: () => closeFile(file.path), children: "\u00D7" })] }, file.path))) }), active ? (_jsxs("div", { className: "ws-mod-detail", children: [_jsxs("div", { className: "ws-mod-actions", children: [_jsx("span", { "data-testid": "ide-active-path", children: active.path }), _jsx(Badge, { tone: active.conflict ? 'danger' : active.dirty ? 'warning' : 'success', children: active.conflict ? 'Remote changed' : active.dirty ? 'Unsaved' : 'Saved' }), active.saving ? _jsx("span", { children: "Saving\u2026" }) : null, _jsx(Button, { onClick: () => void save(active.path), testId: "ide-save", children: "Save now" }), active.conflict ? (_jsx(Button, { variant: "danger", onClick: () => void save(active.path, true), testId: "ide-overwrite", children: "Overwrite with my version" })) : null, _jsx(Button, { variant: "ghost", onClick: () => setDiff([]), testId: "ide-clear-diff", children: "Clear diff" })] }), _jsxs("div", { className: "ws-mod-filters", children: [_jsx("input", { className: "ui-input", "aria-label": "Find in file", "data-testid": "ide-find-input", placeholder: "Find", value: findQuery, onInput: (e) => {
                                                     setFindQuery(e.currentTarget.value);
                                                     setMatchIndex(0);
-                                                }, style: { flex: '1 1 140px' } }), _jsx(Button, { variant: "ghost", onClick: () => focusMatch(matchIndex + 1), testId: "ide-find-next", children: "Next" }), _jsx(Button, { variant: "ghost", onClick: () => focusMatch(matchIndex - 1), testId: "ide-find-prev", children: "Prev" }), _jsx("label", { htmlFor: "ide-case", children: "Aa" }), _jsx("input", { id: "ide-case", type: "checkbox", checked: caseSensitive, "data-testid": "ide-case-sensitive", onChange: (e) => setCaseSensitive(e.currentTarget.checked) }), _jsx("span", { "data-testid": "ide-match-count", children: findQuery ? `${matches.length} match(es)` : '—' }), _jsx("input", { className: "ui-input", "aria-label": "Replace with", "data-testid": "ide-replace-input", placeholder: "Replace", value: replaceValue, onInput: (e) => setReplaceValue(e.currentTarget.value), style: { flex: '1 1 120px' } }), _jsx(Button, { variant: "ghost", onClick: () => doReplace(false), testId: "ide-replace-one", children: "Replace" }), _jsx(Button, { variant: "ghost", onClick: () => doReplace(true), testId: "ide-replace-all", children: "Replace all" })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-1)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("input", { className: "ui-input", "aria-label": "Go to line", "data-testid": "ide-goto-line", placeholder: "Line", value: gotoLine, onInput: (e) => setGotoLine(e.currentTarget.value), style: { width: '80px' } }), _jsx(Button, { variant: "ghost", onClick: doGotoLine, testId: "ide-goto-line-run", children: "Go" }), _jsx(Button, { variant: "ghost", onClick: downloadActive, testId: "ide-download", children: "Download copy" }), _jsx(Button, { variant: "ghost", onClick: () => void renameActive(), testId: "ide-rename", children: "Rename" }), _jsx(Button, { variant: "danger", onClick: () => void deleteActive(), testId: "ide-delete", children: "Delete" }), _jsxs("span", { "data-testid": "ide-cursor", children: ["Ln ", cursor.line, ", Col ", cursor.column] }), _jsxs("span", { "data-testid": "ide-stats", children: [textStats(active.content).lines, " lines \u00B7 ", textStats(active.content).words, " words \u00B7", ' ', textStats(active.content).chars, " chars"] })] }), _jsx("textarea", { ref: (el) => {
+                                                }, style: { flex: '1 1 140px' } }), _jsx(Button, { variant: "ghost", onClick: () => focusMatch(matchIndex + 1), testId: "ide-find-next", children: "Next" }), _jsx(Button, { variant: "ghost", onClick: () => focusMatch(matchIndex - 1), testId: "ide-find-prev", children: "Prev" }), _jsx("label", { htmlFor: "ide-case", children: "Aa" }), _jsx("input", { id: "ide-case", type: "checkbox", checked: caseSensitive, "data-testid": "ide-case-sensitive", onChange: (e) => setCaseSensitive(e.currentTarget.checked) }), _jsx("span", { "data-testid": "ide-match-count", children: findQuery ? `${matches.length} match(es)` : '—' }), _jsx("input", { className: "ui-input", "aria-label": "Replace with", "data-testid": "ide-replace-input", placeholder: "Replace", value: replaceValue, onInput: (e) => setReplaceValue(e.currentTarget.value), style: { flex: '1 1 120px' } }), _jsx(Button, { variant: "ghost", onClick: () => doReplace(false), testId: "ide-replace-one", children: "Replace" }), _jsx(Button, { variant: "ghost", onClick: () => doReplace(true), testId: "ide-replace-all", children: "Replace all" })] }), _jsxs("div", { className: "ws-mod-filters", children: [_jsx("input", { className: "ui-input", "aria-label": "Go to line", "data-testid": "ide-goto-line", placeholder: "Line", value: gotoLine, onInput: (e) => setGotoLine(e.currentTarget.value), style: { width: '80px' } }), _jsx(Button, { variant: "ghost", onClick: doGotoLine, testId: "ide-goto-line-run", children: "Go" }), _jsx(Button, { variant: "ghost", onClick: downloadActive, testId: "ide-download", children: "Download copy" }), _jsx(Button, { variant: "ghost", onClick: () => void renameActive(), testId: "ide-rename", children: "Rename" }), _jsx(Button, { variant: "danger", onClick: () => void deleteActive(), testId: "ide-delete", children: "Delete" }), _jsxs("span", { "data-testid": "ide-cursor", children: ["Ln ", cursor.line, ", Col ", cursor.column] }), _jsxs("span", { "data-testid": "ide-stats", children: [textStats(active.content).lines, " lines \u00B7 ", textStats(active.content).words, " words \u00B7", ' ', textStats(active.content).chars, " chars"] })] }), _jsx("textarea", { ref: (el) => {
                                             editorRef.current = el;
-                                        }, className: "ui-input", "aria-label": `Editing ${active.path}`, "data-testid": "ide-editor", value: active.content, onInput: (e) => onEdit(active.path, e.currentTarget.value), onKeyDown: onEditorKeyDown, onSelect: trackCursor, onClick: trackCursor, onKeyUp: trackCursor, spellcheck: false, style: {
+                                        }, className: "ui-input ide-editor", "aria-label": `Editing ${active.path}`, "data-testid": "ide-editor", value: active.content, onInput: (e) => onEdit(active.path, e.currentTarget.value), onKeyDown: onEditorKeyDown, onSelect: trackCursor, onClick: trackCursor, onKeyUp: trackCursor, spellcheck: false, style: {
                                             width: '100%',
-                                            minHeight: '320px',
                                             fontFamily: 'var(--font-font-mono)',
                                             fontSize: `${fontSize}px`,
                                             whiteSpace: 'pre',
                                             overflow: 'auto'
-                                        } }), active.error ? (_jsx("p", { role: "alert", "data-testid": "ide-save-error", children: active.error })) : null] })) : (_jsx("p", { children: "Select a file to edit. Auto-save writes back over SFTP after a short pause; pending edits are flushed when you leave this screen." }))] })] }), _jsxs("div", { style: { marginTop: 'var(--space-3)' }, children: [_jsx("h3", { children: "Project search" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-1)' }, children: [_jsx("input", { className: "ui-input", "aria-label": "Search project text", "data-testid": "ide-search-query", value: searchQuery, onInput: (e) => setSearchQuery(e.currentTarget.value), style: { flex: 1 } }), _jsx(Button, { variant: "ghost", onClick: () => void searchProject(), testId: "ide-search-run", children: "Search" })] }), searchResults.length > 0 ? (_jsx("ul", { "data-testid": "ide-search-results", style: { listStyle: 'none', padding: 0 }, children: searchResults.map((hit) => (_jsx("li", { children: _jsxs("button", { type: "button", onClick: () => void openFile(hit.path, hit.line), children: [hit.path, ":", hit.line, " \u2014 ", hit.text.slice(0, 120)] }) }, `${hit.path}:${hit.line}`))) })) : null] }), _jsxs("div", { style: { marginTop: 'var(--space-3)' }, children: [_jsx("h3", { children: "Run a command" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }, children: [_jsx("input", { className: "ui-input", "aria-label": "Command", "data-testid": "ide-command-input", value: command, onInput: (e) => setCommand(e.currentTarget.value), onKeyDown: onCommandKeyDown, style: { flex: 1 } }), _jsx(Button, { onClick: () => void runCommand(), testId: "ide-run-command", children: "Run" }), _jsx(Button, { variant: "ghost", onClick: pinCommand, testId: "ide-pin-command", children: "Pin" })] }), _jsxs("label", { htmlFor: "ide-run-in-root", children: ["Run inside ", root, _jsx("input", { id: "ide-run-in-root", type: "checkbox", checked: runInRoot, "data-testid": "ide-run-in-root", onChange: (e) => setRunInRoot(e.currentTarget.checked) })] }), presets.length > 0 ? (_jsx("div", { "data-testid": "ide-presets", style: { display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }, children: presets.map((preset) => (_jsxs("span", { children: [_jsx("button", { type: "button", onClick: () => void runCommand(preset), children: preset }), _jsx("button", { type: "button", "aria-label": `Remove ${preset}`, onClick: () => removePreset(preset), children: "\u00D7" })] }, preset))) })) : null, _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }, children: [_jsx(Button, { variant: "ghost", onClick: () => void copyOutput(), testId: "ide-copy-output", children: "Copy output" }), _jsx(Button, { variant: "ghost", onClick: () => setOutput([]), testId: "ide-clear-output", children: "Clear" }), _jsx(Button, { variant: "ghost", onClick: () => void refreshGit(), testId: "ide-git-refresh", children: "Refresh git" }), _jsx(Button, { variant: "ghost", onClick: () => void showDiff(), testId: "ide-git-diff", children: "Diff this file" }), _jsx("span", { "data-testid": "ide-git-status", children: git ? `${git.branch} · ${git.changes} change(s)` : 'git: not checked' })] }), _jsx("pre", { "data-testid": "ide-command-output", "aria-live": "polite", style: { maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }, children: output.join('\n') }), diff.length > 0 ? (_jsx("pre", { "data-testid": "ide-diff", style: { maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }, children: diff
-                            .map((line) => `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`)
-                            .join('\n') })) : null] }), _jsx("p", { role: "status", "data-testid": "ide-status", children: status })] }));
+                                        } }), active.error ? (_jsx("p", { role: "alert", "data-testid": "ide-save-error", children: active.error })) : null] })) : (_jsx("div", { className: "ws-mod-detail", children: _jsx("p", { className: "ws-mod-muted", children: "Select a file to edit. Auto-save writes back over SFTP after a short pause; pending edits are flushed when you leave this screen." }) }))] })] }), _jsxs("div", { className: "ws-mod-split ide-secondary-split", children: [_jsxs("section", { className: "ws-mod-detail", "aria-label": "Find in project", children: [_jsx("h3", { children: "Project search" }), _jsxs("div", { className: "ws-mod-filters", children: [_jsx("input", { className: "ui-input", "aria-label": "Search project text", "data-testid": "ide-search-query", value: searchQuery, onInput: (e) => setSearchQuery(e.currentTarget.value), style: { flex: 1 } }), _jsx(Button, { variant: "ghost", onClick: () => void searchProject(), testId: "ide-search-run", children: "Search" })] }), searchResults.length > 0 ? (_jsx("ul", { "data-testid": "ide-search-results", style: { listStyle: 'none', padding: 0 }, children: searchResults.map((hit) => (_jsx("li", { children: _jsxs("button", { type: "button", onClick: () => void openFile(hit.path, hit.line), children: [hit.path, ":", hit.line, " \u2014 ", hit.text.slice(0, 120)] }) }, `${hit.path}:${hit.line}`))) })) : null] }), _jsxs("section", { className: "ws-mod-detail", "aria-label": "Run a command", children: [_jsx("h3", { children: "Run a command" }), _jsxs("div", { className: "ws-mod-filters", children: [_jsx("input", { className: "ui-input", "aria-label": "Command", "data-testid": "ide-command-input", value: command, onInput: (e) => setCommand(e.currentTarget.value), onKeyDown: onCommandKeyDown, style: { flex: 1 } }), _jsx(Button, { onClick: () => void runCommand(), testId: "ide-run-command", children: "Run" }), _jsx(Button, { variant: "ghost", onClick: pinCommand, testId: "ide-pin-command", children: "Pin" })] }), _jsxs("label", { htmlFor: "ide-run-in-root", children: ["Run inside ", root, _jsx("input", { id: "ide-run-in-root", type: "checkbox", checked: runInRoot, "data-testid": "ide-run-in-root", onChange: (e) => setRunInRoot(e.currentTarget.checked) })] }), presets.length > 0 ? (_jsx("div", { "data-testid": "ide-presets", className: "ws-mod-chips", children: presets.map((preset) => (_jsxs("span", { children: [_jsx("button", { type: "button", onClick: () => void runCommand(preset), children: preset }), _jsx("button", { type: "button", "aria-label": `Remove ${preset}`, onClick: () => removePreset(preset), children: "\u00D7" })] }, preset))) })) : null, _jsxs("div", { className: "ws-mod-actions", children: [_jsx(Button, { variant: "ghost", onClick: () => void copyOutput(), testId: "ide-copy-output", children: "Copy output" }), _jsx(Button, { variant: "ghost", onClick: () => setOutput([]), testId: "ide-clear-output", children: "Clear" }), _jsx(Button, { variant: "ghost", onClick: () => void refreshGit(), testId: "ide-git-refresh", children: "Refresh git" }), _jsx(Button, { variant: "ghost", onClick: () => void showDiff(), testId: "ide-git-diff", children: "Diff this file" }), _jsx("span", { "data-testid": "ide-git-status", children: git ? `${git.branch} · ${git.changes} change(s)` : 'git: not checked' })] }), _jsx("pre", { "data-testid": "ide-command-output", "aria-live": "polite", style: { maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }, children: output.join('\n') }), diff.length > 0 ? (_jsx("pre", { "data-testid": "ide-diff", style: { maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }, children: diff
+                                    .map((line) => `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`)
+                                    .join('\n') })) : null] })] }), _jsx("p", { role: "status", "data-testid": "ide-status", className: "ws-mod-muted", children: status })] }));
 }
 //# sourceMappingURL=LightIde.js.map

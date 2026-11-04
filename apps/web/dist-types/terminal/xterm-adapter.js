@@ -1,4 +1,7 @@
 import { Terminal } from '@xterm/xterm';
+// xterm's own stylesheet: without it the helper textarea renders as a visible
+// white box over the terminal and the selection/scroll layers are unpositioned.
+import '@xterm/xterm/css/xterm.css';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';

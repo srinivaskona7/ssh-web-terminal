@@ -11,9 +11,26 @@ export function joinPath(base: string, name: string): string {
 
 export function parentPath(path: string): string {
   const trimmed = path.replace(/\/+$/, '');
+  // A bare relative name ("app.ts") lives in the current folder, which the
+  // editor denotes as ".". Returning "/" here would retarget renames at the
+  // filesystem root.
+  if (trimmed === '') return path.startsWith('/') ? '/' : '.';
+  if (trimmed === '.') return '.';
   const idx = trimmed.lastIndexOf('/');
-  if (idx <= 0) return '/';
+  if (idx < 0) return '.';
+  if (idx === 0) return '/';
   return trimmed.slice(0, idx);
+}
+
+/** Line ending used by a file; the editor keeps buffers in LF. */
+export function detectEol(text: string): '\r\n' | '\n' {
+  return text.includes('\r\n') ? '\r\n' : '\n';
+}
+
+/** Rewrite a buffer to the requested line ending. */
+export function normalizeEol(text: string, eol: '\r\n' | '\n'): string {
+  const lf = text.replace(/\r\n/g, '\n');
+  return eol === '\n' ? lf : lf.replace(/\n/g, '\r\n');
 }
 
 export function baseName(path: string): string {
@@ -291,3 +308,24 @@ export function parseDiff(output: string, limit = 400): DiffLine[] {
   return lines;
 }
 
+
+/**
+ * Indentation to insert when Enter is pressed at `offset`. Returns null when
+ * the default newline is already correct (no indentation and no open bracket).
+ */
+export function newlineIndent(
+  text: string,
+  offset: number,
+  unit: string
+): { text: string; offset: number } | null {
+  const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+  const line = text.slice(lineStart, offset);
+  const indent = /^[ \t]*/.exec(line)?.[0] ?? '';
+  const opensBlock = /[\{\[\(]\s*$/.test(line);
+  if (indent.length === 0 && !opensBlock) return null;
+  const insert = `\n${indent}${opensBlock ? unit : ''}`;
+  return {
+    text: text.slice(0, offset) + insert + text.slice(offset),
+    offset: offset + insert.length
+  };
+}

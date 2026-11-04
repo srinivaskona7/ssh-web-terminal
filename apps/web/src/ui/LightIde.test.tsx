@@ -30,14 +30,31 @@ function fakeSession(
         ? execImpl(command)
         : { stdout: `ran ${command}`, stderr: '', exitCode: 0 };
     },
-    listDir: async (_path: string) => [entry('app.ts'), entry('src', true)],
+    listDir: async (_path: string) => [
+      ...Object.keys(files)
+        .filter((path) => /^\.\/[^/]+$/.test(path))
+        .map((path) => entry(path.slice(2))),
+      entry('src', true)
+    ],
     readFile: async (path: string) => {
-      if (!(path in files)) throw new Error(`No such file: ${path}`);
-      return files[path];
+      const content = files[path];
+      if (content === undefined) throw new Error(`No such file: ${path}`);
+      return content;
     },
     writeFile: async (path: string, data: Uint8Array) => {
-      files[path] = new TextDecoder().decode(data);
-      writes.push({ path, text: files[path] });
+      const text = new TextDecoder().decode(data);
+      files[path] = text;
+      writes.push({ path, text });
+    },
+    renamePath: async (from: string, to: string) => {
+      const content = files[from];
+      if (content === undefined) throw new Error(`No such file: ${from}`);
+      files[to] = content;
+      delete files[from];
+    },
+    removePath: async (path: string) => {
+      if (!(path in files)) throw new Error(`No such file: ${path}`);
+      delete files[path];
     }
   } as WorkspaceRemoteSession;
   return { session, writes, commands };
@@ -314,6 +331,136 @@ describe('LightIde', () => {
     expect(commands.some((c) => c.includes("git -C '.' diff -- './app.ts'"))).toBe(true);
   });
 
+  it('keeps unsaved edits through a rename and saves them at the new path', async () => {
+    const files: Record<string, string> = { './app.ts': 'one\n' };
+    const { session, writes } = fakeSession(files);
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('renamed.ts');
+    try {
+      const el = container();
+      render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+      await settle();
+      input(el, 'ide-entry-app.ts').click();
+      await settle();
+
+      const editor = input(el, 'ide-editor') as HTMLTextAreaElement;
+      editor.value = 'edited\n';
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      await settle();
+
+      input(el, 'ide-rename').click();
+      await settle();
+      // The move must not make the pending edit look saved.
+      expect(el.querySelector('[data-testid="ide-status"]')?.textContent).toContain('pending');
+
+      await sleep(1400);
+      expect(writes).toEqual([{ path: './renamed.ts', text: 'edited\n' }]);
+      expect(files['./renamed.ts']).toBe('edited\n');
+    } finally {
+      prompt.mockRestore();
+    }
+  });
+
+  it('flushes a pending edit when the screen unmounts', async () => {
+    const { session, writes } = fakeSession({ './app.ts': 'one\n' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+    input(el, 'ide-entry-app.ts').click();
+    await settle();
+
+    const editor = input(el, 'ide-editor') as HTMLTextAreaElement;
+    editor.value = 'two\n';
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    render(null, el);
+    await settle();
+    expect(writes).toEqual([{ path: './app.ts', text: 'two\n' }]);
+  });
+
+  it('keeps CRLF line endings when saving a Windows-style file', async () => {
+    const { session, writes } = fakeSession({ './win.ts': 'a\r\nb\r\n' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+    input(el, 'ide-entry-win.ts').click();
+    await settle();
+
+    const editor = input(el, 'ide-editor') as HTMLTextAreaElement;
+    expect(editor.value).toBe('a\nb\n');
+    editor.value = 'a\nb\nc\n';
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(1400);
+
+    expect(writes).toEqual([{ path: './win.ts', text: 'a\r\nb\r\nc\r\n' }]);
+  });
+
+  it('moves the caret when a search hit targets an already-open file', async () => {
+    const files: Record<string, string> = { './app.ts': 'one\nneedle\n' };
+    const { session } = fakeSession(files, async (cmd) => {
+      if (cmd.startsWith('grep ')) return { stdout: './app.ts:2:needle\n', stderr: '', exitCode: 0 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+    input(el, 'ide-entry-app.ts').click();
+    await settle();
+
+    const query = input(el, 'ide-search-query') as HTMLInputElement;
+    query.value = 'needle';
+    query.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    input(el, 'ide-search-run').click();
+    await settle();
+    (el.querySelector('[data-testid="ide-search-results"] button') as HTMLButtonElement).click();
+    await settle();
+
+    const editor = input(el, 'ide-editor') as HTMLTextAreaElement;
+    expect(editor.selectionStart).toBe(4);
+  });
+
+  it('creates a new file, opens it, and deletes it', async () => {
+    const files: Record<string, string> = { './app.ts': 'x\n' };
+    const { session, writes } = fakeSession(files);
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('notes.txt');
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const el = container();
+      render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+      await settle();
+
+      input(el, 'ide-new-file').click();
+      await settle();
+      expect(writes).toEqual([{ path: './notes.txt', text: '' }]);
+      expect(el.querySelector('[data-testid="ide-editor"]')).toBeTruthy();
+
+      input(el, 'ide-delete').click();
+      await settle();
+      expect(files['./notes.txt']).toBeUndefined();
+      expect(el.querySelector('[data-testid="ide-active-path"]')).toBeNull();
+    } finally {
+      prompt.mockRestore();
+      confirm.mockRestore();
+    }
+  });
+
+  it('pins a command as a preset', async () => {
+    const { session } = fakeSession({ './app.ts': 'x\n' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+
+    const command = input(el, 'ide-command-input') as HTMLInputElement;
+    command.value = 'git status';
+    command.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    input(el, 'ide-pin-command').click();
+    await settle();
+
+    expect(el.querySelector('[data-testid="ide-presets"]')?.textContent).toContain('git status');
+  });
+
   it('asks before a new file truncates an existing one', async () => {
     const files: Record<string, string> = { './app.ts': 'keep\n' };
     const { session, writes } = fakeSession(files);
@@ -334,5 +481,25 @@ describe('LightIde', () => {
       prompt.mockRestore();
       confirm.mockRestore();
     }
+  });
+
+  it('leaves Enter to the input method while composing', async () => {
+    const { session } = fakeSession({ './app.ts': '  a\n' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+
+    input(el, 'ide-entry-app.ts').click();
+    await settle();
+
+    const editor = input(el, 'ide-editor') as HTMLTextAreaElement;
+    editor.selectionStart = 3;
+    editor.selectionEnd = 3;
+    editor.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })
+    );
+    await settle();
+
+    expect(editor.value).toBe('  a\n');
   });
 });

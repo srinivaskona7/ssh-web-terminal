@@ -752,7 +752,9 @@ export class BrowserSshRelaySessionClient {
                             sftpReady: true
                         };
                         this.metadata = meta;
-                        this.params.onStateChange?.('connected', 12);
+                        // The relay has no ping/pong, so round-trip time is not measured.
+                        // Report 0 (rendered as "not measured") rather than inventing one.
+                        this.params.onStateChange?.('connected', 0);
                         if (this.connectResolve) {
                             const res = this.connectResolve;
                             this.connectResolve = null;
@@ -1205,6 +1207,15 @@ export class BrowserSshRelaySessionClient {
     }
     getReplayFramesAfter(lastSeq) {
         return this.ringBuffer.filter((f) => f.seq > lastSeq);
+    }
+    /**
+     * The relay keeps no server-side session, so this re-establishes a fresh SSH
+     * shell. Frames buffered for the old shell are NOT replayed: they carry the
+     * dead channel ids and would duplicate output against a shell that never
+     * produced it. Callers must treat the returned metadata as a NEW shell.
+     */
+    async reconnect() {
+        return this.reconnectAndResume(Number.MAX_SAFE_INTEGER);
     }
     async reconnectAndResume(lastSeq = 0) {
         this.rawBuffer = new Uint8Array(0);

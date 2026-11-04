@@ -6,16 +6,19 @@ import { posixQuote } from '../recipes/engine';
 import {
   baseName,
   commentPrefixFor,
+  detectEol,
   duplicateLine,
   findMatches,
   formatBytes,
   hasRemoteConflict,
   indentSelection,
+  newlineIndent,
   isProbablyBinary,
   joinPath,
   lineColumnAt,
   lineStartOffset,
   moveLine,
+  normalizeEol,
   parentPath,
   parseDiff,
   parseGitStatus,
@@ -31,6 +34,8 @@ interface OpenFile {
   path: string;
   content: string;
   original: string;
+  /** Line ending the file used on the server; the buffer is always LF. */
+  eol: '\r\n' | '\n';
   dirty: boolean;
   saving: boolean;
   conflict: boolean;
@@ -99,6 +104,7 @@ export function LightIde({
   const [replaceValue, setReplaceValue] = useState<string>('');
   const [caseSensitive, setCaseSensitive] = useState<boolean>(false);
   const [matchIndex, setMatchIndex] = useState<number>(0);
+  const [selectionTick, setSelectionTick] = useState<number>(0);
   const [gotoLine, setGotoLine] = useState<string>('');
 
   const [command, setCommand] = useState<string>('');
@@ -267,13 +273,13 @@ export function LightIde({
     try {
       if (!force) {
         const remote = await session.readFile(path);
-        if (hasRemoteConflict(buffer.original, remote)) {
+        if (hasRemoteConflict(buffer.original, normalizeEol(remote, '\n'))) {
           updateFile(path, { saving: false, conflict: true });
           setStatus(`${path} changed on the server — not saved.`);
           return;
         }
       }
-      await session.writeFile(path, new TextEncoder().encode(content));
+      await session.writeFile(path, new TextEncoder().encode(normalizeEol(content, buffer.eol)));
       const latest = filesRef.current.find((f) => f.path === path);
       const unchanged = !latest || latest.content === content;
       updateFile(path, {
@@ -306,23 +312,40 @@ export function LightIde({
     const existing = filesRef.current.find((f) => f.path === path);
     if (existing) {
       setActivePath(path);
-      if (line) pendingGotoLine.current = line;
+      if (line) {
+        pendingGotoLine.current = line;
+        setSelectionTick((tick) => tick + 1);
+      }
       return;
     }
     setBusy(true);
     try {
-      const content = await session.readFile(path);
+      const raw = await session.readFile(path);
+      const eol = detectEol(raw);
+      const content = normalizeEol(raw, '\n');
       if (isProbablyBinary(content)) {
         setStatus(`${baseName(path)} looks binary — not opened in the text editor.`);
         return;
       }
       setFiles((prev) => [
         ...prev,
-        { path, content, original: content, dirty: false, saving: false, conflict: false, error: null }
+        {
+          path,
+          content,
+          original: content,
+          eol,
+          dirty: false,
+          saving: false,
+          conflict: false,
+          error: null
+        }
       ]);
       setActivePath(path);
       rememberFile(path);
-      if (line) pendingGotoLine.current = line;
+      if (line) {
+        pendingGotoLine.current = line;
+        setSelectionTick((tick) => tick + 1);
+      }
       setStatus(`Opened ${path}`);
     } catch (err) {
       setStatus(`Open failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -357,6 +380,18 @@ export function LightIde({
 
   const active = activePath ? files.find((f) => f.path === activePath) ?? null : null;
 
+  // A diff belongs to one file; switching tabs must not leave the old one on
+  // screen looking like it describes the new file.
+  useEffect(() => {
+    setDiff([]);
+  }, [activePath]);
+
+  const changeFontSize = (next: number): void => {
+    const clamped = Math.max(11, Math.min(24, next));
+    setFontSize(clamped);
+    saveValue('fontSize', clamped);
+  };
+
   // Apply a pending caret position after a programmatic edit re-renders.
   useEffect(() => {
     const editor = editorRef.current;
@@ -375,7 +410,7 @@ export function LightIde({
     editor.focus();
     editor.setSelectionRange(pending.start, pending.end);
     setCursor(lineColumnAt(active?.content ?? '', pending.start));
-  }, [active?.content, active?.path]);
+  }, [active?.content, active?.path, selectionTick]);
 
   const matches = active ? findMatches(active.content, findQuery, caseSensitive) : [];
 
@@ -463,6 +498,24 @@ export function LightIde({
       applyEdit(active.path, result.text, result.offset);
       return;
     }
+    if (
+      key === 'Enter' &&
+      start === end &&
+      !event.isComposing &&
+      !event.shiftKey &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey
+    ) {
+      // Carry the current indentation onto the next line and open one extra
+      // level after a bracket, so multi-line edits do not need manual spacing.
+      const result = newlineIndent(active.content, start, INDENT_UNIT);
+      if (result) {
+        event.preventDefault();
+        applyEdit(active.path, result.text, result.offset);
+        return;
+      }
+    }
     if (key === 'Tab') {
       event.preventDefault();
       const result = indentSelection(
@@ -527,16 +580,26 @@ export function LightIde({
       setStatus('Renaming is unavailable on this connection.');
       return;
     }
+    if (active.saving) {
+      setStatus('Wait for the current save to finish before renaming.');
+      return;
+    }
     const next = window.prompt('Rename to', baseName(active.path))?.trim();
     if (!next || next === baseName(active.path)) return;
     const target = joinPath(parentPath(active.path), next);
+    const wasDirty = active.dirty;
     try {
       await session.renamePath(active.path, target);
+      // The buffer keeps its edits and dirty flag: moving a file must not make
+      // unsaved text look saved, or the pending save lands on a path that no
+      // longer exists.
+      clearTimer(active.path);
       setFiles((prev) =>
-        prev.map((f) => (f.path === active.path ? { ...f, path: target, dirty: false } : f))
+        prev.map((f) => (f.path === active.path ? { ...f, path: target } : f))
       );
       setActivePath(target);
-      setStatus(`Renamed to ${target}`);
+      if (wasDirty && autoSave) armTimer(target);
+      setStatus(`Renamed to ${target}${wasDirty ? ' — unsaved edits still pending' : ''}`);
       await refresh(root);
     } catch (err) {
       setStatus(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -771,35 +834,37 @@ export function LightIde({
             installed on the server.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="ws-mod-actions">
           <Badge tone={badgeTone}>{badgeText}</Badge>
-          <label htmlFor="ide-auto-save">Auto-save</label>
-          <input
-            id="ide-auto-save"
-            type="checkbox"
-            checked={autoSave}
-            data-testid="ide-auto-save"
-            onChange={(e) => {
-              const next = (e.currentTarget as HTMLInputElement).checked;
-              setAutoSave(next);
-              saveValue('autoSave', next);
-              if (!next) {
-                for (const handle of timers.current.values()) window.clearTimeout(handle);
-                timers.current.clear();
-              }
-            }}
-          />
-          <Button variant="ghost" onClick={() => setFontSize((s) => Math.max(11, s - 1))} testId="ide-font-dec">
+          <label className="ws-mod-check" htmlFor="ide-auto-save">
+            Auto-save
+            <input
+              id="ide-auto-save"
+              type="checkbox"
+              checked={autoSave}
+              data-testid="ide-auto-save"
+              onChange={(e) => {
+                const next = (e.currentTarget as HTMLInputElement).checked;
+                setAutoSave(next);
+                saveValue('autoSave', next);
+                if (!next) {
+                  for (const handle of timers.current.values()) window.clearTimeout(handle);
+                  timers.current.clear();
+                }
+              }}
+            />
+          </label>
+          <Button variant="ghost" onClick={() => changeFontSize(fontSize - 1)} testId="ide-font-dec">
             A-
           </Button>
           <span data-testid="ide-font-size">{fontSize}px</span>
-          <Button variant="ghost" onClick={() => setFontSize((s) => Math.min(24, s + 1))} testId="ide-font-inc">
+          <Button variant="ghost" onClick={() => changeFontSize(fontSize + 1)} testId="ide-font-inc">
             A+
           </Button>
         </div>
       </header>
 
-      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+      <div className="ws-mod-filters">
         <select
           className="ui-input"
           aria-label="Saved projects"
@@ -846,15 +911,15 @@ export function LightIde({
       </div>
 
       {listError ? (
-        <p role="status" data-testid="ide-list-error">
+        <p className="ws-mod-error" role="status" data-testid="ide-list-error">
           {listError}
         </p>
       ) : null}
 
-      <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-start' }}>
-        <div style={{ flex: '0 1 300px', minWidth: '220px' }}>
+      <div className="ws-mod-split ide-workspace-split">
+        <aside className="ws-mod-list" aria-label="Project files" style={{ overflowX: 'hidden' }}>
           <h3>{root}</h3>
-          <div style={{ display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }}>
+          <div className="ws-mod-actions">
             <Button variant="ghost" onClick={() => void newFile()} testId="ide-new-file">
               New file
             </Button>
@@ -891,7 +956,6 @@ export function LightIde({
                 >
                   {entry.isDir ? '▸ ' : '  '}
                   {entry.name}
-                  {entry.isSymlink ? ' (link)' : ''}
                   {!entry.isDir && entry.size > 0 ? ` · ${formatBytes(entry.size)}` : ''}
                 </button>
               </li>
@@ -901,7 +965,7 @@ export function LightIde({
           </ul>
 
           <h4 style={{ marginBottom: 'var(--space-1)' }}>Quick open</h4>
-          <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
+          <div className="ws-mod-filters">
             <input
               className="ui-input"
               aria-label="Find a file by name"
@@ -939,9 +1003,9 @@ export function LightIde({
               </ul>
             </>
           ) : null}
-        </div>
+        </aside>
 
-        <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+        <section className="ws-mod-content" aria-label="Editor">
           <div role="tablist" aria-label="Open files" data-testid="ide-tabs">
             {files.map((file) => (
               <span key={file.path}>
@@ -969,8 +1033,8 @@ export function LightIde({
           </div>
 
           {active ? (
-            <div>
-              <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+            <div className="ws-mod-detail">
+              <div className="ws-mod-actions">
                 <span data-testid="ide-active-path">{active.path}</span>
                 <Badge tone={active.conflict ? 'danger' : active.dirty ? 'warning' : 'success'}>
                   {active.conflict ? 'Remote changed' : active.dirty ? 'Unsaved' : 'Saved'}
@@ -993,7 +1057,7 @@ export function LightIde({
                 </Button>
               </div>
 
-              <div style={{ display: 'flex', gap: 'var(--space-1)', alignItems: 'center', flexWrap: 'wrap' }}>
+              <div className="ws-mod-filters">
                 <input
                   className="ui-input"
                   aria-label="Find in file"
@@ -1040,7 +1104,7 @@ export function LightIde({
                 </Button>
               </div>
 
-              <div style={{ display: 'flex', gap: 'var(--space-1)', alignItems: 'center', flexWrap: 'wrap' }}>
+              <div className="ws-mod-filters">
                 <input
                   className="ui-input"
                   aria-label="Go to line"
@@ -1075,7 +1139,7 @@ export function LightIde({
                 ref={(el) => {
                   editorRef.current = el;
                 }}
-                className="ui-input"
+                className="ui-input ide-editor"
                 aria-label={`Editing ${active.path}`}
                 data-testid="ide-editor"
                 value={active.content}
@@ -1087,7 +1151,6 @@ export function LightIde({
                 spellcheck={false}
                 style={{
                   width: '100%',
-                  minHeight: '320px',
                   fontFamily: 'var(--font-font-mono)',
                   fontSize: `${fontSize}px`,
                   whiteSpace: 'pre',
@@ -1101,17 +1164,20 @@ export function LightIde({
               ) : null}
             </div>
           ) : (
-            <p>
-              Select a file to edit. Auto-save writes back over SFTP after a short pause; pending
-              edits are flushed when you leave this screen.
-            </p>
+            <div className="ws-mod-detail">
+              <p className="ws-mod-muted">
+                Select a file to edit. Auto-save writes back over SFTP after a short pause; pending
+                edits are flushed when you leave this screen.
+              </p>
+            </div>
           )}
-        </div>
+        </section>
       </div>
 
-      <div style={{ marginTop: 'var(--space-3)' }}>
+      <div className="ws-mod-split ide-secondary-split">
+        <section className="ws-mod-detail" aria-label="Find in project">
         <h3>Project search</h3>
-        <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
+        <div className="ws-mod-filters">
           <input
             className="ui-input"
             aria-label="Search project text"
@@ -1135,11 +1201,11 @@ export function LightIde({
             ))}
           </ul>
         ) : null}
-      </div>
+        </section>
 
-      <div style={{ marginTop: 'var(--space-3)' }}>
+        <section className="ws-mod-detail" aria-label="Run a command">
         <h3>Run a command</h3>
-        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+        <div className="ws-mod-filters">
           <input
             className="ui-input"
             aria-label="Command"
@@ -1167,7 +1233,7 @@ export function LightIde({
           />
         </label>
         {presets.length > 0 ? (
-          <div data-testid="ide-presets" style={{ display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }}>
+          <div data-testid="ide-presets" className="ws-mod-chips">
             {presets.map((preset) => (
               <span key={preset}>
                 <button type="button" onClick={() => void runCommand(preset)}>
@@ -1180,7 +1246,7 @@ export function LightIde({
             ))}
           </div>
         ) : null}
-        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+        <div className="ws-mod-actions">
           <Button variant="ghost" onClick={() => void copyOutput()} testId="ide-copy-output">
             Copy output
           </Button>
@@ -1211,9 +1277,10 @@ export function LightIde({
               .join('\n')}
           </pre>
         ) : null}
+        </section>
       </div>
 
-      <p role="status" data-testid="ide-status">
+      <p role="status" data-testid="ide-status" className="ws-mod-muted">
         {status}
       </p>
     </section>

@@ -8,6 +8,7 @@ import { TerminalPane } from '../terminal/TerminalPane';
 import { ChannelOutputBuffer } from '../terminal/channel-output-buffer';
 import { ConnectionRegistry, nextConnectionId } from '../session/connection-registry';
 import { LightIde } from './LightIde';
+import { ProfileCard } from './ProfileCard';
 import { BrowserSshRelaySessionClient, LiveGatewaySessionClient, deriveGatewayHealthUrl, loginToCloudflareRelay, requestConnectionTicket, resolveGatewayWsUrl, resolveTransportBackendMode, validateGatewayWsUrl } from '../transport';
 import { AsciicastRecorder, CommandPaletteRegistry, KeybindingRegistry, SPECIAL_KEYS_ROW, SnippetLibrary, interpolateSnippet, parseAsciicastV2, scrubAsciicastOutput } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
@@ -16,6 +17,7 @@ import { repairApplicationAssetCaches } from './ErrorBoundary';
 import { ActivityPanel, DeploymentsPanel, AutomationsPanel, ContainersPanel, KubernetesPanel, OverviewPanel, SoftwarePanel, runDiscovery } from './ServerModules';
 import { createRemoteSession } from '../session/adapters';
 import { CapabilityMatrixPanel } from './CapabilityMatrixPanel';
+import { MAX_RECONNECT_ATTEMPTS, connectionHealthRows, describeReconnectAttempt, formatRtt, formatUptime, reconnectDelayMs, reconnectOutcomeMessage } from './session-health';
 /**
  * The site key is public. It comes from the build environment, with a runtime
  * global as a fallback (the same pattern as the gateway URL override).
@@ -184,6 +186,29 @@ export function App() {
     const [showFullscreenToast, setShowFullscreenToast] = useState(false);
     // 3. Fresh Default State (Zero Pre-Populated Mock Data)
     const [connectionState, setConnectionState] = useState('disconnected');
+    const [rttMs, setRttMs] = useState(0);
+    const [connectedAt, setConnectedAt] = useState(null);
+    const [reconnectCount, setReconnectCount] = useState(0);
+    const [reconnectNotice, setReconnectNotice] = useState(null);
+    const [reconnectMessage, setReconnectMessage] = useState(null);
+    const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
+    const reconnectTimerRef = useRef(null);
+    const reconnectAttemptRef = useRef(0);
+    // Connections the user closed explicitly must never be resurrected by the
+    // auto-reconnect loop; this is per connection, not global.
+    const suppressedReconnectRef = useRef(new Set());
+    // Per-tab PTY channel ids captured before a drop. A gateway resume has to
+    // put every pane back on its own channel, not on the session's first one.
+    const channelSnapshotRef = useRef(new Map());
+    const [, setUptimeTick] = useState(0);
+    // Uptime only needs a heartbeat render while a session is actually up.
+    useEffect(() => {
+        if (connectionState !== 'connected' || connectedAt === null)
+            return;
+        const timer = setInterval(() => setUptimeTick((n) => n + 1), 1000);
+        return () => clearInterval(timer);
+    }, [connectionState, connectedAt]);
+    useEffect(() => () => clearReconnectTimer(), []);
     const [sessionTabLabel, setSessionTabLabel] = useState('Terminal 1');
     const [connectedUser, setConnectedUser] = useState('');
     const [connectedHost, setConnectedHost] = useState('');
@@ -222,6 +247,7 @@ export function App() {
     const [hostKeyModal, setHostKeyModal] = useState('none');
     const [hosts, setHosts] = useState(() => hostRegistry.list());
     const [cacheRepairStatus, setCacheRepairStatus] = useState('');
+    const [settingsSection, setSettingsSection] = useState('appearance');
     const [hostSearch, setHostSearch] = useState('');
     const [sshConfigInput, setSshConfigInput] = useState('');
     const [generatedPubKey, setGeneratedPubKey] = useState('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWebSSHStudioBrowserNonExtractableKey webssh@browser');
@@ -314,7 +340,7 @@ export function App() {
             // ignore
         }
     };
-    const [negotiatedCipher, setNegotiatedCipher] = useState('chacha20-poly1305@openssh.com');
+    const [negotiatedCipher, setNegotiatedCipher] = useState('');
     const [negotiatedServerVersion, setNegotiatedServerVersion] = useState('');
     const [pendingHostKeyPrompt, setPendingHostKeyPrompt] = useState(null);
     const [tunnelPreviewOutput, setTunnelPreviewOutput] = useState('Connect to an SSH host and click Probe HTTP Preview to inspect remote localhost HTTP responses.');
@@ -760,8 +786,16 @@ export function App() {
                 const remaining = tabs.filter((t) => t.id !== tabId && t.connectionId === connection.id);
                 // Only the last pane of a connection closes its transport; other
                 // servers in the workspace are left alone.
-                if (remaining.length === 0)
+                if (remaining.length === 0) {
+                    // Suppress retries BEFORE close(): the close event fires
+                    // synchronously and would otherwise schedule a reconnect for a
+                    // session the user just ended.
+                    suppressedReconnectRef.current.add(connection.id);
+                    clearReconnectTimer();
+                    setReconnectNotice(null);
+                    setReconnectMessage(null);
                     registry.close(connection.id);
+                }
                 if (splitPaneChannel !== null && connection.channels.has(splitPaneChannel)) {
                     registry.closeChannel(connection.id, splitPaneChannel);
                     setSplitPaneChannel(null);
@@ -769,6 +803,10 @@ export function App() {
             }
         }
         if (tabs.length <= 1) {
+            clearReconnectTimer();
+            setReconnectNotice(null);
+            setReconnectMessage(null);
+            setConnectedAt(null);
             setConnectionState('disconnected');
             setSessionTabLabel('Terminal 1');
             setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false, status: 'idle' }]);
@@ -788,6 +826,10 @@ export function App() {
         }
     };
     const handleDisconnect = () => {
+        clearReconnectTimer();
+        setReconnectNotice(null);
+        setReconnectMessage(null);
+        setConnectedAt(null);
         const activeTab = tabs.find((t) => t.id === activeTabId);
         const connection = connectionRegistryRef.current.get(activeTab?.connectionId);
         if (connection)
@@ -827,6 +869,121 @@ export function App() {
         catch {
             setUploadedKeyContent('');
         }
+    };
+    const clearReconnectTimer = () => {
+        if (reconnectTimerRef.current !== null) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
+    };
+    const transportOf = (connectionId) => connectionRegistryRef.current.get(connectionId)?.transport ?? transportMode;
+    const scheduleReconnect = (client, connectionId, immediate = false) => {
+        if (suppressedReconnectRef.current.has(connectionId))
+            return;
+        // The socket close and the failed attempt both report here; only one timer
+        // may be pending, or the attempt counter advances twice per retry.
+        if (reconnectTimerRef.current !== null)
+            return;
+        const attempt = reconnectAttemptRef.current + 1;
+        if (attempt > MAX_RECONNECT_ATTEMPTS) {
+            setConnectionState('disconnected');
+            setReconnectNotice(null);
+            setReconnectMessage(`Connection lost — ${MAX_RECONNECT_ATTEMPTS} automatic attempts failed. Press Reconnect to try again.`);
+            return;
+        }
+        reconnectAttemptRef.current = attempt;
+        setConnectionState('reconnecting');
+        setReconnectNotice(describeReconnectAttempt(attempt));
+        reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            void performReconnect(client, connectionId);
+        }, immediate ? 0 : reconnectDelayMs(attempt));
+    };
+    const performReconnect = async (client, connectionId) => {
+        const transport = transportOf(connectionId);
+        const gatewayResume = transport === 'go-gateway';
+        try {
+            const meta = await client.reconnect();
+            const channel = meta.ptyChannel || 1;
+            if (!gatewayResume) {
+                // The relay keeps nothing server-side: the split pane and the uptime
+                // belong to the socket that died.
+                setSplitPaneChannel(null);
+                setConnectedAt(Date.now());
+            }
+            setTabs((prev) => prev.map((t) => {
+                if (t.connectionId !== connectionId)
+                    return t;
+                // A gateway resume keeps every channel of the session, so existing
+                // pane bindings stay valid. The relay has no session to keep: only
+                // the active pane is restored, and the others say so.
+                if (gatewayResume) {
+                    if (t.channelId !== undefined) {
+                        return { ...t, connected: true, status: 'ready', errorMessage: undefined };
+                    }
+                    const saved = channelSnapshotRef.current.get(t.id);
+                    if (saved !== undefined) {
+                        return { ...t, connected: true, status: 'ready', channelId: saved, errorMessage: undefined };
+                    }
+                    return t.id === activeTabIdRef.current
+                        ? { ...t, connected: true, status: 'ready', channelId: channel, errorMessage: undefined }
+                        : {
+                            ...t,
+                            connected: false,
+                            status: 'idle',
+                            errorMessage: 'Session resumed — reopen this pane to attach a new shell.'
+                        };
+                }
+                return t.id === activeTabIdRef.current
+                    ? { ...t, connected: true, status: 'ready', channelId: channel, errorMessage: undefined }
+                    : {
+                        ...t,
+                        connected: false,
+                        status: 'idle',
+                        channelId: undefined,
+                        errorMessage: 'Relay reconnected — open a new pane for this session.'
+                    };
+            }));
+            setConnectionState('connected');
+            setReconnectNotice(null);
+            reconnectAttemptRef.current = 0;
+            if (meta.cipher)
+                setNegotiatedCipher(meta.cipher);
+            if (meta.serverVersion)
+                setNegotiatedServerVersion(meta.serverVersion);
+            setReconnectCount((prev) => {
+                const next = prev + 1;
+                const message = reconnectOutcomeMessage(transport, next);
+                setReconnectMessage(message);
+                writeToXterm(`${String.fromCharCode(13, 10)}[webssh] ${message}${String.fromCharCode(13, 10)}`);
+                return next;
+            });
+        }
+        catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (/RESUME_FAILED|no detached session/i.test(message)) {
+                // Retrying cannot help: this gateway closes the SSH session with the
+                // socket. Say that plainly instead of looping.
+                reconnectAttemptRef.current = 0;
+                clearReconnectTimer();
+                setConnectionState('disconnected');
+                setReconnectNotice(null);
+                setReconnectMessage('This gateway does not keep sessions after a drop — start a new connection to continue.');
+                return;
+            }
+            setReconnectMessage(`Reconnect attempt failed: ${message}`);
+            scheduleReconnect(client, connectionId);
+        }
+    };
+    const handleReconnectNow = () => {
+        const client = liveSessionRef.current;
+        const activeConnectionId = tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId;
+        if (!client || !activeConnectionId)
+            return;
+        suppressedReconnectRef.current.delete(activeConnectionId);
+        reconnectAttemptRef.current = 0;
+        clearReconnectTimer();
+        scheduleReconnect(client, activeConnectionId, true);
     };
     const handleConnectSubmit = (e) => {
         if (e)
@@ -993,13 +1150,39 @@ export function App() {
                             ? { ...t, connected: false, status: 'idle' }
                             : t));
                     },
-                    onStateChange: (st) => {
-                        if (st === 'disconnected') {
-                            setTabs((prev) => prev.map((t) => t.connectionId === connectionId
-                                ? { ...t, connected: false, status: 'idle', channelId: undefined }
-                                : t));
-                            if (tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId === connectionId) {
-                                setConnectionState('disconnected');
+                    onStateChange: (st, rtt) => {
+                        setRttMs(rtt);
+                        if (st === 'connected') {
+                            return;
+                        }
+                        const isActiveTab = tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId === connectionId;
+                        // A gateway resume keeps the session's channels, so a pending
+                        // reconnect must not drop the per-pane bindings. Only a real
+                        // disconnect invalidates them — and it records them first.
+                        if (st !== 'reconnecting') {
+                            for (const t of tabsRef.current) {
+                                if (t.connectionId === connectionId && t.channelId !== undefined) {
+                                    channelSnapshotRef.current.set(t.id, t.channelId);
+                                }
+                            }
+                        }
+                        setTabs((prev) => prev.map((t) => t.connectionId === connectionId
+                            ? st === 'reconnecting'
+                                ? { ...t, connected: false, status: 'idle' }
+                                : { ...t, connected: false, status: 'idle', channelId: undefined }
+                            : t));
+                        if (!isActiveTab)
+                            return;
+                        if (st === 'reconnecting') {
+                            setConnectionState('reconnecting');
+                            return;
+                        }
+                        setConnectionState('disconnected');
+                        // Only an unexpected drop earns a retry; an explicit disconnect does not.
+                        if (!suppressedReconnectRef.current.has(connectionId)) {
+                            const activeClient = liveSessionRef.current;
+                            if (activeClient) {
+                                scheduleReconnect(activeClient, connectionId);
                             }
                         }
                     }
@@ -1025,8 +1208,8 @@ export function App() {
                     setConnectedUser(userVal);
                     setConnectedHost(hostVal);
                     setSessionTabLabel(tabTitle);
-                    setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
-                    setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
+                    setNegotiatedCipher(meta.cipher || '');
+                    setNegotiatedServerVersion(meta.serverVersion || '');
                     const initialChannel = meta.ptyChannel || 1;
                     connectionRegistryRef.current.add({
                         id: connectionId,
@@ -1069,6 +1252,13 @@ export function App() {
                             : t));
                     }
                     setConnectionState('connected');
+                    setConnectedAt(Date.now());
+                    setRttMs(0);
+                    setReconnectCount(0);
+                    setReconnectNotice(null);
+                    setReconnectMessage(null);
+                    reconnectAttemptRef.current = 0;
+                    suppressedReconnectRef.current.delete(connectionId);
                     setConnectModalOpen(false);
                     setActiveScreen('workspace');
                     const workspaceSession = createRemoteSession(client, {
@@ -1589,7 +1779,7 @@ export function App() {
         });
         reg.register({
             id: 'nav.files',
-            title: 'Open Dual-Pane SFTP File Browser',
+            title: 'Open SFTP File Browser',
             category: 'Files',
             run: () => {
                 setActiveScreen('files');
@@ -1645,54 +1835,54 @@ export function App() {
         }, onClick: () => {
             if (openMenu !== null)
                 setOpenMenu(null);
-        }, children: [isFullscreen ? (_jsx("div", { "data-testid": "fullscreen-top-hover-zone", className: "webssh-fullscreen-hover-zone", onMouseEnter: () => setShowOverlayBar(true) })) : null, isFullscreen && showOverlayBar ? (_jsxs("div", { "data-testid": "fullscreen-overlay-bar", className: "webssh-fullscreen-overlay-bar", onMouseLeave: () => setShowOverlayBar(false), children: [_jsx(Badge, { tone: connectionState === 'connected' ? 'success' : 'neutral', children: sessionTabLabel }), _jsx(Button, { variant: "ghost", onClick: () => setActiveScreen('settings'), testId: "overlay-settings-btn", children: "Settings" }), _jsx(Button, { variant: "primary", onClick: () => void exitImmersiveFullscreen(), testId: "overlay-exit-fullscreen-btn", children: "Exit Full Screen" })] })) : null, showFullscreenToast ? (_jsx("div", { role: "status", "data-testid": "fullscreen-toast", className: "webssh-fullscreen-toast", children: "Press F11 or Esc to exit" })) : null, !isFullscreen && !zenMode ? (_jsxs("div", { className: "webssh-titlebar", "data-testid": "macos-titlebar", children: [_jsxs("div", { className: "webssh-titlebar-left", children: [_jsxs("div", { className: "webssh-traffic-lights", role: "group", "aria-label": "Window controls", children: [_jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--close", "aria-label": "Close session or reset", title: "Close session / Reset", "data-testid": "traffic-light-close", onClick: handleDisconnect }), _jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--minimize", "aria-label": "Minimize or toggle Zen mode", title: "Minimize / Toggle Zen Mode", "data-testid": "traffic-light-minimize", onClick: () => setZenMode((z) => !z) }), _jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--fullscreen", "aria-label": "Toggle full screen", title: "Full Screen", "data-testid": "traffic-light-fullscreen", onClick: toggleFullscreen })] }), _jsxs("nav", { className: "webssh-menubar", "aria-label": "Application menu bar", "data-testid": "macos-menubar", children: [_jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'terminal' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'terminal' ? null : 'terminal')), "data-testid": "menu-terminal-btn", children: "Terminal" }), openMenu === 'terminal' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-terminal-dropdown", children: [_jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            handleAddTab();
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "New Tab" }), _jsx("span", { children: "Cmd+T" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            setSplitPanes((n) => (n === 1 ? 2 : 1));
-                                                            setActiveScreen('workspace');
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "Split Terminal" }), _jsx("span", { children: "Cmd+D" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            handleDisconnect();
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "Disconnect" }), _jsx("span", { children: "Cmd+W" })] })] })) : null] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'edit' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'edit' ? null : 'edit')), "data-testid": "menu-edit-btn", children: "Edit" }), openMenu === 'edit' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-edit-dropdown", children: [_jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            copyToClipboard(terminalLines.join(String.fromCharCode(10)));
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "Copy" }), _jsx("span", { children: "Cmd+C" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            updateCurrentInput((prev) => `${prev}ls -la`);
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "Paste" }), _jsx("span", { children: "Cmd+V" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            setTerminalLines([]);
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "Clear Buffer" }), _jsx("span", { children: "Cmd+K" })] })] })) : null] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'view' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'view' ? null : 'view')), "data-testid": "menu-view-btn", children: "View" }), openMenu === 'view' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-view-dropdown", children: [_jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            setZenMode((z) => !z);
-                                                            setOpenMenu(null);
-                                                        }, children: _jsx("span", { children: "Toggle Zen Mode" }) }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            toggleFullscreen();
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "Fullscreen" }), _jsx("span", { children: "F11" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            setFontSize((s) => Math.min(32, s + 1));
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "Increase Font Size" }), _jsx("span", { children: "Cmd++" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            setFontSize((s) => Math.max(11, s - 1));
-                                                            setOpenMenu(null);
-                                                        }, children: [_jsx("span", { children: "Decrease Font Size" }), _jsx("span", { children: "Cmd+-" })] })] })) : null] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'security' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'security' ? null : 'security')), "data-testid": "menu-security-btn", children: "Security" }), openMenu === 'security' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-security-dropdown", children: [_jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            setActiveScreen('vault');
-                                                            setOpenMenu(null);
-                                                        }, children: _jsx("span", { children: "Argon2id Key Vault" }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            setActiveScreen('hosts');
-                                                            setOpenMenu(null);
-                                                        }, children: _jsx("span", { children: "Known Hosts" }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                            copyToClipboard(authorizedKeysSnippet);
-                                                            setTerminalLines((prev) => [
-                                                                ...prev,
-                                                                `Deployed Public Key Snippet: ${authorizedKeysSnippet}`
-                                                            ]);
-                                                            setOpenMenu(null);
-                                                        }, children: _jsx("span", { children: "Deploy Public Key" }) })] })) : null] }), _jsx("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: _jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'features' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => {
-                                                setActiveScreen('features');
-                                                setOpenMenu(null);
-                                            }, "data-testid": "menu-features-btn", children: "Features" }) })] })] }), _jsxs("div", { className: "webssh-window-title", "data-testid": "macos-window-title", children: [_jsx(Icon, { name: "folder" }), _jsxs("span", { children: ["terminal \u2014 ", activeSessionTitle, " \u2014 ", cols, "x", rows] })] }), _jsx("div", { style: { display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }, children: _jsx(Badge, { tone: connectionState === 'connected' ? 'success' : 'neutral', children: connectionState === 'connected' ? 'SSH Active' : 'Local Shell' }) })] })) : null, !isFullscreen && !zenMode ? (_jsxs("header", { className: "webssh-topbar webssh-studio-toolbar", role: "banner", children: [_jsxs("div", { className: "webssh-studio-tabs", children: [_jsx("div", { className: "webssh-studio-tabs", role: "tablist", "aria-label": "Active SSH sessions", children: tabs.map((tab, idx) => {
+        }, children: [isFullscreen ? (_jsx("div", { "data-testid": "fullscreen-top-hover-zone", className: "webssh-fullscreen-hover-zone", onMouseEnter: () => setShowOverlayBar(true) })) : null, isFullscreen && showOverlayBar ? (_jsxs("div", { "data-testid": "fullscreen-overlay-bar", className: "webssh-fullscreen-overlay-bar", onMouseLeave: () => setShowOverlayBar(false), children: [_jsx(Badge, { tone: connectionState === 'connected' ? 'success' : 'neutral', children: sessionTabLabel }), _jsx(Button, { variant: "ghost", onClick: () => setActiveScreen('settings'), testId: "overlay-settings-btn", children: "Settings" }), _jsx(Button, { variant: "primary", onClick: () => void exitImmersiveFullscreen(), testId: "overlay-exit-fullscreen-btn", children: "Exit Full Screen" })] })) : null, showFullscreenToast ? (_jsx("div", { role: "status", "data-testid": "fullscreen-toast", className: "webssh-fullscreen-toast", children: "Press F11 or Esc to exit" })) : null, !isFullscreen && !zenMode ? (_jsx("div", { className: "webssh-titlebar", "data-testid": "macos-titlebar", children: _jsxs("div", { className: "webssh-titlebar-left", children: [_jsxs("div", { className: "webssh-traffic-lights", role: "group", "aria-label": "Window controls", children: [_jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--close", "aria-label": "Close session or reset", title: "Close session / Reset", "data-testid": "traffic-light-close", onClick: handleDisconnect }), _jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--minimize", "aria-label": "Minimize or toggle Zen mode", title: "Minimize / Toggle Zen Mode", "data-testid": "traffic-light-minimize", onClick: () => setZenMode((z) => !z) }), _jsx("button", { type: "button", className: "webssh-traffic-light webssh-traffic-light--fullscreen", "aria-label": "Toggle full screen", title: "Full Screen", "data-testid": "traffic-light-fullscreen", onClick: toggleFullscreen })] }), _jsxs("nav", { className: "webssh-menubar", "aria-label": "Application menu bar", "data-testid": "macos-menubar", children: [_jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'terminal' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'terminal' ? null : 'terminal')), "data-testid": "menu-terminal-btn", children: "Terminal" }), openMenu === 'terminal' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-terminal-dropdown", children: [_jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        handleAddTab();
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "New Tab" }), _jsx("span", { children: "Cmd+T" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        setSplitPanes((n) => (n === 1 ? 2 : 1));
+                                                        setActiveScreen('workspace');
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "Split Terminal" }), _jsx("span", { children: "Cmd+D" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        handleDisconnect();
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "Disconnect" }), _jsx("span", { children: "Cmd+W" })] })] })) : null] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'edit' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'edit' ? null : 'edit')), "data-testid": "menu-edit-btn", children: "Edit" }), openMenu === 'edit' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-edit-dropdown", children: [_jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        copyToClipboard(terminalLines.join(String.fromCharCode(10)));
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "Copy" }), _jsx("span", { children: "Cmd+C" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        updateCurrentInput((prev) => `${prev}ls -la`);
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "Paste" }), _jsx("span", { children: "Cmd+V" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        setTerminalLines([]);
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "Clear Buffer" }), _jsx("span", { children: "Cmd+K" })] })] })) : null] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'view' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'view' ? null : 'view')), "data-testid": "menu-view-btn", children: "View" }), openMenu === 'view' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-view-dropdown", children: [_jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        setZenMode((z) => !z);
+                                                        setOpenMenu(null);
+                                                    }, children: _jsx("span", { children: "Toggle Zen Mode" }) }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        toggleFullscreen();
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "Fullscreen" }), _jsx("span", { children: "F11" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        setFontSize((s) => Math.min(32, s + 1));
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "Increase Font Size" }), _jsx("span", { children: "Cmd++" })] }), _jsxs("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        setFontSize((s) => Math.max(11, s - 1));
+                                                        setOpenMenu(null);
+                                                    }, children: [_jsx("span", { children: "Decrease Font Size" }), _jsx("span", { children: "Cmd+-" })] })] })) : null] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'security' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => setOpenMenu((m) => (m === 'security' ? null : 'security')), "data-testid": "menu-security-btn", children: "Security" }), openMenu === 'security' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "menu-security-dropdown", children: [_jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        setActiveScreen('vault');
+                                                        setOpenMenu(null);
+                                                    }, children: _jsx("span", { children: "Argon2id Key Vault" }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        setActiveScreen('hosts');
+                                                        setOpenMenu(null);
+                                                    }, children: _jsx("span", { children: "Known Hosts" }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                                        copyToClipboard(authorizedKeysSnippet);
+                                                        setTerminalLines((prev) => [
+                                                            ...prev,
+                                                            `Deployed Public Key Snippet: ${authorizedKeysSnippet}`
+                                                        ]);
+                                                        setOpenMenu(null);
+                                                    }, children: _jsx("span", { children: "Deploy Public Key" }) })] })) : null] }), _jsx("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: _jsx("button", { type: "button", className: `webssh-menu-trigger ${openMenu === 'features' ? 'webssh-menu-trigger--open' : ''}`.trim(), onClick: () => {
+                                            setActiveScreen('features');
+                                            setOpenMenu(null);
+                                        }, "data-testid": "menu-features-btn", children: "Features" }) })] })] }) })) : null, !isFullscreen && !zenMode ? (_jsxs("header", { className: "webssh-topbar webssh-studio-toolbar", role: "banner", children: [_jsxs("div", { className: "webssh-studio-tabs", children: [_jsx("div", { className: "webssh-studio-tabs", role: "tablist", "aria-label": "Active SSH sessions", children: tabs.map((tab, idx) => {
                                     const isActive = tab.id === activeTabId;
                                     return (_jsxs("button", { type: "button", role: "tab", "aria-selected": isActive && activeScreen === 'workspace', className: `webssh-studio-tab ${isActive && activeScreen === 'workspace' ? 'webssh-studio-tab--active' : ''}`.trim(), onClick: () => {
                                             setActiveTabId(tab.id);
@@ -1707,37 +1897,37 @@ export function App() {
                                                         : tab.status === 'idle'
                                                             ? 'webssh-status-dot--disconnected'
                                                             : statusDotClass}`.trim(), "aria-label": `Status: ${tab.status ?? (tab.connected ? 'ready' : 'idle')}` }), _jsx("span", { children: idx === 0 ? sessionTabLabel : tab.title }), tab.status === 'opening' ? _jsx("span", { "aria-live": "polite", children: "opening\u2026" }) : null, tab.status === 'error' ? (_jsx("span", { role: "status", title: tab.errorMessage, children: "failed" })) : null, _jsx("span", { "aria-hidden": "true", className: "webssh-tab-close", "data-testid": `close-tab-${tab.id}`, onClick: (e) => handleCloseTab(tab.id, e), children: "\u00D7" })] }, tab.id));
-                                }) }), _jsx("span", { className: "webssh-studio-tab-separator", "data-testid": "tab-separator", "aria-hidden": "true" }), _jsx("button", { type: "button", className: "webssh-studio-add-btn", "aria-label": "New terminal tab", title: "Add Terminal Session", "data-testid": "add-tab-btn", onClick: handleAddTab, children: "+" })] }), _jsxs("div", { "data-testid": "topbar-quick-controls", className: "webssh-studio-controls", children: [_jsx(Button, { variant: showCommandInspector ? 'primary' : 'ghost', onClick: () => setShowCommandInspector((v) => !v), testId: "toggle-command-inspector", children: showCommandInspector ? 'Hide Inspector' : 'Inspector' }), _jsxs("select", { className: "ui-select", "aria-label": "Terminal font family", "data-testid": "font-family-select", value: fontFamily, onChange: (e) => setFontFamily(e.currentTarget.value), style: { width: 'auto' }, children: [_jsx("option", { value: "'DejaVu Sans Mono', Menlo, monospace", children: "DejaVu Sans Mono" }), _jsx("option", { value: "SF Mono", children: "SF Mono" }), _jsx("option", { value: "'JetBrains Mono', 'Fira Code', monospace", children: "JetBrains Mono" }), _jsx("option", { value: "Fira Code", children: "Fira Code" }), _jsx("option", { value: "Menlo", children: "Menlo" }), _jsx("option", { value: "Monaco", children: "Monaco" }), _jsx("option", { value: "Courier New", children: "Courier New" })] }), _jsxs("div", { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }, children: [_jsx(Button, { variant: "ghost", ariaLabel: "Decrease font size", testId: "font-size-dec-btn", onClick: () => setFontSize((s) => Math.max(11, s - 1)), children: "A-" }), _jsxs("span", { className: "font-size-badge", "data-testid": "font-size-badge", children: [fontSize, "px"] }), _jsx(Button, { variant: "ghost", ariaLabel: "Increase font size", testId: "font-size-inc-btn", onClick: () => setFontSize((s) => Math.min(36, s + 1)), children: "A+" })] }), _jsx("span", { className: `webssh-status-dot ${statusDotClass}`.trim(), title: `Connection state: ${connectionState}`, "data-testid": "connection-status-dot" }), connectionState === 'disconnected' ? (_jsx(Button, { variant: "primary", onClick: () => setConnectModalOpen(true), testId: "new-connection-btn", children: "New Connection" })) : null, _jsxs("button", { type: "button", className: "webssh-studio-stop-btn", onClick: handleDisconnect, "data-testid": connectionState === 'connected' ? 'disconnect-btn' : 'stop-session-btn', title: "Stop Session / Disconnect", children: [_jsx("span", { className: "webssh-studio-stop-square", "data-testid": "stop-red-square", "aria-hidden": "true" }), _jsx("span", { children: connectionState === 'connected' ? 'Stop Session (Disconnect)' : 'Stop Session' })] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', onClick: () => setIdeMode((m) => !m), testId: "toggle-ide-mode-btn", children: ideMode ? 'IDE Mode: ON' : 'Open IDE' }), ideMode ? (_jsx(Button, { variant: redactionMode ? 'primary' : 'ghost', onClick: () => setRedactionMode((r) => !r), testId: "toggle-redaction-btn", children: redactionMode ? 'Redaction: ON' : 'Redact Secrets' })) : null, _jsxs(Button, { variant: "ghost", onClick: () => setPaletteOpen(true), testId: "open-palette-btn", children: [_jsx(Icon, { name: "search" }), " Command Palette (Cmd+K)"] }), _jsx(Button, { variant: "ghost", onClick: () => setZenMode((z) => !z), testId: "toggle-zen-btn", children: "Zen" }), _jsxs("button", { type: "button", className: "webssh-studio-icon-btn", onClick: toggleFullscreen, "aria-label": "Expand terminal fullscreen", title: "Full Screen (F11)", "data-testid": "toggle-fullscreen-btn", children: [_jsx(Icon, { name: "maximize" }), _jsx("span", { children: "Full Screen" })] }), _jsxs("button", { type: "button", className: "webssh-studio-icon-btn", "aria-label": "Pop out terminal view", title: "Open Terminal Workspace View", "data-testid": "popout-terminal-btn", onClick: () => {
+                                }) }), _jsx("span", { className: "webssh-studio-tab-separator", "data-testid": "tab-separator", "aria-hidden": "true" }), _jsx("button", { type: "button", className: "webssh-studio-add-btn", "aria-label": "New terminal tab", title: "Add Terminal Session", "data-testid": "add-tab-btn", onClick: handleAddTab, children: "+" })] }), _jsxs("div", { "data-testid": "topbar-quick-controls", className: "webssh-studio-controls", children: [_jsx(Button, { variant: showCommandInspector ? 'primary' : 'ghost', ariaLabel: showCommandInspector ? 'Hide command inspector' : 'Show command inspector', onClick: () => setShowCommandInspector((v) => !v), testId: "toggle-command-inspector", children: _jsx(Icon, { name: "terminal" }) }), _jsxs("select", { className: "ui-select", "aria-label": "Terminal font family", "data-testid": "font-family-select", value: fontFamily, onChange: (e) => setFontFamily(e.currentTarget.value), style: { width: 'auto' }, children: [_jsx("option", { value: "'DejaVu Sans Mono', Menlo, monospace", children: "DejaVu Sans Mono" }), _jsx("option", { value: "SF Mono", children: "SF Mono" }), _jsx("option", { value: "'JetBrains Mono', 'Fira Code', monospace", children: "JetBrains Mono" }), _jsx("option", { value: "Fira Code", children: "Fira Code" }), _jsx("option", { value: "Menlo", children: "Menlo" }), _jsx("option", { value: "Monaco", children: "Monaco" }), _jsx("option", { value: "Courier New", children: "Courier New" })] }), _jsxs("div", { style: { display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }, children: [_jsx(Button, { variant: "ghost", ariaLabel: "Decrease font size", testId: "font-size-dec-btn", onClick: () => setFontSize((s) => Math.max(11, s - 1)), children: "A-" }), _jsxs("span", { className: "font-size-badge", "data-testid": "font-size-badge", children: [fontSize, "px"] }), _jsx(Button, { variant: "ghost", ariaLabel: "Increase font size", testId: "font-size-inc-btn", onClick: () => setFontSize((s) => Math.min(36, s + 1)), children: "A+" })] }), _jsx("span", { className: `webssh-status-dot ${statusDotClass}`.trim(), title: `Connection state: ${connectionState}`, "data-testid": "connection-status-dot" }), connectionState === 'disconnected' ? (_jsx(Button, { variant: "primary", onClick: () => setConnectModalOpen(true), testId: "new-connection-btn", children: "New Connection" })) : null, _jsxs("button", { type: "button", className: "webssh-studio-stop-btn", onClick: handleDisconnect, disabled: connectionState !== 'connected', "data-testid": connectionState === 'connected' ? 'disconnect-btn' : 'stop-session-btn', title: "Stop Session / Disconnect", children: [_jsx("span", { className: "webssh-studio-stop-square", "data-testid": "stop-red-square", "aria-hidden": "true" }), _jsx("span", { children: connectionState === 'connected' ? 'Stop' : 'Disconnect' })] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', onClick: () => setIdeMode((m) => !m), testId: "toggle-ide-mode-btn", children: ideMode ? 'IDE Mode: ON' : 'Open IDE' }), ideMode ? (_jsx(Button, { variant: redactionMode ? 'primary' : 'ghost', onClick: () => setRedactionMode((r) => !r), testId: "toggle-redaction-btn", children: redactionMode ? 'Redaction: ON' : 'Redact Secrets' })) : null, _jsx(Button, { variant: "ghost", ariaLabel: "Command palette (Cmd+K)", onClick: () => setPaletteOpen(true), testId: "open-palette-btn", children: _jsx(Icon, { name: "search" }) }), _jsx(Button, { variant: "ghost", ariaLabel: "Toggle Zen mode", onClick: () => setZenMode((z) => !z), testId: "toggle-zen-btn", children: _jsx(Icon, { name: "minimize" }) }), _jsxs("button", { type: "button", className: "webssh-studio-icon-btn", onClick: toggleFullscreen, "aria-label": "Expand terminal fullscreen", title: "Full Screen (F11)", "data-testid": "toggle-fullscreen-btn", children: [_jsx(Icon, { name: "maximize" }), _jsx("span", { className: "webssh-label-collapsible", children: "Full Screen" })] }), _jsxs("button", { type: "button", className: "webssh-studio-icon-btn", "aria-label": "Pop out terminal view", title: "Open Terminal Workspace View", "data-testid": "popout-terminal-btn", onClick: () => {
                                     setActiveScreen('workspace');
                                     terminalViewRef.current?.focus();
-                                }, children: [_jsx("span", { "aria-hidden": "true", children: "\u2197" }), _jsx("span", { children: "Pop-out" })] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: "webssh-studio-icon-btn", "aria-label": "More terminal options", title: "More Custom Options", "data-testid": "more-options-menu-btn", onClick: () => setOpenMenu((m) => (m === 'more' ? null : 'more')), children: _jsx("span", { "aria-hidden": "true", children: "\u2022\u2022\u2022" }) }), openMenu === 'more' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "more-options-dropdown", style: { right: 0, left: 'auto' }, children: [_jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                    setIdeMode((m) => !m);
-                                                    setOpenMenu(null);
-                                                }, children: _jsx("span", { children: ideMode ? 'Disable IDE Mode' : 'Enable IDE Mode' }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                    setSplitPanes((n) => (n === 1 ? 2 : 1));
-                                                    setActiveScreen('workspace');
-                                                    setOpenMenu(null);
-                                                }, children: _jsx("span", { children: "Toggle Split Pane" }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                    setRedactionMode((r) => !r);
-                                                    setOpenMenu(null);
-                                                }, children: _jsx("span", { children: redactionMode ? 'Disable Secret Redaction' : 'Enable Secret Redaction' }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                    setActiveScreen('settings');
-                                                    setOpenMenu(null);
-                                                }, children: _jsx("span", { children: "Themes & Typography Settings" }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
-                                                    setActiveScreen('welcome');
-                                                    setOpenMenu(null);
-                                                }, children: _jsx("span", { children: "Quick Connect Welcome Screen" }) })] })) : null] })] })] })) : null, zenMode ? (_jsxs("div", { className: "webssh-banner", role: "status", "data-testid": "zen-mode-banner", style: { justifyContent: 'space-between' }, children: [_jsx("span", { children: "Zen Mode Active \u2014 Press Esc to return" }), _jsx(Button, { variant: "default", testId: "exit-zen-btn", onClick: () => {
+                                }, children: [_jsx("span", { "aria-hidden": "true", children: "\u2197" }), _jsx("span", { className: "webssh-label-collapsible", children: "Pop-out" })] })] }), _jsxs("div", { className: "webssh-menu-group", onClick: (e) => e.stopPropagation(), children: [_jsx("button", { type: "button", className: "webssh-studio-icon-btn", "aria-label": "More terminal options", title: "More Custom Options", "data-testid": "more-options-menu-btn", onClick: () => setOpenMenu((m) => (m === 'more' ? null : 'more')), children: _jsx("span", { "aria-hidden": "true", children: "\u2022\u2022\u2022" }) }), openMenu === 'more' ? (_jsxs("div", { className: "webssh-menu-dropdown", role: "menu", "data-testid": "more-options-dropdown", style: { right: 0, left: 'auto' }, children: [_jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                            setIdeMode((m) => !m);
+                                            setOpenMenu(null);
+                                        }, children: _jsx("span", { children: ideMode ? 'Disable IDE Mode' : 'Enable IDE Mode' }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                            setSplitPanes((n) => (n === 1 ? 2 : 1));
+                                            setActiveScreen('workspace');
+                                            setOpenMenu(null);
+                                        }, children: _jsx("span", { children: "Toggle Split Pane" }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                            setRedactionMode((r) => !r);
+                                            setOpenMenu(null);
+                                        }, children: _jsx("span", { children: redactionMode ? 'Disable Secret Redaction' : 'Enable Secret Redaction' }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                            setActiveScreen('settings');
+                                            setOpenMenu(null);
+                                        }, children: _jsx("span", { children: "Themes & Typography Settings" }) }), _jsx("button", { type: "button", className: "webssh-menu-item", role: "menuitem", onClick: () => {
+                                            setActiveScreen('welcome');
+                                            setOpenMenu(null);
+                                        }, children: _jsx("span", { children: "Quick Connect Welcome Screen" }) })] })) : null] })] })) : null, zenMode ? (_jsxs("div", { className: "webssh-banner", role: "status", "data-testid": "zen-mode-banner", style: { justifyContent: 'space-between' }, children: [_jsx("span", { children: "Zen Mode Active \u2014 Press Esc to return" }), _jsx(Button, { variant: "default", testId: "exit-zen-btn", onClick: () => {
                             setZenMode(false);
                             setActiveScreen('welcome');
-                        }, children: "Exit Zen (Esc)" })] })) : null, _jsxs("div", { className: `webssh-workspace-body ${layoutPreset === 'sidebar-right' ? 'webssh-workspace-body--right' : ''}`.trim(), children: [!isFullscreen && !zenMode ? (_jsxs(_Fragment, { children: [_jsxs("nav", { className: "webssh-rail", "aria-label": "Workspace navigation", style: { width: `${railWidth}px` }, children: [_jsx(Button, { variant: activeScreen === 'welcome' ? 'primary' : 'ghost', onClick: () => setActiveScreen('welcome'), testId: "nav-welcome", children: "Welcome" }), _jsx("div", { className: "webssh-rail-presets", role: "group", "aria-label": "Workspace preset", children: ['terminal', 'develop', 'operate'].map((preset) => (_jsx(Button, { variant: workspacePreset === preset ? 'primary' : 'ghost', onClick: () => applyPreset(preset), testId: `preset-${preset}`, children: preset[0].toUpperCase() + preset.slice(1) }, preset))) }), _jsxs(Button, { variant: activeScreen === 'workspace' ? 'primary' : 'ghost', onClick: () => setActiveScreen('workspace'), testId: "nav-workspace", children: [_jsx(Icon, { name: "terminal" }), " Terminal"] }), _jsxs(Button, { variant: activeScreen === 'overview' ? 'primary' : 'ghost', onClick: () => setActiveScreen('overview'), testId: "nav-overview", children: [_jsx(Icon, { name: "server" }), " Servers"] }), _jsxs(Button, { variant: activeScreen === 'files' ? 'primary' : 'ghost', onClick: () => setActiveScreen('files'), testId: "nav-files", children: [_jsx(Icon, { name: "folder" }), " Files"] }), _jsx(Button, { variant: activeScreen === 'software' ? 'primary' : 'ghost', onClick: () => setActiveScreen('software'), testId: "nav-software", children: "Software" }), _jsx(Button, { variant: activeScreen === 'containers' ? 'primary' : 'ghost', onClick: () => setActiveScreen('containers'), testId: "nav-containers", children: "Containers" }), _jsx(Button, { variant: activeScreen === 'kubernetes' ? 'primary' : 'ghost', onClick: () => setActiveScreen('kubernetes'), testId: "nav-kubernetes", children: "Kubernetes" }), _jsx(Button, { variant: activeScreen === 'automations' ? 'primary' : 'ghost', onClick: () => setActiveScreen('automations'), testId: "nav-automations", children: "Automations" }), _jsx(Button, { variant: activeScreen === 'activity' ? 'primary' : 'ghost', onClick: () => setActiveScreen('activity'), testId: "nav-activity", children: "Activity" }), _jsx(Button, { variant: activeScreen === 'deployments' ? 'primary' : 'ghost', onClick: () => setActiveScreen('deployments'), testId: "nav-deployments", children: "Deployments" }), _jsxs(Button, { variant: activeScreen === 'settings' ? 'primary' : 'ghost', onClick: () => setActiveScreen('settings'), testId: "nav-settings", children: [_jsx(Icon, { name: "settings" }), " Settings"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', onClick: () => {
-                                            setIdeMode((prev) => {
-                                                const next = !prev;
-                                                if (next && activeScreen === 'welcome') {
-                                                    setActiveScreen('features');
-                                                }
-                                                return next;
-                                            });
-                                        }, testId: "enable-ide-mode-btn", children: ideMode ? 'IDE Mode: ON' : 'Open IDE' }), ideMode ? (_jsxs("div", { "data-testid": "sidebar-nav", style: { display: 'contents' }, children: [_jsx(Button, { variant: activeScreen === 'features' ? 'primary' : 'ghost', onClick: () => setActiveScreen('features'), testId: "nav-features", children: "Features" }), _jsx(Button, { variant: activeScreen === 'tunnels' ? 'primary' : 'ghost', onClick: () => setActiveScreen('tunnels'), testId: "nav-tunnels", children: "Port Tunnels" }), _jsxs(Button, { variant: activeScreen === 'vault' ? 'primary' : 'ghost', onClick: () => setActiveScreen('vault'), testId: "nav-vault", children: [_jsx(Icon, { name: "key" }), " Key Vault"] }), _jsxs(Button, { variant: activeScreen === 'hosts' ? 'primary' : 'ghost', onClick: () => setActiveScreen('hosts'), testId: "nav-hosts", children: [_jsx(Icon, { name: "server" }), " Hosts"] }), _jsx(Button, { variant: activeScreen === 'editor' ? 'primary' : 'ghost', onClick: () => setActiveScreen('editor'), testId: "nav-editor", children: "Editor" }), _jsx(Button, { variant: activeScreen === 'ide' ? 'primary' : 'ghost', onClick: () => setActiveScreen('ide'), testId: "nav-ide", children: "Workspace IDE" }), _jsx(Button, { variant: activeScreen === 'snippets' ? 'primary' : 'ghost', onClick: () => setActiveScreen('snippets'), testId: "nav-snippets", children: "Snippets & Replay" })] })) : null] }), _jsx("div", { className: "webssh-rail-resizer", role: "separator", "aria-orientation": "vertical", "aria-label": "Resize navigation rail", "aria-valuenow": railWidth, "aria-valuemin": 120, "aria-valuemax": 360, tabIndex: 0, onKeyDown: (e) => {
+                        }, children: "Exit Zen (Esc)" })] })) : null, _jsxs("div", { className: `webssh-workspace-body ${layoutPreset === 'sidebar-right' ? 'webssh-workspace-body--right' : ''}`.trim(), children: [!isFullscreen && !zenMode ? (_jsxs(_Fragment, { children: [_jsxs("nav", { className: "webssh-rail", "aria-label": "Workspace navigation", style: { width: `${railWidth}px` }, children: [_jsxs("div", { className: "webssh-rail-scroll", children: [_jsxs(Button, { variant: activeScreen === 'welcome' ? 'primary' : 'ghost', onClick: () => setActiveScreen('welcome'), testId: "nav-welcome", children: [_jsx(Icon, { name: "home" }), " Home"] }), _jsxs("div", { className: "webssh-rail-presets-group", children: [_jsx("span", { className: "webssh-rail-group-title", children: "Workspace" }), _jsx("div", { className: "webssh-rail-presets", role: "group", "aria-label": "Workspace preset", children: ['terminal', 'develop', 'operate'].map((preset) => (_jsx(Button, { variant: workspacePreset === preset ? 'default' : 'ghost', ariaPressed: workspacePreset === preset, onClick: () => applyPreset(preset), testId: `preset-${preset}`, children: preset[0].toUpperCase() + preset.slice(1) }, preset))) })] }), _jsxs("div", { className: "webssh-rail-group", role: "group", "aria-label": "Sessions", children: [_jsx("span", { className: "webssh-rail-group-title", children: "Sessions" }), _jsxs(Button, { variant: activeScreen === 'workspace' ? 'primary' : 'ghost', onClick: () => setActiveScreen('workspace'), testId: "nav-workspace", children: [_jsx(Icon, { name: "terminal" }), " Terminal"] }), _jsxs(Button, { variant: activeScreen === 'overview' ? 'primary' : 'ghost', onClick: () => setActiveScreen('overview'), testId: "nav-overview", children: [_jsx(Icon, { name: "server" }), " Servers"] }), _jsxs(Button, { variant: activeScreen === 'files' ? 'primary' : 'ghost', onClick: () => setActiveScreen('files'), testId: "nav-files", children: [_jsx(Icon, { name: "folder" }), " Files"] }), _jsx(Button, { variant: activeScreen === 'activity' ? 'primary' : 'ghost', onClick: () => setActiveScreen('activity'), testId: "nav-activity", children: "Activity" })] }), _jsxs("div", { className: "webssh-rail-group", role: "group", "aria-label": "Operations", children: [_jsx("span", { className: "webssh-rail-group-title", children: "Operations" }), _jsx(Button, { variant: activeScreen === 'software' ? 'primary' : 'ghost', onClick: () => setActiveScreen('software'), testId: "nav-software", children: "Software" }), _jsx(Button, { variant: activeScreen === 'containers' ? 'primary' : 'ghost', onClick: () => setActiveScreen('containers'), testId: "nav-containers", children: "Containers" }), _jsx(Button, { variant: activeScreen === 'kubernetes' ? 'primary' : 'ghost', onClick: () => setActiveScreen('kubernetes'), testId: "nav-kubernetes", children: "Kubernetes" }), _jsx(Button, { variant: activeScreen === 'automations' ? 'primary' : 'ghost', onClick: () => setActiveScreen('automations'), testId: "nav-automations", children: "Automations" }), _jsx(Button, { variant: activeScreen === 'deployments' ? 'primary' : 'ghost', onClick: () => setActiveScreen('deployments'), testId: "nav-deployments", children: "Deployments" })] }), ideMode ? (_jsxs("div", { className: "webssh-rail-group", role: "group", "aria-label": "Workspace tools", "data-testid": "sidebar-nav", children: [_jsx("span", { className: "webssh-rail-group-title", children: "Workspace tools" }), _jsx(Button, { variant: activeScreen === 'features' ? 'primary' : 'ghost', onClick: () => setActiveScreen('features'), testId: "nav-features", children: "Features" }), _jsx(Button, { variant: activeScreen === 'tunnels' ? 'primary' : 'ghost', onClick: () => setActiveScreen('tunnels'), testId: "nav-tunnels", children: "Port Tunnels" }), _jsxs(Button, { variant: activeScreen === 'vault' ? 'primary' : 'ghost', onClick: () => setActiveScreen('vault'), testId: "nav-vault", children: [_jsx(Icon, { name: "key" }), " Key Vault"] }), _jsxs(Button, { variant: activeScreen === 'hosts' ? 'primary' : 'ghost', onClick: () => setActiveScreen('hosts'), testId: "nav-hosts", children: [_jsx(Icon, { name: "server" }), " Hosts"] }), _jsx(Button, { variant: activeScreen === 'editor' ? 'primary' : 'ghost', onClick: () => setActiveScreen('editor'), testId: "nav-editor", children: "Editor" }), _jsx(Button, { variant: activeScreen === 'ide' ? 'primary' : 'ghost', onClick: () => setActiveScreen('ide'), testId: "nav-ide", children: "Workspace IDE" }), _jsx(Button, { variant: activeScreen === 'snippets' ? 'primary' : 'ghost', onClick: () => setActiveScreen('snippets'), testId: "nav-snippets", children: "Snippets & Replay" })] })) : null] }), _jsxs("div", { className: "webssh-rail-footer", children: [_jsx(Button, { variant: ideMode ? 'primary' : 'default', ariaPressed: ideMode, onClick: () => {
+                                                    setIdeMode((prev) => {
+                                                        const next = !prev;
+                                                        if (next && activeScreen === 'welcome') {
+                                                            setActiveScreen('features');
+                                                        }
+                                                        return next;
+                                                    });
+                                                }, testId: "enable-ide-mode-btn", children: ideMode ? 'IDE mode on' : 'Open IDE' }), _jsxs(Button, { variant: activeScreen === 'settings' ? 'primary' : 'ghost', onClick: () => setActiveScreen('settings'), testId: "nav-settings", children: [_jsx(Icon, { name: "settings" }), " Settings"] })] })] }), _jsx("div", { className: "webssh-rail-resizer", role: "separator", "aria-orientation": "vertical", "aria-label": "Resize navigation rail", "aria-valuenow": railWidth, "aria-valuemin": 120, "aria-valuemax": 360, tabIndex: 0, onKeyDown: (e) => {
                                     const step = e.key === 'ArrowLeft' ? -8 : e.key === 'ArrowRight' ? 8 : 0;
                                     if (!step)
                                         return;
@@ -1795,7 +1985,7 @@ export function App() {
                                                                     background: terminalPalette.terminalBg,
                                                                     foreground: terminalPalette.terminalFg,
                                                                     cursor: terminalPalette.terminalCursor
-                                                                }, onAdapter: registerPaneAdapter, onRendererChange: handleRendererChange, testId: "xterm-engine-mount-2" }) })) : null, connectionState !== 'connected' ? (_jsxs("div", { className: "webssh-terminal-disconnected", "data-testid": "terminal-disconnected-state", children: [_jsx("p", { children: "No server connected." }), _jsx("p", { children: "Enter a host, user and port, then press Connect." })] })) : null, rendererNotice ? (_jsxs("div", { role: "status", "data-testid": "terminal-renderer-notice", style: { position: 'absolute', right: 'var(--space-2)', bottom: 'var(--space-2)' }, children: ["Renderer: ", rendererNotice] })) : null] }) }) }), showCommandInspector ? (_jsxs("section", { className: "webssh-command-inspector", "data-testid": "command-inspector", "aria-label": "Local command inspector", children: [_jsxs("header", { className: "webssh-command-inspector-header", children: [_jsx("strong", { children: "Local command inspector" }), _jsx("span", { children: "Output of explicit local commands only. Interactive shell output belongs to the terminal above." })] }), _jsx("div", { "data-testid": "local-command-output", children: terminalLines.map((line, i) => (_jsx("div", { children: redactSecretsInText(line, redactionMode) }, i))) }), commandBlocks.map((block) => (_jsxs("div", { className: "webssh-cmd-block", "data-testid": `cmd-block-${block.id}`, children: [_jsxs("div", { className: "webssh-cmd-block-header", children: [_jsxs("span", { children: [_jsxs("strong", { children: ["$ ", redactSecretsInText(block.command, redactionMode)] }), " \u00B7", ' ', block.timestamp, " (", block.durationMs, "ms)"] }), _jsxs(Badge, { tone: block.exitCode === 0 ? 'success' : 'danger', children: ["exit ", block.exitCode] })] }), block.outputLines.map((outLine, idx) => (_jsx("div", { children: redactSecretsInText(outLine, redactionMode) }, idx)))] }, block.id))), terminalLines.length === 0 && commandBlocks.length === 0 ? (_jsx("p", { children: "No local commands have run in this session." })) : null] })) : null] }) })) : null, activeScreen === 'ide' ? (_jsx(LightIde, { session: remoteSession, connectedLabel: connectedHost ? `${connectedUser}@${connectedHost}` : '' })) : null, activeScreen === 'overview' ? _jsx(OverviewPanel, { ctx: moduleContext }) : null, activeScreen === 'software' ? _jsx(SoftwarePanel, { ctx: moduleContext }) : null, activeScreen === 'containers' ? _jsx(ContainersPanel, { ctx: moduleContext }) : null, activeScreen === 'kubernetes' ? _jsx(KubernetesPanel, { ctx: moduleContext }) : null, activeScreen === 'automations' ? _jsx(AutomationsPanel, { ctx: moduleContext }) : null, activeScreen === 'deployments' ? _jsx(DeploymentsPanel, { ctx: moduleContext }) : null, activeScreen === 'activity' ? _jsx(ActivityPanel, { ctx: moduleContext }) : null, activeScreen === 'features' ? _jsx(CapabilityMatrixPanel, {}) : null, activeScreen === 'tunnels' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-tunnels", children: [_jsx("h1", { children: "Port Forwarding & Network Tunneling Studio (-L / -R / -D SOCKS5)" }), _jsxs(Card, { children: [_jsx("h2", { children: "Create Custom SSH Port Forward Rule" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("label", { htmlFor: "new-tunnel-local", children: "Local Port" }), _jsx("input", { id: "new-tunnel-local", type: "number", className: "ui-input", value: newTunnelLocalPort, onInput: (e) => setNewTunnelLocalPort(e.target.value), "data-testid": "new-tunnel-local-input", style: { width: '110px' } }), _jsx("label", { htmlFor: "new-tunnel-remote", children: "Remote Port" }), _jsx("input", { id: "new-tunnel-remote", type: "number", className: "ui-input", value: newTunnelRemotePort, onInput: (e) => setNewTunnelRemotePort(e.target.value), "data-testid": "new-tunnel-remote-input", style: { width: '110px' } }), _jsx(Button, { variant: "primary", testId: "add-tunnel-btn", onClick: () => {
+                                                                }, onAdapter: registerPaneAdapter, onRendererChange: handleRendererChange, testId: "xterm-engine-mount-2" }) })) : null, connectionState !== 'connected' ? (_jsxs("div", { className: "webssh-terminal-disconnected", "data-testid": "terminal-disconnected-state", children: [_jsx("p", { children: "No server connected." }), _jsx("p", { children: "Enter a host, user and port, then press Connect." }), _jsx(Button, { variant: "primary", onClick: () => setConnectModalOpen(true), testId: "empty-state-connect-btn", children: "Connect" })] })) : null] }) }) }), showCommandInspector ? (_jsxs("section", { className: "webssh-command-inspector", "data-testid": "command-inspector", "aria-label": "Local command inspector", children: [_jsxs("header", { className: "webssh-command-inspector-header", children: [_jsx("strong", { children: "Local command inspector" }), _jsx("span", { children: "Output of explicit local commands only. Interactive shell output belongs to the terminal above." })] }), _jsx("div", { "data-testid": "local-command-output", children: terminalLines.map((line, i) => (_jsx("div", { children: redactSecretsInText(line, redactionMode) }, i))) }), commandBlocks.map((block) => (_jsxs("div", { className: "webssh-cmd-block", "data-testid": `cmd-block-${block.id}`, children: [_jsxs("div", { className: "webssh-cmd-block-header", children: [_jsxs("span", { children: [_jsxs("strong", { children: ["$ ", redactSecretsInText(block.command, redactionMode)] }), " \u00B7", ' ', block.timestamp, " (", block.durationMs, "ms)"] }), _jsxs(Badge, { tone: block.exitCode === 0 ? 'success' : 'danger', children: ["exit ", block.exitCode] })] }), block.outputLines.map((outLine, idx) => (_jsx("div", { children: redactSecretsInText(outLine, redactionMode) }, idx)))] }, block.id))), terminalLines.length === 0 && commandBlocks.length === 0 ? (_jsx("p", { children: "No local commands have run in this session." })) : null] })) : null] }) })) : null, activeScreen === 'ide' ? (_jsx(LightIde, { session: remoteSession, connectedLabel: connectedHost ? `${connectedUser}@${connectedHost}` : '' })) : null, activeScreen === 'overview' ? _jsx(OverviewPanel, { ctx: moduleContext }) : null, activeScreen === 'software' ? _jsx(SoftwarePanel, { ctx: moduleContext }) : null, activeScreen === 'containers' ? _jsx(ContainersPanel, { ctx: moduleContext }) : null, activeScreen === 'kubernetes' ? _jsx(KubernetesPanel, { ctx: moduleContext }) : null, activeScreen === 'automations' ? _jsx(AutomationsPanel, { ctx: moduleContext }) : null, activeScreen === 'deployments' ? _jsx(DeploymentsPanel, { ctx: moduleContext }) : null, activeScreen === 'activity' ? _jsx(ActivityPanel, { ctx: moduleContext }) : null, activeScreen === 'features' ? _jsx(CapabilityMatrixPanel, {}) : null, activeScreen === 'tunnels' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-tunnels", children: [_jsx("h1", { children: "Port Forwarding & Network Tunneling Studio (-L / -R / -D SOCKS5)" }), _jsxs(Card, { children: [_jsx("h2", { children: "Create Custom SSH Port Forward Rule" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("label", { htmlFor: "new-tunnel-local", children: "Local Port" }), _jsx("input", { id: "new-tunnel-local", type: "number", className: "ui-input", value: newTunnelLocalPort, onInput: (e) => setNewTunnelLocalPort(e.target.value), "data-testid": "new-tunnel-local-input", style: { width: '110px' } }), _jsx("label", { htmlFor: "new-tunnel-remote", children: "Remote Port" }), _jsx("input", { id: "new-tunnel-remote", type: "number", className: "ui-input", value: newTunnelRemotePort, onInput: (e) => setNewTunnelRemotePort(e.target.value), "data-testid": "new-tunnel-remote-input", style: { width: '110px' } }), _jsx(Button, { variant: "primary", testId: "add-tunnel-btn", onClick: () => {
                                                             const lPort = Number.parseInt(newTunnelLocalPort, 10) || 8080;
                                                             const rPort = Number.parseInt(newTunnelRemotePort, 10) || 80;
                                                             const tunId = `tunnel-${Date.now()}`;
@@ -1887,10 +2077,10 @@ export function App() {
                                                                             setTunnelPreviewOutput(`Tunnel HTTP Probe Failed on 127.0.0.1:${webPreviewPort}: ${res.error || 'Connection refused'}`);
                                                                         }
                                                                     });
-                                                                }, children: "Probe HTTP Preview" })] })] }), _jsxs("p", { children: ["Proxying remote ", _jsxs("code", { children: ["http://127.0.0.1:", webPreviewPort] }), " over SSH ", _jsx("code", { children: "direct-tcpip" }), " channel:"] }), _jsx("pre", { "data-testid": "tunnel-preview-output", children: tunnelPreviewOutput })] })] })) : null, activeScreen === 'welcome' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-welcome", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("div", { children: [_jsx("h1", { children: "Welcome to WebSSH Studio" }), _jsxs("p", { style: { color: 'var(--color-fg-secondary)' }, children: ["Clean, minimal SSH workspace \u2014 connect with Username & Password or upload a Private Key (", _jsx("code", { children: "chmod 0400" }), ")."] })] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "default", testId: "welcome-open-terminal-btn", onClick: () => setActiveScreen('workspace'), children: [_jsx(Icon, { name: "terminal" }), " Open Terminal"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', testId: "welcome-open-ide-btn", onClick: () => {
-                                                            setIdeMode(true);
-                                                            setActiveScreen('features');
-                                                        }, children: "Open IDE" })] })] }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [transportMode === 'cloudflare-relay' && turnstileSiteKey ? (_jsxs("div", { "data-testid": "guest-challenge", children: [_jsx("p", { className: "ws-mod-muted", style: { margin: 0 }, children: "No account needed: complete the human check, then connect. A short-lived ticket is issued for this host and port only." }), _jsx(TurnstileWidget, { siteKey: turnstileSiteKey, resetNonce: turnstileResetNonce, onToken: setTurnstileToken })] })) : null, relaySessionUser ? (_jsxs(Badge, { tone: "success", testId: "product-signed-in", children: ["Signed in as ", relaySessionUser] })) : null, _jsxs("details", { "data-testid": "admin-transport-settings", children: [_jsx("summary", { children: "Administrator settings" }), _jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsxs("div", { "data-testid": "admin-sign-in", children: [_jsx("h4", { children: "Account sign-in (optional)" }), _jsx("p", { className: "ws-mod-muted", style: { margin: 0 }, children: "Accounts are for administrators. Guest connections use the human check and need no account." }), relaySessionUser ? (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, "data-testid": "product-signed-in-actions", children: [_jsxs(Badge, { tone: "success", children: ["Signed in as ", relaySessionUser] }), _jsx(Button, { variant: "ghost", type: "button", testId: "product-sign-out-btn", onClick: () => handleRelaySignOut(), children: "Sign out" })] })) : (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }, "data-testid": "product-sign-in", children: [_jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-user", children: "Username" }), _jsx("input", { id: "product-sign-in-user", type: "text", autoComplete: "username", className: "ui-input", placeholder: "Your account", value: relayLoginUser, onInput: (e) => setRelayLoginUser(e.target.value), "data-testid": "product-sign-in-user" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-pass", children: "Password" }), _jsx("input", { id: "product-sign-in-pass", type: "password", autoComplete: "current-password", className: "ui-input", placeholder: "Account password", value: relayLoginPass, onInput: (e) => setRelayLoginPass(e.target.value), "data-testid": "product-sign-in-pass" })] }), _jsx(Button, { variant: "default", type: "button", testId: "product-sign-in-submit", onClick: () => void handleRelayLogin(), children: "Sign in" })] }))] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "welcome-transport-mode-select", children: "SSH Transport Mode" }), _jsxs("select", { id: "welcome-transport-mode-select", className: "ui-input", value: transportMode, onChange: (e) => {
+                                                                }, children: "Probe HTTP Preview" })] })] }), _jsxs("p", { children: ["Proxying remote ", _jsxs("code", { children: ["http://127.0.0.1:", webPreviewPort] }), " over SSH ", _jsx("code", { children: "direct-tcpip" }), " channel:"] }), _jsx("pre", { "data-testid": "tunnel-preview-output", children: tunnelPreviewOutput })] })] })) : null, activeScreen === 'welcome' ? (_jsxs("div", { className: "webssh-panel-content webssh-welcome", "data-testid": "screen-welcome", children: [_jsx("div", { className: "webssh-aurora", "aria-hidden": "true" }), _jsxs("div", { className: "webssh-welcome-hero", children: [_jsxs("div", { className: "webssh-welcome-copy", children: [_jsx("span", { className: "webssh-welcome-eyebrow", children: "Browser SSH workspace" }), _jsx("h1", { children: "Welcome to WebSSH Studio" }), _jsxs("p", { style: { color: 'var(--color-fg-secondary)' }, children: ["Clean, minimal SSH workspace \u2014 connect with Username & Password or upload a Private Key (", _jsx("code", { children: "chmod 0400" }), ")."] })] }), _jsx(ProfileCard, {})] }), _jsx("div", { className: "webssh-welcome-actions", children: _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)' }, children: [_jsxs(Button, { variant: "default", testId: "welcome-open-terminal-btn", onClick: () => setActiveScreen('workspace'), children: [_jsx(Icon, { name: "terminal" }), " Open Terminal"] }), _jsx(Button, { variant: ideMode ? 'primary' : 'default', testId: "welcome-open-ide-btn", onClick: () => {
+                                                        setIdeMode(true);
+                                                        setActiveScreen('features');
+                                                    }, children: "Open IDE" })] }) }), _jsxs(Card, { testId: "welcome-quick-connect-card", children: [_jsx("h2", { children: "Quick SSH Connect" }), _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [transportMode === 'cloudflare-relay' && turnstileSiteKey ? (_jsxs("div", { "data-testid": "guest-challenge", children: [_jsx("p", { className: "ws-mod-muted", style: { margin: 0 }, children: "No account needed: complete the human check, then connect. A short-lived ticket is issued for this host and port only." }), _jsx(TurnstileWidget, { siteKey: turnstileSiteKey, resetNonce: turnstileResetNonce, onToken: setTurnstileToken })] })) : null, relaySessionUser ? (_jsxs(Badge, { tone: "success", testId: "product-signed-in", children: ["Signed in as ", relaySessionUser] })) : null, _jsxs("details", { "data-testid": "admin-transport-settings", children: [_jsx("summary", { children: "Administrator settings" }), _jsxs("div", { style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }, children: [_jsxs("div", { "data-testid": "admin-sign-in", children: [_jsx("h4", { children: "Account sign-in (optional)" }), _jsx("p", { className: "ws-mod-muted", style: { margin: 0 }, children: "Accounts are for administrators. Guest connections use the human check and need no account." }), relaySessionUser ? (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, "data-testid": "product-signed-in-actions", children: [_jsxs(Badge, { tone: "success", children: ["Signed in as ", relaySessionUser] }), _jsx(Button, { variant: "ghost", type: "button", testId: "product-sign-out-btn", onClick: () => handleRelaySignOut(), children: "Sign out" })] })) : (_jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }, "data-testid": "product-sign-in", children: [_jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-user", children: "Username" }), _jsx("input", { id: "product-sign-in-user", type: "text", autoComplete: "username", className: "ui-input", placeholder: "Your account", value: relayLoginUser, onInput: (e) => setRelayLoginUser(e.target.value), "data-testid": "product-sign-in-user" })] }), _jsxs("div", { style: { flex: 1, minWidth: '160px' }, children: [_jsx("label", { htmlFor: "product-sign-in-pass", children: "Password" }), _jsx("input", { id: "product-sign-in-pass", type: "password", autoComplete: "current-password", className: "ui-input", placeholder: "Account password", value: relayLoginPass, onInput: (e) => setRelayLoginPass(e.target.value), "data-testid": "product-sign-in-pass" })] }), _jsx(Button, { variant: "default", type: "button", testId: "product-sign-in-submit", onClick: () => void handleRelayLogin(), children: "Sign in" })] }))] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "welcome-transport-mode-select", children: "SSH Transport Mode" }), _jsxs("select", { id: "welcome-transport-mode-select", className: "ui-input", value: transportMode, onChange: (e) => {
                                                                                     const mode = e.target.value;
                                                                                     setTransportMode(mode);
                                                                                     try {
@@ -1949,7 +2139,7 @@ export function App() {
                                                     }, children: "Connect" })] }, h.id))) }), _jsxs(Card, { children: [_jsx("h2", { children: "Import ~/.ssh/config" }), _jsx("textarea", { className: "ui-input", rows: 4, "aria-label": "SSH config content", value: sshConfigInput, onInput: (e) => setSshConfigInput(e.target.value) }), _jsx("div", { style: { marginTop: 'var(--space-2)' }, children: _jsx(Button, { variant: "primary", testId: "import-ssh-config-btn", onClick: () => {
                                                         hostRegistry.importSshConfig(sshConfigInput);
                                                         setHosts(hostRegistry.list());
-                                                    }, children: "Import ~/.ssh/config" }) })] })] })) : null, activeScreen === 'files' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-files", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h1", { children: "Dual-Pane SFTP File Manager" }), _jsxs(Badge, { tone: "neutral", testId: "storage-quota-badge", children: ["Storage Guard: ", quotaSnap.percentUsed, "% of 256 MiB cap (256 KiB chunks, SHA-256 verified)"] })] }), _jsx("p", { "data-testid": "transfer-status-badge", children: transferStatus }), _jsx("input", { type: "search", className: "ui-input", placeholder: "Filter remote directory entries\u2026", value: fileFilter, onInput: (e) => setFileFilter(e.target.value), "aria-label": "Filter remote directory entries" }), _jsxs(Card, { children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("p", { children: ["Upload a file into ", sftpCurrentPath, ". Writes go through SFTP, never through the shell."] }), _jsxs("label", { className: "ui-button ui-button--primary", style: { cursor: 'pointer' }, children: [_jsx(Icon, { name: "upload" }), " Upload file", _jsx("input", { type: "file", "data-testid": "sftp-upload-input", style: { display: 'none' }, onChange: (e) => {
+                                                    }, children: "Import ~/.ssh/config" }) })] })] })) : null, activeScreen === 'files' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-files", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsx("h1", { children: "SFTP File Browser" }), _jsxs(Badge, { tone: "neutral", testId: "storage-quota-badge", children: ["Storage Guard: ", quotaSnap.percentUsed, "% of 256 MiB cap (256 KiB chunks, SHA-256 verified)"] })] }), _jsx("p", { "data-testid": "transfer-status-badge", children: transferStatus }), _jsx("input", { type: "search", className: "ui-input", placeholder: "Filter remote directory entries\u2026", value: fileFilter, onInput: (e) => setFileFilter(e.target.value), "aria-label": "Filter remote directory entries" }), _jsxs(Card, { children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("p", { children: ["Upload a file into ", sftpCurrentPath, ". Writes go through SFTP, never through the shell."] }), _jsxs("label", { className: "ui-button ui-button--primary", style: { cursor: 'pointer' }, children: [_jsx(Icon, { name: "upload" }), " Upload file", _jsx("input", { type: "file", "data-testid": "sftp-upload-input", style: { display: 'none' }, onChange: (e) => {
                                                                     const input = e.target;
                                                                     const file = input.files?.[0];
                                                                     input.value = '';
@@ -1991,7 +2181,7 @@ export function App() {
                                                     .join(String.fromCharCode(10)) })] })] })) : null, activeScreen === 'editor' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-editor", children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }, children: [_jsxs("h1", { children: ["Remote File Editor \u2014 ", editorFilePath] }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx("input", { type: "text", className: "ui-input", "aria-label": "Remote file path", value: editorFilePath, onInput: (e) => setEditorFilePath(e.target.value), "data-testid": "editor-filepath-input", style: { width: '200px' } }), _jsx(Button, { variant: "default", testId: "load-remote-file-btn", onClick: () => void loadRemoteFileIntoEditor(editorFilePath), children: "Load from Host" }), _jsx(Button, { variant: "default", testId: "toggle-diff-viewer-btn", onClick: () => setShowDiffViewer((d) => !d), children: showDiffViewer ? 'Hide Side-by-Side Diff' : 'Compare Side-by-Side Diff' }), _jsxs(Button, { variant: "primary", onClick: () => void saveEditorBuffer(), testId: "save-remote-file-btn", children: ["Save to host ", editorLoadedPath !== editorFilePath ? '(Not loaded)' : editorSaved ? '(Saved)' : '(Unsaved*)'] })] })] }), editorError ? (_jsx("p", { className: "ws-mod-error", role: "alert", "data-testid": "editor-error", children: editorError })) : null, editorConflict ? (_jsxs(Card, { testId: "editor-conflict-card", children: [_jsx("p", { className: "ws-mod-warnings", children: editorConflict }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: "danger", onClick: () => void saveEditorBuffer(true), testId: "editor-overwrite-remote", children: "Overwrite with my version" }), _jsx(Button, { variant: "default", onClick: () => {
                                                             setEditorConflict(null);
                                                             void loadRemoteFileIntoEditor(editorFilePath);
-                                                        }, testId: "editor-reload-remote", children: "Discard mine and reload" })] })] })) : null, _jsx("textarea", { className: "ui-input", rows: 10, "aria-label": "Remote file content", "data-testid": "remote-editor-textarea", value: editorContent, onInput: (e) => {
+                                                        }, testId: "editor-reload-remote", children: "Discard mine and reload" })] })] })) : null, _jsx("textarea", { className: "ui-input webssh-editor-textarea", rows: 10, "aria-label": "Remote file content", "data-testid": "remote-editor-textarea", value: editorContent, onInput: (e) => {
                                             setEditorContent(e.target.value);
                                             setEditorSaved(false);
                                         } }), showDiffViewer ? (_jsxs(Card, { testId: "side-by-side-diff-card", children: [_jsxs("h2", { children: ["Side-by-Side Diff vs Remote ", editorFilePath] }), _jsxs("div", { className: "webssh-diff-grid", children: [_jsxs("div", { children: [_jsx("strong", { children: "Original Remote File" }), diffEntries.map((d) => (_jsxs("div", { className: `webssh-diff-line--${d.status}`, children: [d.lineNumber, ": ", d.before] }, `orig-${d.lineNumber}`)))] }), _jsxs("div", { children: [_jsx("strong", { children: "Modified Buffer" }), diffEntries.map((d) => (_jsxs("div", { className: `webssh-diff-line--${d.status}`, children: [d.lineNumber, ": ", d.after] }, `mod-${d.lineNumber}`)))] })] })] })) : null] })) : null, activeScreen === 'snippets' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-snippets", children: [_jsx("h1", { children: "Snippets & Asciicast v2 Session Replay" }), _jsxs(Card, { children: [_jsx("h2", { children: "Variable Interpolation Parameters" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "snip-var-service", children: "service" }), _jsx("input", { id: "snip-var-service", className: "ui-input", value: snippetVarService, onInput: (e) => setSnippetVarService(e.target.value) })] }), _jsxs("div", { children: [_jsx("label", { htmlFor: "snip-var-lines", children: "lines" }), _jsx("input", { id: "snip-var-lines", className: "ui-input", value: snippetVarLines, onInput: (e) => setSnippetVarLines(e.target.value) })] })] })] }), _jsx("div", { className: "webssh-grid", children: snippetLib.list().map((snip) => {
@@ -2003,13 +2193,34 @@ export function App() {
                                                             void executeTerminalCommand(interpolated);
                                                             setActiveScreen('workspace');
                                                         }, children: "Run Snippet" })] }, snip.id));
-                                        }) }), _jsxs(Card, { children: [_jsxs("h2", { children: ["Demo recording preview (", scrubberSec.toFixed(1), "s)"] }), _jsx("p", { children: "Sample recording \u2014 not output from your server." }), _jsx("input", { type: "range", min: 0, max: 3, step: 0.5, value: scrubberSec, "aria-label": "Replay timeline scrubber", onInput: (e) => setScrubberSec(Number(e.target.value)) }), _jsx("pre", { children: scrubAsciicastOutput(demoCast.events, scrubberSec) })] })] })) : null, activeScreen === 'settings' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-settings", children: [_jsx("h1", { children: "Preferences, Theme Gallery & Keybindings" }), _jsxs(Card, { children: [_jsx("h2", { children: "Theme Selector" }), _jsx("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: THEME_IDS.map((id) => (_jsx(Button, { variant: id === activeTheme ? 'primary' : 'default', onClick: () => setActiveTheme(id), testId: `theme-btn-${id}`, children: id }, id))) })] }), _jsxs(Card, { children: [_jsx("h2", { children: "Workspace Layout & Cursor Geometry" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: layoutPreset === 'sidebar-left' ? 'primary' : 'default', onClick: () => { setLayoutPreset('sidebar-left'); prefsStore.update({ layoutPreset: 'sidebar-left' }); }, children: "Sidebar Left" }), _jsx(Button, { variant: layoutPreset === 'sidebar-right' ? 'primary' : 'default', onClick: () => { setLayoutPreset('sidebar-right'); prefsStore.update({ layoutPreset: 'sidebar-right' }); }, children: "Sidebar Right" }), _jsx(Button, { variant: cursorShape === 'block' ? 'primary' : 'default', onClick: () => setCursorShape('block'), children: "Cursor: Block" }), _jsx(Button, { variant: cursorShape === 'bar' ? 'primary' : 'default', onClick: () => setCursorShape('bar'), children: "Cursor: Bar" }), _jsx(Button, { variant: cursorShape === 'underline' ? 'primary' : 'default', onClick: () => setCursorShape('underline'), children: "Cursor: Underline" })] })] }), _jsxs(Card, { children: [_jsx("h2", { children: "Keybindings" }), _jsx("ul", { children: keybindings.list().map((kb) => (_jsxs("li", { children: [_jsxs("strong", { children: [kb.description, ":"] }), " ", _jsx("code", { children: kb.shortcut })] }, kb.actionId))) })] }), _jsxs(Card, { testId: "settings-asset-cache-card", children: [_jsx("h2", { children: "Application Asset Cache Recovery" }), _jsx("p", { children: "Purge Service Worker and static bundle caches without clearing your saved SSH hosts, non-extractable Key Vault keys, or user preferences." }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: "default", testId: "settings-repair-cache-btn", onClick: () => {
+                                        }) }), _jsxs(Card, { children: [_jsxs("h2", { children: ["Demo recording preview (", scrubberSec.toFixed(1), "s)"] }), _jsx("p", { children: "Sample recording \u2014 not output from your server." }), _jsx("input", { type: "range", min: 0, max: 3, step: 0.5, value: scrubberSec, "aria-label": "Replay timeline scrubber", onInput: (e) => setScrubberSec(Number(e.target.value)) }), _jsx("pre", { children: scrubAsciicastOutput(demoCast.events, scrubberSec) })] })] })) : null, activeScreen === 'settings' ? (_jsxs("div", { className: "webssh-panel-content", "data-testid": "screen-settings", children: [_jsx("h1", { children: "Settings" }), _jsx("p", { className: "ws-mod-muted", children: "Appearance, shortcuts and maintenance. Connection and terminal behaviour live in their own screens." }), _jsx("div", { className: "ws-mod-filters", role: "group", "aria-label": "Settings sections", children: [
+                                            ['appearance', 'Appearance'],
+                                            ['keyboard', 'Keyboard'],
+                                            ['maintenance', 'Maintenance']
+                                        ].map(([id, label]) => (_jsx(Button, { variant: settingsSection === id ? 'primary' : 'default', ariaPressed: settingsSection === id, testId: `settings-tab-${id}`, onClick: () => setSettingsSection(id), children: label }, id))) }), settingsSection === 'appearance' ? (_jsxs(_Fragment, { children: [_jsxs(Card, { children: [_jsx("h2", { children: "Theme Selector" }), _jsx("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: THEME_IDS.map((id) => (_jsx(Button, { variant: id === activeTheme ? 'primary' : 'default', onClick: () => setActiveTheme(id), testId: `theme-btn-${id}`, children: id }, id))) })] }), _jsxs(Card, { children: [_jsx("h2", { children: "Workspace Layout & Cursor Geometry" }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: layoutPreset === 'sidebar-left' ? 'primary' : 'default', onClick: () => { setLayoutPreset('sidebar-left'); prefsStore.update({ layoutPreset: 'sidebar-left' }); }, children: "Sidebar Left" }), _jsx(Button, { variant: layoutPreset === 'sidebar-right' ? 'primary' : 'default', onClick: () => { setLayoutPreset('sidebar-right'); prefsStore.update({ layoutPreset: 'sidebar-right' }); }, children: "Sidebar Right" }), _jsx(Button, { variant: cursorShape === 'block' ? 'primary' : 'default', onClick: () => setCursorShape('block'), children: "Cursor: Block" }), _jsx(Button, { variant: cursorShape === 'bar' ? 'primary' : 'default', onClick: () => setCursorShape('bar'), children: "Cursor: Bar" }), _jsx(Button, { variant: cursorShape === 'underline' ? 'primary' : 'default', onClick: () => setCursorShape('underline'), children: "Cursor: Underline" })] })] })] })) : null, settingsSection === 'keyboard' ? (_jsxs(Card, { children: [_jsx("h2", { children: "Keybindings" }), _jsx("ul", { children: keybindings.list().map((kb) => (_jsxs("li", { children: [_jsxs("strong", { children: [kb.description, ":"] }), " ", _jsx("code", { children: kb.shortcut })] }, kb.actionId))) })] })) : null, settingsSection === 'maintenance' ? (_jsxs(Card, { testId: "settings-asset-cache-card", children: [_jsx("h2", { children: "Application Asset Cache Recovery" }), _jsx("p", { children: "Purge Service Worker and static bundle caches without clearing your saved SSH hosts, non-extractable Key Vault keys, or user preferences." }), _jsxs("div", { style: { display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }, children: [_jsx(Button, { variant: "default", testId: "settings-repair-cache-btn", onClick: () => {
                                                             void repairApplicationAssetCaches().then((res) => {
                                                                 setCacheRepairStatus(`Cleared ${res.deletedCaches.length} asset cache(s) and unregistered ${res.unregisteredServiceWorkers} service worker(s). Saved hosts, keys, and settings preserved.`);
                                                             });
-                                                        }, children: "Repair Application Asset Cache" }), cacheRepairStatus ? (_jsx(Badge, { tone: "success", testId: "settings-repair-cache-status", children: cacheRepairStatus })) : null] })] })] })) : null, !isFullscreen && !zenMode ? (_jsx("div", { className: "webssh-special-keys", role: "toolbar", "aria-label": "Mobile and Tablet Special Keys", children: SPECIAL_KEYS_ROW.map((keyLabel) => (_jsx(Button, { variant: "ghost", testId: `special-key-${keyLabel}`, children: keyLabel }, keyLabel))) })) : null] })] }), !isFullscreen && !zenMode ? (_jsxs("footer", { className: "webssh-statusbar", role: "contentinfo", "data-testid": "status-bar", children: [_jsx("span", { children: connectionState === 'connected'
-                            ? `Connected: ${sessionTabLabel} · Cipher: ${negotiatedCipher}${negotiatedServerVersion ? ` · ${negotiatedServerVersion}` : ''}`
-                            : 'Status: Disconnected · Ready for SSH connection' }), _jsxs("span", { children: ["Remote Signer: Argon2id Ed25519 \u00B7 ", cols, "x", rows, " \u00B7 Font: ", fontSize, "px"] })] })) : null, _jsx(Modal, { open: connectModalOpen, title: "New SSH Connection & Argon2id Credentials", onClose: () => setConnectModalOpen(false), testId: "connect-modal", children: _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "modal-transport-mode-select", children: "SSH Transport Mode" }), _jsxs("select", { id: "modal-transport-mode-select", className: "ui-input", value: transportMode, onChange: (e) => {
+                                                        }, children: "Repair Application Asset Cache" }), cacheRepairStatus ? (_jsx(Badge, { tone: "success", testId: "settings-repair-cache-status", children: cacheRepairStatus })) : null] })] })) : null] })) : null, !isFullscreen && !zenMode ? (_jsx("div", { className: "webssh-special-keys", role: "toolbar", "aria-label": "Mobile and Tablet Special Keys", children: SPECIAL_KEYS_ROW.map((keyLabel) => (_jsx(Button, { variant: "ghost", testId: `special-key-${keyLabel}`, children: keyLabel }, keyLabel))) })) : null] })] }), reconnectNotice || reconnectMessage ? (_jsxs("div", { className: `webssh-conn-banner${connectionState === 'connected' ? ' webssh-conn-banner--info' : ''}`, role: "status", "data-testid": "reconnect-banner", children: [_jsx("span", { className: "webssh-conn-banner-text", children: reconnectNotice ?? reconnectMessage }), connectionState === 'connected' ? (_jsx(Button, { variant: "ghost", onClick: () => setReconnectMessage(null), testId: "dismiss-reconnect-btn", children: "Dismiss" })) : (_jsx(Button, { variant: "default", onClick: handleReconnectNow, testId: "reconnect-now-btn", children: "Reconnect now" }))] })) : null, !isFullscreen && !zenMode ? (_jsxs("footer", { className: "webssh-statusbar", role: "contentinfo", "data-testid": "status-bar", children: [_jsxs("span", { className: "webssh-statusbar-health", children: [_jsxs("button", { type: "button", className: "webssh-statusbar-trigger", onClick: () => setConnectionPanelOpen((open) => !open), "aria-expanded": connectionPanelOpen, "aria-controls": "connection-details-panel", "data-testid": "connection-status-btn", children: [_jsx("span", { className: `webssh-status-dot ${statusDotClass}`.trim(), "aria-hidden": "true" }), _jsx("span", { children: connectionState === 'connected'
+                                            ? `Connected · ${sessionTabLabel}`
+                                            : connectionState === 'reconnecting'
+                                                ? 'Reconnecting…'
+                                                : 'Disconnected' })] }), connectionState === 'connected' ? (_jsxs("span", { className: "webssh-statusbar-metrics", children: [_jsx("span", { children: formatRtt(rttMs) }), _jsx("span", { "aria-hidden": "true", children: "\u00B7" }), _jsx("span", { children: formatUptime(connectedAt !== null ? Date.now() - connectedAt : 0) })] })) : null, connectionPanelOpen ? (_jsxs("div", { className: "webssh-conn-panel", id: "connection-details-panel", role: "dialog", "aria-label": "Connection details", "data-testid": "connection-details-panel", children: [_jsxs("div", { className: "webssh-conn-panel-head", children: [_jsx("strong", { children: "Connection details" }), _jsx(Button, { variant: "ghost", ariaLabel: "Close connection details", onClick: () => setConnectionPanelOpen(false), children: "\u00D7" })] }), _jsx("dl", { className: "webssh-conn-list", children: connectionHealthRows({
+                                            transportMode,
+                                            state: connectionState === 'resumed'
+                                                ? 'connected'
+                                                : connectionState === 'offline'
+                                                    ? 'disconnected'
+                                                    : connectionState,
+                                            target: connectedHost ? `${connectedUser}@${connectedHost}` : '',
+                                            rttMs,
+                                            uptimeMs: connectedAt !== null && connectionState === 'connected'
+                                                ? Date.now() - connectedAt
+                                                : null,
+                                            reconnects: reconnectCount,
+                                            cipher: connectionState === 'connected' ? negotiatedCipher : '',
+                                            serverVersion: connectionState === 'connected' ? negotiatedServerVersion : ''
+                                        }).map((row) => (_jsxs("div", { className: "webssh-conn-row", children: [_jsx("dt", { children: row.label }), _jsx("dd", { className: `webssh-conn-tone--${row.tone}`, children: row.value })] }, row.label))) })] })) : null] }), _jsxs("span", { className: "webssh-statusbar-meta", children: [_jsxs("span", { children: [cols, "\u00D7", rows] }), _jsx("span", { "aria-hidden": "true", children: "\u00B7" }), _jsxs("span", { children: [fontSize, "px"] }), _jsx("span", { "aria-hidden": "true", children: "\u00B7" }), _jsx("span", { children: transportMode === 'go-gateway' ? 'Gateway' : 'Relay' }), connectionState === 'connected' && negotiatedServerVersion ? (_jsxs(_Fragment, { children: [_jsx("span", { "aria-hidden": "true", children: "\u00B7" }), _jsx("span", { children: negotiatedServerVersion })] })) : null, rendererNotice ? (_jsxs(_Fragment, { children: [_jsx("span", { "aria-hidden": "true", children: "\u00B7" }), _jsx("span", { "data-testid": "terminal-renderer-notice", role: "status", children: rendererNotice })] })) : null, ideMode ? (_jsxs(_Fragment, { children: [_jsx("span", { "aria-hidden": "true", children: "\u00B7" }), _jsx("span", { children: "IDE" })] })) : null] })] })) : null, _jsx(Modal, { open: connectModalOpen, title: "New SSH Connection & Argon2id Credentials", onClose: () => setConnectModalOpen(false), testId: "connect-modal", children: _jsxs("form", { onSubmit: handleConnectSubmit, style: { display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }, children: [_jsxs("div", { children: [_jsx("label", { htmlFor: "modal-transport-mode-select", children: "SSH Transport Mode" }), _jsxs("select", { id: "modal-transport-mode-select", className: "ui-input", value: transportMode, onChange: (e) => {
                                         const mode = e.target.value;
                                         setTransportMode(mode);
                                         try {

@@ -1,4 +1,5 @@
 import { Terminal, type ITheme } from '@xterm/xterm';
+import '@xterm/xterm/css/xterm.css';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 export type TerminalRendererMode = 'webgl' | 'canvas' | 'dom';

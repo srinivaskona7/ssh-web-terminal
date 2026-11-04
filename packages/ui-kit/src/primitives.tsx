@@ -11,6 +11,7 @@ export interface ButtonProps {
   onClick?: (e: MouseEvent) => void;
   title?: string;
   ariaLabel?: string;
+  ariaPressed?: boolean;
   testId?: string;
   className?: string;
 }
@@ -23,6 +24,7 @@ export function Button({
   onClick,
   title,
   ariaLabel,
+  ariaPressed,
   testId,
   className = ''
 }: ButtonProps): JSX.Element {
@@ -35,6 +37,7 @@ export function Button({
       onClick={onClick}
       title={title}
       aria-label={ariaLabel}
+      aria-pressed={ariaPressed}
       data-testid={testId}
       className={`ui-btn ${variantClass} ${className}`.trim()}
     >

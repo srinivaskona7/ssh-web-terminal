@@ -118,6 +118,7 @@ export const TOKENS = {
     "size2xl": "22px",
     "lineHeightUi": "1.45",
     "lineHeightTerminal": "1.35",
+    "lineHeightEditor": "1.6",
     "letterSpacingNormal": "0em",
     "letterSpacingTight": "-0.01em"
   },
@@ -129,7 +130,7 @@ export const TOKENS = {
       "bgOverlay": "rgba(17, 21, 29, 0.92)",
       "fgPrimary": "#e6edf3",
       "fgSecondary": "#9da7b3",
-      "fgMuted": "#6e7681",
+      "fgMuted": "#9aa4b2",
       "borderSubtle": "#232a38",
       "borderStrong": "#343e52",
       "accentPrimary": "#4f8cff",

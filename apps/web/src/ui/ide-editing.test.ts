@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   baseName,
   commentPrefixFor,
+  detectEol,
   duplicateLine,
   findMatches,
   formatBytes,
@@ -12,6 +13,8 @@ import {
   lineColumnAt,
   lineStartOffset,
   moveLine,
+  newlineIndent,
+  normalizeEol,
   parentPath,
   parseDiff,
   parseGitStatus,
@@ -31,10 +34,21 @@ describe('ide-editing helpers', () => {
     expect(joinPath('/home', '/etc/hosts')).toBe('/etc/hosts');
   });
 
-  it('finds the parent path, stopping at root', () => {
+  it('finds the parent path, stopping at root or the current folder', () => {
     expect(parentPath('/home/ubuntu/app')).toBe('/home/ubuntu');
     expect(parentPath('/home/')).toBe('/');
-    expect(parentPath('single')).toBe('/');
+    expect(parentPath('/')).toBe('/');
+    // A bare relative name is in the current folder, not at the filesystem root.
+    expect(parentPath('single')).toBe('.');
+    expect(parentPath('./app.ts')).toBe('.');
+    expect(parentPath('.')).toBe('.');
+  });
+
+  it('detects and re-applies CRLF line endings', () => {
+    expect(detectEol('a\nb\n')).toBe('\n');
+    expect(detectEol('a\r\nb\r\n')).toBe('\r\n');
+    expect(normalizeEol('a\r\nb\r\n', '\n')).toBe('a\nb\n');
+    expect(normalizeEol('a\nb\n', '\r\n')).toBe('a\r\nb\r\n');
   });
 
   it('extracts a base name', () => {
@@ -139,5 +153,16 @@ describe('ide-editing helpers', () => {
       { kind: 'add', text: 'new' },
       { kind: 'context', text: ' context' }
     ]);
+  });
+
+  it('carries indentation onto the next line and opens a bracket block', () => {
+    const indented = newlineIndent('  const a = 1;', 14, '  ');
+    expect(indented?.text).toBe('  const a = 1;\n  ');
+    expect(indented?.offset).toBe(17);
+
+    const block = newlineIndent('if (ready) {', 12, '  ');
+    expect(block?.text).toBe('if (ready) {\n  ');
+
+    expect(newlineIndent('plain', 5, '  ')).toBeNull();
   });
 });

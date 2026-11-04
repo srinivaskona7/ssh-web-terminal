@@ -76,7 +76,16 @@ export declare class GatewaySessionTransport {
     private renderedSinceCredit;
     constructor(callbacks: TransportCallbacks);
     get connectionState(): TransportConnectionState;
-    attachSender(sendFn: (bytes: Uint8Array) => void): void;
+    attachSender(sendFn: (bytes: Uint8Array) => void, options?: {
+        markConnected?: boolean;
+        flush?: boolean;
+    }): void;
+    /**
+     * The server acknowledged `connect`/`resume`. Only now is it safe to send the
+     * keystrokes typed while the socket was down: before the ack the gateway has
+     * no PTY channel to write them to.
+     */
+    confirmConnected(): void;
     detachSender(reconnecting?: boolean): void;
     private setState;
     sendPtyInput(channel: number, data: Uint8Array): boolean;
@@ -149,7 +158,16 @@ export declare class LiveGatewaySessionClient {
     get isConnected(): boolean;
     private nextOpId;
     private handleControlMessage;
+    private resolveEndpoint;
     connect(): Promise<ConnectedSessionMetadata>;
+    /**
+     * Re-open the socket and resume the server-side session that was detached
+     * when the previous socket closed. The gateway replays every frame sent
+     * after the last one we processed, so terminal output survives the drop.
+     */
+    reconnect(): Promise<ConnectedSessionMetadata>;
+    canResume(): boolean;
+    private openSocket;
     private rejectAllPending;
     sendPtyText(channel: number, text: string): boolean;
     sendPtyBytes(channel: number, bytes: Uint8Array): boolean;

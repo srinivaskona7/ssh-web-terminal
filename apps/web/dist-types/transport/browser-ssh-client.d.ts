@@ -126,6 +126,13 @@ export declare class BrowserSshRelaySessionClient {
         channel: number;
         data: Uint8Array;
     }>;
+    /**
+     * The relay keeps no server-side session, so this re-establishes a fresh SSH
+     * shell. Frames buffered for the old shell are NOT replayed: they carry the
+     * dead channel ids and would duplicate output against a shell that never
+     * produced it. Callers must treat the returned metadata as a NEW shell.
+     */
+    reconnect(): Promise<ConnectedSessionMetadata>;
     reconnectAndResume(lastSeq?: number): Promise<ConnectedSessionMetadata>;
     private openDirectTcpipChannel;
     /**

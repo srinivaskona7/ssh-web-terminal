@@ -91,6 +91,17 @@ function decodeUtf8Text(bytes: Uint8Array, path: string): string {
   }
 }
 
+/**
+ * One canonical child path for both transports. A listing of "." returns bare
+ * names from both servers; keeping them bare while other code builds "./name"
+ * would open the same file in two tabs that conflict-refuse each other.
+ */
+function joinRemotePath(base: string, name: string): string {
+  if (name.startsWith('/')) return name;
+  const trimmed = base.replace(/\/+$/, '');
+  return trimmed.length === 0 ? `/${name}` : `${trimmed}/${name}`;
+}
+
 
 export function createRemoteSession(
   client: RelayLikeClient,
@@ -100,19 +111,22 @@ export function createRemoteSession(
     command: string,
     execOptions: RemoteExecOptions = {}
   ): Promise<RemoteExecResult> => {
+    // The Go gateway encodes exitCode with `omitempty`, so a successful command
+    // arrives without the field. Missing means zero, not undefined.
+    const exitCodeOf = (code: unknown): number => (typeof code === 'number' ? code : 0);
     if (client.execStream) {
       const result = await client.execStream(command, execOptions);
       return {
         stdout: result.stdout,
         stderr: result.stderr,
-        exitCode: result.exitCode
+        exitCode: exitCodeOf(result.exitCode)
       };
     }
     const result = await client.execCommand(command, execOptions.timeoutMs ?? 120_000);
     return {
       stdout: result.stdout,
       stderr: result.stderr,
-      exitCode: result.exitCode
+      exitCode: exitCodeOf(result.exitCode)
     };
   };
 
@@ -131,7 +145,47 @@ export function createRemoteSession(
 
   if (client.sftpOp) {
     const sftpOp = client.sftpOp.bind(client);
+    // A single write_file frame carries the whole base64 file. The Go gateway
+    // rejects WebSocket frames over 4 MiB and closes the session, so larger
+    // buffers must go through the chunked upload ops both transports expose.
+    const CHUNKED_WRITE_THRESHOLD = 3 * 1024 * 1024;
+    const WRITE_CHUNK_BYTES = 256 * 1024;
+    const chunkedWrite = async (path: string, data: Uint8Array): Promise<void> => {
+      // Drop any stale part file first; upload_init would otherwise resume from
+      // its length and leave that tail in the committed file.
+      await sftpOp({ op: 'remove', path: `${path}.part` }).catch(() => undefined);
+      await sftpOp({ op: 'remove', path: `${path}.webssh-part` }).catch(() => undefined);
+      const init = await sftpOp({ op: 'upload_init', path });
+      if (!init.ok) throw new Error(init.error ?? `Could not start writing ${path}`);
+      let offset = typeof init.offset === 'number' ? init.offset : 0;
+      if (offset !== 0) {
+        throw new Error(
+          `Could not start a clean upload for ${path} (resumed at ${offset} bytes); refusing to write a corrupt file`
+        );
+      }
+      while (offset < data.byteLength) {
+        const chunk = data.subarray(offset, Math.min(offset + WRITE_CHUNK_BYTES, data.byteLength));
+        const result = await sftpOp({
+          op: 'upload_chunk',
+          path,
+          offset,
+          size: chunk.byteLength,
+          dataBase64: toBase64(chunk)
+        });
+        if (!result.ok) throw new Error(result.error ?? `Could not write ${path}`);
+        offset =
+          typeof result.offset === 'number' && result.offset > offset
+            ? result.offset
+            : offset + chunk.byteLength;
+      }
+      const commit = await sftpOp({ op: 'upload_commit', path });
+      if (!commit.ok) throw new Error(commit.error ?? `Could not finish writing ${path}`);
+    };
     session.writeFile = async (path, data) => {
+      if (data.byteLength > CHUNKED_WRITE_THRESHOLD) {
+        await chunkedWrite(path, data);
+        return;
+      }
       const result = await sftpOp({ op: 'write_file', path, dataBase64: toBase64(data) });
       if (!result.ok) throw new Error(result.error ?? `Could not write ${path}`);
     };
@@ -181,7 +235,7 @@ export function createRemoteSession(
         .filter((entry) => typeof entry.name === 'string' && entry.name.length > 0)
         .map((entry) => ({
           name: entry.name as string,
-          path: entry.path ?? `${path.replace(/\/$/, '')}/${entry.name}` ,
+          path: joinRemotePath(path, entry.name as string),
           isDir: Boolean(entry.isDir),
           isSymlink: Boolean(entry.isSymlink),
           size: typeof entry.size === 'number' ? entry.size : 0,

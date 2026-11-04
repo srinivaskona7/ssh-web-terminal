@@ -2,6 +2,7 @@
 
 This file replaces the earlier marketing-style "50 feature" table. Every row below maps to
 code that exists in this repository, and the status states exactly how far it has been proven.
+`CHANGELOG.md` carries the same material as human-readable release history.
 
 ## Status key
 
@@ -37,9 +38,13 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | PTY input/output and per-channel resize | `apps/web/src/terminal/TerminalPane.tsx`, `xterm-adapter.ts` | Verified (unit) | `TerminalPane.test.tsx`; needs a connected PTY channel to prove end to end |
 | WebGL → canvas → DOM renderer fallback | `apps/web/src/terminal/xterm-adapter.ts` | Implemented | context loss reloads a real fallback and reports the mode; not exercised on a GPU-reset host |
 | Independent connections and channel→pane routing | `apps/web/src/session/connection-registry.ts` | Verified (unit) | `connection-registry.test.ts` |
+| Gateway session resume after a dropped socket | `apps/web/src/transport/transport.ts` (`LiveGatewaySessionClient.reconnect`) | Implemented | `reconnect.test.ts` (hello + `resume` with the stored session id/token and the last PTY sequence); needs a deployed gateway to prove the server side |
+| Relay reconnect (new shell, ring-buffer replay) | `apps/web/src/transport/browser-ssh-client.ts` (`reconnect`) | Verified (unit) | `browser-ssh.test.ts`; the relay keeps no server-side session, so the UI says a new shell was started |
+| Live connection health and manual reconnect | `apps/web/src/ui/App.tsx`, `session-health.ts` | Verified | `session-health.test.ts`; rendered status bar and details panel checked in a browser |
 | Tabs, split panes, workspace state | `apps/web/src/terminal/workspace-state.ts` | Verified | `terminal.test.ts` |
 | Tab status is opening/ready/error, never guessed | `apps/web/src/ui/App.tsx` | Verified (unit) | `app.test.tsx` (second tab waits for `channel_opened`) |
 | Local command output lives in an inspector, not the terminal | `apps/web/src/ui/App.tsx`, `app.css` | Verified (unit) | `app.test.tsx` asserts the viewport never contains exec output |
+| Creator card with GitHub / LinkedIn / email links on Welcome | `apps/web/src/ui/ProfileCard.tsx`, `profile.ts` | Verified | `ProfileCard.test.tsx` (renders only links with a valid target; external links carry `rel="noopener noreferrer"`); LinkedIn and email stay hidden until their `href` is filled in |
 | Workspace presets Terminal / Develop / Operate | `apps/web/src/prefs/index.ts`, `apps/web/src/ui/App.tsx` | Implemented | persisted through `PreferencesStore` |
 | Resizable navigation rail (pointer + keyboard) | `apps/web/src/ui/App.tsx`, `railWidthPx` preference | Implemented | width persists across reloads |
 | Command palette, snippets, keybindings | `apps/web/src/ui/productivity.ts` | Verified | `productivity.test.ts` |
@@ -57,13 +62,15 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Transfer queue and bounded concurrency | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
 | StorageGuard memory/local caps | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
 | Remote editor with conflict refusal | `apps/web/src/ui/App.tsx` (`saveEditorBuffer`) | Implemented | compares remote content before writing; needs SFTP |
-| Workspace IDE: browse, create, rename, delete over SFTP | `apps/web/src/ui/LightIde.tsx`, `ide-editing.ts` | Verified | `LightIde.test.tsx`, `ide-editing.test.ts`; both transports — the Go gateway returns 256 KiB read chunks, and `adapters.readFile` pages until the reported size is met (a partial read is refused) |
-| Workspace IDE: UTF-8-only editing | `apps/web/src/session/adapters.ts` (`decodeUtf8Text`) | Implemented | non-UTF-8 files are rejected before editing; needs a real host to call it verified |
+| Workspace IDE: browse, create, rename, delete over SFTP | `apps/web/src/ui/LightIde.tsx`, `ide-editing.ts` | Verified | `LightIde.test.tsx` (create/open/rename/delete), `adapters.test.ts` (chunked paging, canonical child paths); the Go gateway returns 256 KiB read chunks and `adapters.readFile` pages until the reported size is met, refusing a partial read |
+| Workspace IDE: UTF-8-only editing | `apps/web/src/session/adapters.ts` (`decodeUtf8Text`) | Verified | `adapters.test.ts` refuses invalid UTF-8; binary files are refused in `LightIde.tsx` |
 | Workspace IDE: open/edit files with auto-save (1.2 s debounce) | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx` (auto-save on, off, and manual save; pending edits flush on unmount) |
 | Workspace IDE: read-before-write conflict refusal | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx`; explicit "Overwrite with my version"; concurrent writers inside the read→write window are not detected |
-| Workspace IDE: find/replace, go-to-line, comment, duplicate/move line, indent selection | `apps/web/src/ui/ide-editing.ts` | Verified | `ide-editing.test.ts`; Ctrl+D shortcut covered in `LightIde.test.tsx` |
+| Workspace IDE: CRLF preserved, buffers stay LF | `apps/web/src/ui/ide-editing.ts` (`detectEol`), `LightIde.tsx` | Verified | `ide-editing.test.ts`, `LightIde.test.tsx` (a CRLF file saves back with CRLF) |
+| Workspace IDE: large writes use chunked upload ops | `apps/web/src/session/adapters.ts` (`chunkedWrite`) | Verified (unit) | `adapters.test.ts`; keeps each frame under the gateway's 4 MiB limit; needs a real gateway for end-to-end proof |
+| Workspace IDE: find/replace, go-to-line, comment, duplicate/move line, indent selection, Enter auto-indent | `apps/web/src/ui/ide-editing.ts` | Verified | `ide-editing.test.ts`; Ctrl+D shortcut covered in `LightIde.test.tsx` |
 | Workspace IDE: project search, quick open, git status and git diff | `apps/web/src/ui/LightIde.tsx` (`parseGrepMatches`, `parseGitStatus`, `parseDiff`) | Verified | parsing covered in `ide-editing.test.ts`, wiring in `LightIde.test.tsx`; all read-only shell commands, POSIX-quoted |
-| Workspace IDE: command runner with history, pinned presets, run-in-project-root | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx`; commands run in a fresh exec channel, so `cd` and shell variables do not persist between commands; command history is in-memory only (never written to local storage) |
+| Workspace IDE: command runner with history, pinned presets, run-in-project-root | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx` (run, recall, pin, run-in-root); commands run in a fresh exec channel, so `cd` and shell variables do not persist between commands; command history is in-memory only (never written to local storage) |
 | Workspace IDE: saved projects and recent files (browser local storage) | `apps/web/src/ui/LightIde.tsx` | Implemented | no test asserts persistence; storage holds paths only, never file contents |
 | Limits of the Workspace IDE | — | — | no language servers, debugger, extension host, terminals or git UI beyond status/diff; binary and non-UTF-8 files are refused; nothing is installed on the server |
 | Browser upload / download of a file | `apps/web/src/ui/App.tsx` | Implemented | writes via `sftpOp`, capped at 64 MiB in the panel |
@@ -110,7 +117,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 
 ## Test suite reference
 
-- Vitest: `npm test` at the repo root (currently 24 files / 153 tests).
+- Vitest: `npm test` at the repo root (currently 28 files / 179 tests).
 - Go: `npm run test:go` (gateway packages).
 - Playwright: `npm run test:e2e` (cross-browser, full-screen, accessibility).
 - Token invariant: `npm run lint:tokens`.

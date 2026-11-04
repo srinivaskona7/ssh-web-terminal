@@ -26,6 +26,7 @@ import { TerminalPane, type PaneTransport } from '../terminal/TerminalPane';
 import { ChannelOutputBuffer } from '../terminal/channel-output-buffer';
 import { ConnectionRegistry, nextConnectionId } from '../session/connection-registry';
 import { LightIde } from './LightIde';
+import { ProfileCard } from './ProfileCard';
 import {
   BrowserSshRelaySessionClient,
   LiveGatewaySessionClient,
@@ -73,6 +74,15 @@ import {
 } from './ServerModules';
 import { createRemoteSession, type WorkspaceRemoteSession } from '../session/adapters';
 import { CapabilityMatrixPanel } from './CapabilityMatrixPanel';
+import {
+  MAX_RECONNECT_ATTEMPTS,
+  connectionHealthRows,
+  describeReconnectAttempt,
+  formatRtt,
+  formatUptime,
+  reconnectDelayMs,
+  reconnectOutcomeMessage
+} from './session-health';
 import type { ServerCapabilities } from '../discovery/capabilities';
 
 export type ScreenId =
@@ -340,6 +350,30 @@ export function App(): JSX.Element {
 
   // 3. Fresh Default State (Zero Pre-Populated Mock Data)
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
+  const [rttMs, setRttMs] = useState(0);
+  const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  const [reconnectCount, setReconnectCount] = useState(0);
+  const [reconnectNotice, setReconnectNotice] = useState<string | null>(null);
+  const [reconnectMessage, setReconnectMessage] = useState<string | null>(null);
+  const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  // Connections the user closed explicitly must never be resurrected by the
+  // auto-reconnect loop; this is per connection, not global.
+  const suppressedReconnectRef = useRef<Set<string>>(new Set());
+  // Per-tab PTY channel ids captured before a drop. A gateway resume has to
+  // put every pane back on its own channel, not on the session's first one.
+  const channelSnapshotRef = useRef<Map<string, number>>(new Map());
+  const [, setUptimeTick] = useState(0);
+
+  // Uptime only needs a heartbeat render while a session is actually up.
+  useEffect(() => {
+    if (connectionState !== 'connected' || connectedAt === null) return;
+    const timer = setInterval(() => setUptimeTick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [connectionState, connectedAt]);
+
+  useEffect(() => () => clearReconnectTimer(), []);
   const [sessionTabLabel, setSessionTabLabel] = useState<string>('Terminal 1');
   const [connectedUser, setConnectedUser] = useState<string>('');
   const [connectedHost, setConnectedHost] = useState<string>('');
@@ -379,6 +413,9 @@ export function App(): JSX.Element {
   const [hostKeyModal, setHostKeyModal] = useState<'none' | 'tofu' | 'mismatch'>('none');
   const [hosts, setHosts] = useState<HostProfile[]>(() => hostRegistry.list());
   const [cacheRepairStatus, setCacheRepairStatus] = useState<string>('');
+  const [settingsSection, setSettingsSection] = useState<'appearance' | 'keyboard' | 'maintenance'>(
+    'appearance'
+  );
   const [hostSearch, setHostSearch] = useState('');
   const [sshConfigInput, setSshConfigInput] = useState('');
   const [generatedPubKey, setGeneratedPubKey] = useState(
@@ -476,7 +513,7 @@ export function App(): JSX.Element {
       // ignore
     }
   };
-  const [negotiatedCipher, setNegotiatedCipher] = useState<string>('chacha20-poly1305@openssh.com');
+  const [negotiatedCipher, setNegotiatedCipher] = useState<string>('');
   const [negotiatedServerVersion, setNegotiatedServerVersion] = useState<string>('');
   const [pendingHostKeyPrompt, setPendingHostKeyPrompt] = useState<{
     host: string;
@@ -1005,7 +1042,16 @@ export function App(): JSX.Element {
         );
         // Only the last pane of a connection closes its transport; other
         // servers in the workspace are left alone.
-        if (remaining.length === 0) registry.close(connection.id);
+        if (remaining.length === 0) {
+          // Suppress retries BEFORE close(): the close event fires
+          // synchronously and would otherwise schedule a reconnect for a
+          // session the user just ended.
+          suppressedReconnectRef.current.add(connection.id);
+          clearReconnectTimer();
+          setReconnectNotice(null);
+          setReconnectMessage(null);
+          registry.close(connection.id);
+        }
         if (splitPaneChannel !== null && connection.channels.has(splitPaneChannel)) {
           registry.closeChannel(connection.id, splitPaneChannel);
           setSplitPaneChannel(null);
@@ -1013,6 +1059,10 @@ export function App(): JSX.Element {
       }
     }
     if (tabs.length <= 1) {
+      clearReconnectTimer();
+      setReconnectNotice(null);
+      setReconnectMessage(null);
+      setConnectedAt(null);
       setConnectionState('disconnected');
       setSessionTabLabel('Terminal 1');
       setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false, status: 'idle' }]);
@@ -1033,6 +1083,10 @@ export function App(): JSX.Element {
   };
 
   const handleDisconnect = (): void => {
+    clearReconnectTimer();
+    setReconnectNotice(null);
+    setReconnectMessage(null);
+    setConnectedAt(null);
     const activeTab = tabs.find((t) => t.id === activeTabId);
     const connection = connectionRegistryRef.current.get(activeTab?.connectionId);
     if (connection) connectionRegistryRef.current.close(connection.id);
@@ -1073,6 +1127,138 @@ export function App(): JSX.Element {
     } catch {
       setUploadedKeyContent('');
     }
+  };
+
+  type LiveSessionClient = LiveGatewaySessionClient | BrowserSshRelaySessionClient;
+
+  const clearReconnectTimer = (): void => {
+    if (reconnectTimerRef.current !== null) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  };
+
+  const transportOf = (connectionId: string): 'go-gateway' | 'cloudflare-relay' =>
+    connectionRegistryRef.current.get(connectionId)?.transport ?? transportMode;
+
+  const scheduleReconnect = (
+    client: LiveSessionClient,
+    connectionId: string,
+    immediate = false
+  ): void => {
+    if (suppressedReconnectRef.current.has(connectionId)) return;
+    // The socket close and the failed attempt both report here; only one timer
+    // may be pending, or the attempt counter advances twice per retry.
+    if (reconnectTimerRef.current !== null) return;
+    const attempt = reconnectAttemptRef.current + 1;
+    if (attempt > MAX_RECONNECT_ATTEMPTS) {
+      setConnectionState('disconnected');
+      setReconnectNotice(null);
+      setReconnectMessage(
+        `Connection lost — ${MAX_RECONNECT_ATTEMPTS} automatic attempts failed. Press Reconnect to try again.`
+      );
+      return;
+    }
+    reconnectAttemptRef.current = attempt;
+    setConnectionState('reconnecting');
+    setReconnectNotice(describeReconnectAttempt(attempt));
+    reconnectTimerRef.current = setTimeout(
+      () => {
+        reconnectTimerRef.current = null;
+        void performReconnect(client, connectionId);
+      },
+      immediate ? 0 : reconnectDelayMs(attempt)
+    );
+  };
+
+  const performReconnect = async (
+    client: LiveSessionClient,
+    connectionId: string
+  ): Promise<void> => {
+    const transport = transportOf(connectionId);
+    const gatewayResume = transport === 'go-gateway';
+    try {
+      const meta = await client.reconnect();
+      const channel = meta.ptyChannel || 1;
+      if (!gatewayResume) {
+        // The relay keeps nothing server-side: the split pane and the uptime
+        // belong to the socket that died.
+        setSplitPaneChannel(null);
+        setConnectedAt(Date.now());
+      }
+      setTabs((prev) =>
+        prev.map((t) => {
+          if (t.connectionId !== connectionId) return t;
+          // A gateway resume keeps every channel of the session, so existing
+          // pane bindings stay valid. The relay has no session to keep: only
+          // the active pane is restored, and the others say so.
+          if (gatewayResume) {
+            if (t.channelId !== undefined) {
+              return { ...t, connected: true, status: 'ready', errorMessage: undefined };
+            }
+            const saved = channelSnapshotRef.current.get(t.id);
+            if (saved !== undefined) {
+              return { ...t, connected: true, status: 'ready', channelId: saved, errorMessage: undefined };
+            }
+            return t.id === activeTabIdRef.current
+              ? { ...t, connected: true, status: 'ready', channelId: channel, errorMessage: undefined }
+              : {
+                  ...t,
+                  connected: false,
+                  status: 'idle',
+                  errorMessage: 'Session resumed — reopen this pane to attach a new shell.'
+                };
+          }
+          return t.id === activeTabIdRef.current
+            ? { ...t, connected: true, status: 'ready', channelId: channel, errorMessage: undefined }
+            : {
+                ...t,
+                connected: false,
+                status: 'idle',
+                channelId: undefined,
+                errorMessage: 'Relay reconnected — open a new pane for this session.'
+              };
+        })
+      );
+      setConnectionState('connected');
+      setReconnectNotice(null);
+      reconnectAttemptRef.current = 0;
+      if (meta.cipher) setNegotiatedCipher(meta.cipher);
+      if (meta.serverVersion) setNegotiatedServerVersion(meta.serverVersion);
+      setReconnectCount((prev) => {
+        const next = prev + 1;
+        const message = reconnectOutcomeMessage(transport, next);
+        setReconnectMessage(message);
+        writeToXterm(`${String.fromCharCode(13, 10)}[webssh] ${message}${String.fromCharCode(13, 10)}`);
+        return next;
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/RESUME_FAILED|no detached session/i.test(message)) {
+        // Retrying cannot help: this gateway closes the SSH session with the
+        // socket. Say that plainly instead of looping.
+        reconnectAttemptRef.current = 0;
+        clearReconnectTimer();
+        setConnectionState('disconnected');
+        setReconnectNotice(null);
+        setReconnectMessage(
+          'This gateway does not keep sessions after a drop — start a new connection to continue.'
+        );
+        return;
+      }
+      setReconnectMessage(`Reconnect attempt failed: ${message}`);
+      scheduleReconnect(client, connectionId);
+    }
+  };
+
+  const handleReconnectNow = (): void => {
+    const client = liveSessionRef.current;
+    const activeConnectionId = tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId;
+    if (!client || !activeConnectionId) return;
+    suppressedReconnectRef.current.delete(activeConnectionId);
+    reconnectAttemptRef.current = 0;
+    clearReconnectTimer();
+    scheduleReconnect(client, activeConnectionId, true);
   };
 
   const handleConnectSubmit = (e?: Event): void => {
@@ -1284,17 +1470,43 @@ export function App(): JSX.Element {
             )
           );
         },
-        onStateChange: (st: string) => {
-          if (st === 'disconnected') {
-            setTabs((prev) =>
-              prev.map((t) =>
-                t.connectionId === connectionId
-                  ? { ...t, connected: false, status: 'idle', channelId: undefined }
-                  : t
-              )
-            );
-            if (tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId === connectionId) {
-              setConnectionState('disconnected');
+        onStateChange: (st: 'connected' | 'reconnecting' | 'disconnected', rtt: number) => {
+          setRttMs(rtt);
+          if (st === 'connected') {
+            return;
+          }
+          const isActiveTab =
+            tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId === connectionId;
+          // A gateway resume keeps the session's channels, so a pending
+          // reconnect must not drop the per-pane bindings. Only a real
+          // disconnect invalidates them — and it records them first.
+          if (st !== 'reconnecting') {
+            for (const t of tabsRef.current) {
+              if (t.connectionId === connectionId && t.channelId !== undefined) {
+                channelSnapshotRef.current.set(t.id, t.channelId);
+              }
+            }
+          }
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.connectionId === connectionId
+                ? st === 'reconnecting'
+                  ? { ...t, connected: false, status: 'idle' }
+                  : { ...t, connected: false, status: 'idle', channelId: undefined }
+                : t
+            )
+          );
+          if (!isActiveTab) return;
+          if (st === 'reconnecting') {
+            setConnectionState('reconnecting');
+            return;
+          }
+          setConnectionState('disconnected');
+          // Only an unexpected drop earns a retry; an explicit disconnect does not.
+          if (!suppressedReconnectRef.current.has(connectionId)) {
+            const activeClient = liveSessionRef.current;
+            if (activeClient) {
+              scheduleReconnect(activeClient, connectionId);
             }
           }
         }
@@ -1323,8 +1535,8 @@ export function App(): JSX.Element {
         setConnectedUser(userVal);
         setConnectedHost(hostVal);
         setSessionTabLabel(tabTitle);
-        setNegotiatedCipher(meta.cipher || 'chacha20-poly1305@openssh.com');
-        setNegotiatedServerVersion(meta.serverVersion || 'SSH-2.0-OpenSSH');
+        setNegotiatedCipher(meta.cipher || '');
+        setNegotiatedServerVersion(meta.serverVersion || '');
         const initialChannel = meta.ptyChannel || 1;
         connectionRegistryRef.current.add({
           id: connectionId,
@@ -1370,6 +1582,13 @@ export function App(): JSX.Element {
           );
         }
         setConnectionState('connected');
+        setConnectedAt(Date.now());
+        setRttMs(0);
+        setReconnectCount(0);
+        setReconnectNotice(null);
+        setReconnectMessage(null);
+        reconnectAttemptRef.current = 0;
+        suppressedReconnectRef.current.delete(connectionId);
         setConnectModalOpen(false);
         setActiveScreen('workspace');
         const workspaceSession = createRemoteSession(client, {
@@ -1907,7 +2126,7 @@ export function App(): JSX.Element {
     });
     reg.register({
       id: 'nav.files',
-      title: 'Open Dual-Pane SFTP File Browser',
+      title: 'Open SFTP File Browser',
       category: 'Files',
       run: () => {
         setActiveScreen('files');
@@ -2272,18 +2491,6 @@ export function App(): JSX.Element {
             </nav>
           </div>
 
-          <div className="webssh-window-title" data-testid="macos-window-title">
-            <Icon name="folder" />
-            <span>
-              terminal — {activeSessionTitle} — {cols}x{rows}
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-            <Badge tone={connectionState === 'connected' ? 'success' : 'neutral'}>
-              {connectionState === 'connected' ? 'SSH Active' : 'Local Shell'}
-            </Badge>
-          </div>
         </div>
       ) : null}
 
@@ -2360,10 +2567,11 @@ export function App(): JSX.Element {
           >
             <Button
               variant={showCommandInspector ? 'primary' : 'ghost'}
+              ariaLabel={showCommandInspector ? 'Hide command inspector' : 'Show command inspector'}
               onClick={() => setShowCommandInspector((v) => !v)}
               testId="toggle-command-inspector"
             >
-              {showCommandInspector ? 'Hide Inspector' : 'Inspector'}
+              <Icon name="terminal" />
             </Button>
             <select
               className="ui-select"
@@ -2421,11 +2629,12 @@ export function App(): JSX.Element {
               type="button"
               className="webssh-studio-stop-btn"
               onClick={handleDisconnect}
+              disabled={connectionState !== 'connected'}
               data-testid={connectionState === 'connected' ? 'disconnect-btn' : 'stop-session-btn'}
               title="Stop Session / Disconnect"
             >
               <span className="webssh-studio-stop-square" data-testid="stop-red-square" aria-hidden="true" />
-              <span>{connectionState === 'connected' ? 'Stop Session (Disconnect)' : 'Stop Session'}</span>
+              <span>{connectionState === 'connected' ? 'Stop' : 'Disconnect'}</span>
             </button>
 
             <Button
@@ -2444,11 +2653,21 @@ export function App(): JSX.Element {
                 {redactionMode ? 'Redaction: ON' : 'Redact Secrets'}
               </Button>
             ) : null}
-            <Button variant="ghost" onClick={() => setPaletteOpen(true)} testId="open-palette-btn">
-              <Icon name="search" /> Command Palette (Cmd+K)
+            <Button
+              variant="ghost"
+              ariaLabel="Command palette (Cmd+K)"
+              onClick={() => setPaletteOpen(true)}
+              testId="open-palette-btn"
+            >
+              <Icon name="search" />
             </Button>
-            <Button variant="ghost" onClick={() => setZenMode((z) => !z)} testId="toggle-zen-btn">
-              Zen
+            <Button
+              variant="ghost"
+              ariaLabel="Toggle Zen mode"
+              onClick={() => setZenMode((z) => !z)}
+              testId="toggle-zen-btn"
+            >
+              <Icon name="minimize" />
             </Button>
 
             {/* Fullscreen Corner-Shaped Control */}
@@ -2461,7 +2680,7 @@ export function App(): JSX.Element {
               data-testid="toggle-fullscreen-btn"
             >
               <Icon name="maximize" />
-              <span>Full Screen</span>
+              <span className="webssh-label-collapsible">Full Screen</span>
             </button>
 
             {/* Pop-Out Terminal Control (Square with upper-right arrow) */}
@@ -2477,10 +2696,12 @@ export function App(): JSX.Element {
               }}
             >
               <span aria-hidden="true">↗</span>
-              <span>Pop-out</span>
+              <span className="webssh-label-collapsible">Pop-out</span>
             </button>
 
-            {/* More Menu (Three Horizontal Gray Dots ⋯) */}
+          </div>
+
+          {/* More Menu (Three Horizontal Gray Dots ⋯) */}
             <div className="webssh-menu-group" onClick={(e) => e.stopPropagation()}>
               <button
                 type="button"
@@ -2557,7 +2778,6 @@ export function App(): JSX.Element {
                   </button>
                 </div>
               ) : null}
-            </div>
           </div>
         </header>
       ) : null}
@@ -2595,164 +2815,183 @@ export function App(): JSX.Element {
             aria-label="Workspace navigation"
             style={{ width: `${railWidth}px` }}
           >
-            <Button
-              variant={activeScreen === 'welcome' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('welcome')}
-              testId="nav-welcome"
-            >
-              Welcome
-            </Button>
-            <div className="webssh-rail-presets" role="group" aria-label="Workspace preset">
-              {(['terminal', 'develop', 'operate'] as const).map((preset) => (
-                <Button
-                  key={preset}
-                  variant={workspacePreset === preset ? 'primary' : 'ghost'}
-                  onClick={() => applyPreset(preset)}
-                  testId={`preset-${preset}`}
-                >
-                  {preset[0]!.toUpperCase() + preset.slice(1)}
-                </Button>
-              ))}
-            </div>
-            <Button
-              variant={activeScreen === 'workspace' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('workspace')}
-              testId="nav-workspace"
-            >
-              <Icon name="terminal" /> Terminal
-            </Button>
-            <Button
-              variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('overview')}
-              testId="nav-overview"
-            >
-              <Icon name="server" /> Servers
-            </Button>
-            <Button
-              variant={activeScreen === 'files' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('files')}
-              testId="nav-files"
-            >
-              <Icon name="folder" /> Files
-            </Button>
-            <Button
-              variant={activeScreen === 'software' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('software')}
-              testId="nav-software"
-            >
-              Software
-            </Button>
-            <Button
-              variant={activeScreen === 'containers' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('containers')}
-              testId="nav-containers"
-            >
-              Containers
-            </Button>
-            <Button
-              variant={activeScreen === 'kubernetes' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('kubernetes')}
-              testId="nav-kubernetes"
-            >
-              Kubernetes
-            </Button>
-            <Button
-              variant={activeScreen === 'automations' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('automations')}
-              testId="nav-automations"
-            >
-              Automations
-            </Button>
-            <Button
-              variant={activeScreen === 'activity' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('activity')}
-              testId="nav-activity"
-            >
-              Activity
-            </Button>
-            <Button
-              variant={activeScreen === 'deployments' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('deployments')}
-              testId="nav-deployments"
-            >
-              Deployments
-            </Button>
-            <Button
-              variant={activeScreen === 'settings' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('settings')}
-              testId="nav-settings"
-            >
-              <Icon name="settings" /> Settings
-            </Button>
-            <Button
-              variant={ideMode ? 'primary' : 'default'}
-              onClick={() => {
-                setIdeMode((prev) => {
-                  const next = !prev;
-                  if (next && activeScreen === 'welcome') {
-                    setActiveScreen('features');
-                  }
-                  return next;
-                });
-              }}
-              testId="enable-ide-mode-btn"
-            >
-              {ideMode ? 'IDE Mode: ON' : 'Open IDE'}
-            </Button>
+            <div className="webssh-rail-scroll">
+              <Button
+                variant={activeScreen === 'welcome' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('welcome')}
+                testId="nav-welcome"
+              >
+                <Icon name="home" /> Home
+              </Button>
+              <div className="webssh-rail-presets-group">
+                <span className="webssh-rail-group-title">Workspace</span>
+                <div className="webssh-rail-presets" role="group" aria-label="Workspace preset">
+                  {(['terminal', 'develop', 'operate'] as const).map((preset) => (
+                    <Button
+                      key={preset}
+                      variant={workspacePreset === preset ? 'default' : 'ghost'}
+                      ariaPressed={workspacePreset === preset}
+                      onClick={() => applyPreset(preset)}
+                      testId={`preset-${preset}`}
+                    >
+                      {preset[0]!.toUpperCase() + preset.slice(1)}
+                    </Button>
+                  ))}
+                </div>
+              </div>
 
-            {ideMode ? (
-              <div data-testid="sidebar-nav" style={{ display: 'contents' }}>
+              <div className="webssh-rail-group" role="group" aria-label="Sessions">
+                <span className="webssh-rail-group-title">Sessions</span>
                 <Button
-                  variant={activeScreen === 'features' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('features')}
-                  testId="nav-features"
+                  variant={activeScreen === 'workspace' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('workspace')}
+                  testId="nav-workspace"
                 >
-                  Features
+                  <Icon name="terminal" /> Terminal
                 </Button>
                 <Button
-                  variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('tunnels')}
-                  testId="nav-tunnels"
+                  variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('overview')}
+                  testId="nav-overview"
                 >
-                  Port Tunnels
+                  <Icon name="server" /> Servers
                 </Button>
                 <Button
-                  variant={activeScreen === 'vault' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('vault')}
-                  testId="nav-vault"
+                  variant={activeScreen === 'files' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('files')}
+                  testId="nav-files"
                 >
-                  <Icon name="key" /> Key Vault
+                  <Icon name="folder" /> Files
                 </Button>
                 <Button
-                  variant={activeScreen === 'hosts' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('hosts')}
-                  testId="nav-hosts"
+                  variant={activeScreen === 'activity' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('activity')}
+                  testId="nav-activity"
                 >
-                  <Icon name="server" /> Hosts
-                </Button>
-                <Button
-                  variant={activeScreen === 'editor' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('editor')}
-                  testId="nav-editor"
-                >
-                  Editor
-                </Button>
-                <Button
-                  variant={activeScreen === 'ide' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('ide')}
-                  testId="nav-ide"
-                >
-                  Workspace IDE
-                </Button>
-                <Button
-                  variant={activeScreen === 'snippets' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('snippets')}
-                  testId="nav-snippets"
-                >
-                  Snippets & Replay
+                  Activity
                 </Button>
               </div>
-            ) : null}
+
+              <div className="webssh-rail-group" role="group" aria-label="Operations">
+                <span className="webssh-rail-group-title">Operations</span>
+                <Button
+                  variant={activeScreen === 'software' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('software')}
+                  testId="nav-software"
+                >
+                  Software
+                </Button>
+                <Button
+                  variant={activeScreen === 'containers' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('containers')}
+                  testId="nav-containers"
+                >
+                  Containers
+                </Button>
+                <Button
+                  variant={activeScreen === 'kubernetes' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('kubernetes')}
+                  testId="nav-kubernetes"
+                >
+                  Kubernetes
+                </Button>
+                <Button
+                  variant={activeScreen === 'automations' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('automations')}
+                  testId="nav-automations"
+                >
+                  Automations
+                </Button>
+                <Button
+                  variant={activeScreen === 'deployments' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('deployments')}
+                  testId="nav-deployments"
+                >
+                  Deployments
+                </Button>
+              </div>
+
+              {ideMode ? (
+                <div className="webssh-rail-group" role="group" aria-label="Workspace tools" data-testid="sidebar-nav">
+                  <span className="webssh-rail-group-title">Workspace tools</span>
+                  <Button
+                    variant={activeScreen === 'features' ? 'primary' : 'ghost'}
+                    onClick={() => setActiveScreen('features')}
+                    testId="nav-features"
+                  >
+                    Features
+                  </Button>
+                  <Button
+                    variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}
+                    onClick={() => setActiveScreen('tunnels')}
+                    testId="nav-tunnels"
+                  >
+                    Port Tunnels
+                  </Button>
+                  <Button
+                    variant={activeScreen === 'vault' ? 'primary' : 'ghost'}
+                    onClick={() => setActiveScreen('vault')}
+                    testId="nav-vault"
+                  >
+                    <Icon name="key" /> Key Vault
+                  </Button>
+                  <Button
+                    variant={activeScreen === 'hosts' ? 'primary' : 'ghost'}
+                    onClick={() => setActiveScreen('hosts')}
+                    testId="nav-hosts"
+                  >
+                    <Icon name="server" /> Hosts
+                  </Button>
+                  <Button
+                    variant={activeScreen === 'editor' ? 'primary' : 'ghost'}
+                    onClick={() => setActiveScreen('editor')}
+                    testId="nav-editor"
+                  >
+                    Editor
+                  </Button>
+                  <Button
+                    variant={activeScreen === 'ide' ? 'primary' : 'ghost'}
+                    onClick={() => setActiveScreen('ide')}
+                    testId="nav-ide"
+                  >
+                    Workspace IDE
+                  </Button>
+                  <Button
+                    variant={activeScreen === 'snippets' ? 'primary' : 'ghost'}
+                    onClick={() => setActiveScreen('snippets')}
+                    testId="nav-snippets"
+                  >
+                    Snippets &amp; Replay
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="webssh-rail-footer">
+              <Button
+                variant={ideMode ? 'primary' : 'default'}
+                ariaPressed={ideMode}
+                onClick={() => {
+                  setIdeMode((prev) => {
+                    const next = !prev;
+                    if (next && activeScreen === 'welcome') {
+                      setActiveScreen('features');
+                    }
+                    return next;
+                  });
+                }}
+                testId="enable-ide-mode-btn"
+              >
+                {ideMode ? 'IDE mode on' : 'Open IDE'}
+              </Button>
+              <Button
+                variant={activeScreen === 'settings' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('settings')}
+                testId="nav-settings"
+              >
+                <Icon name="settings" /> Settings
+              </Button>
+            </div>
           </nav>
           <div
             className="webssh-rail-resizer"
@@ -2904,15 +3143,13 @@ export function App(): JSX.Element {
                         >
                           <p>No server connected.</p>
                           <p>Enter a host, user and port, then press Connect.</p>
-                        </div>
-                      ) : null}
-                      {rendererNotice ? (
-                        <div
-                          role="status"
-                          data-testid="terminal-renderer-notice"
-                          style={{ position: 'absolute', right: 'var(--space-2)', bottom: 'var(--space-2)' }}
-                        >
-                          Renderer: {rendererNotice}
+                          <Button
+                            variant="primary"
+                            onClick={() => setConnectModalOpen(true)}
+                            testId="empty-state-connect-btn"
+                          >
+                            Connect
+                          </Button>
                         </div>
                       ) : null}
                     </div>
@@ -3182,14 +3419,19 @@ export function App(): JSX.Element {
           ) : null}
 
           {activeScreen === 'welcome' ? (
-            <div className="webssh-panel-content" data-testid="screen-welcome">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                <div>
+            <div className="webssh-panel-content webssh-welcome" data-testid="screen-welcome">
+              <div className="webssh-aurora" aria-hidden="true" />
+              <div className="webssh-welcome-hero">
+                <div className="webssh-welcome-copy">
+                  <span className="webssh-welcome-eyebrow">Browser SSH workspace</span>
                   <h1>Welcome to WebSSH Studio</h1>
                   <p style={{ color: 'var(--color-fg-secondary)' }}>
                     Clean, minimal SSH workspace — connect with Username & Password or upload a Private Key (<code>chmod 0400</code>).
                   </p>
                 </div>
+                <ProfileCard />
+              </div>
+              <div className="webssh-welcome-actions">
                 <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                   <Button
                     variant="default"
@@ -3731,7 +3973,7 @@ export function App(): JSX.Element {
           {activeScreen === 'files' ? (
             <div className="webssh-panel-content" data-testid="screen-files">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                <h1>Dual-Pane SFTP File Manager</h1>
+                <h1>SFTP File Browser</h1>
                 <Badge tone="neutral" testId="storage-quota-badge">
                   Storage Guard: {quotaSnap.percentUsed}% of 256 MiB cap (256 KiB chunks, SHA-256 verified)
                 </Badge>
@@ -4046,7 +4288,7 @@ export function App(): JSX.Element {
                 </Card>
               ) : null}
               <textarea
-                className="ui-input"
+                className="ui-input webssh-editor-textarea"
                 rows={10}
                 aria-label="Remote file content"
                 data-testid="remote-editor-textarea"
@@ -4150,7 +4392,30 @@ export function App(): JSX.Element {
 
           {activeScreen === 'settings' ? (
             <div className="webssh-panel-content" data-testid="screen-settings">
-              <h1>Preferences, Theme Gallery & Keybindings</h1>
+              <h1>Settings</h1>
+              <p className="ws-mod-muted">
+                Appearance, shortcuts and maintenance. Connection and terminal behaviour live in
+                their own screens.
+              </p>
+              <div className="ws-mod-filters" role="group" aria-label="Settings sections">
+                {([
+                  ['appearance', 'Appearance'],
+                  ['keyboard', 'Keyboard'],
+                  ['maintenance', 'Maintenance']
+                ] as const).map(([id, label]) => (
+                  <Button
+                    key={id}
+                    variant={settingsSection === id ? 'primary' : 'default'}
+                    ariaPressed={settingsSection === id}
+                    testId={`settings-tab-${id}`}
+                    onClick={() => setSettingsSection(id)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              {settingsSection === 'appearance' ? (
+                <>
               <Card>
                 <h2>Theme Selector</h2>
                 <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
@@ -4201,6 +4466,9 @@ export function App(): JSX.Element {
                   </Button>
                 </div>
               </Card>
+                </>
+              ) : null}
+              {settingsSection === 'keyboard' ? (
               <Card>
                 <h2>Keybindings</h2>
                 <ul>
@@ -4211,6 +4479,8 @@ export function App(): JSX.Element {
                   ))}
                 </ul>
               </Card>
+              ) : null}
+              {settingsSection === 'maintenance' ? (
               <Card testId="settings-asset-cache-card">
                 <h2>Application Asset Cache Recovery</h2>
                 <p>
@@ -4237,6 +4507,7 @@ export function App(): JSX.Element {
                   ) : null}
                 </div>
               </Card>
+              ) : null}
             </div>
           ) : null}
 
@@ -4252,15 +4523,124 @@ export function App(): JSX.Element {
         </main>
       </div>
 
+      {reconnectNotice || reconnectMessage ? (
+        <div
+          className={`webssh-conn-banner${connectionState === 'connected' ? ' webssh-conn-banner--info' : ''}`}
+          role="status"
+          data-testid="reconnect-banner"
+        >
+          <span className="webssh-conn-banner-text">{reconnectNotice ?? reconnectMessage}</span>
+          {connectionState === 'connected' ? (
+            <Button variant="ghost" onClick={() => setReconnectMessage(null)} testId="dismiss-reconnect-btn">
+              Dismiss
+            </Button>
+          ) : (
+            <Button variant="default" onClick={handleReconnectNow} testId="reconnect-now-btn">
+              Reconnect now
+            </Button>
+          )}
+        </div>
+      ) : null}
+
       {!isFullscreen && !zenMode ? (
         <footer className="webssh-statusbar" role="contentinfo" data-testid="status-bar">
-          <span>
-            {connectionState === 'connected'
-              ? `Connected: ${sessionTabLabel} · Cipher: ${negotiatedCipher}${negotiatedServerVersion ? ` · ${negotiatedServerVersion}` : ''}`
-              : 'Status: Disconnected · Ready for SSH connection'}
+          <span className="webssh-statusbar-health">
+            <button
+              type="button"
+              className="webssh-statusbar-trigger"
+              onClick={() => setConnectionPanelOpen((open) => !open)}
+              aria-expanded={connectionPanelOpen}
+              aria-controls="connection-details-panel"
+              data-testid="connection-status-btn"
+            >
+              <span className={`webssh-status-dot ${statusDotClass}`.trim()} aria-hidden="true" />
+              <span>
+                {connectionState === 'connected'
+                  ? `Connected · ${sessionTabLabel}`
+                  : connectionState === 'reconnecting'
+                    ? 'Reconnecting…'
+                    : 'Disconnected'}
+              </span>
+            </button>
+            {connectionState === 'connected' ? (
+              <span className="webssh-statusbar-metrics">
+                <span>{formatRtt(rttMs)}</span>
+                <span aria-hidden="true">·</span>
+                <span>{formatUptime(connectedAt !== null ? Date.now() - connectedAt : 0)}</span>
+              </span>
+            ) : null}
+            {connectionPanelOpen ? (
+              <div
+                className="webssh-conn-panel"
+                id="connection-details-panel"
+                role="dialog"
+                aria-label="Connection details"
+                data-testid="connection-details-panel"
+              >
+                <div className="webssh-conn-panel-head">
+                  <strong>Connection details</strong>
+                  <Button
+                    variant="ghost"
+                    ariaLabel="Close connection details"
+                    onClick={() => setConnectionPanelOpen(false)}
+                  >
+                    ×
+                  </Button>
+                </div>
+                <dl className="webssh-conn-list">
+                  {connectionHealthRows({
+                    transportMode,
+                    state:
+                      connectionState === 'resumed'
+                        ? 'connected'
+                        : connectionState === 'offline'
+                          ? 'disconnected'
+                          : connectionState,
+                    target: connectedHost ? `${connectedUser}@${connectedHost}` : '',
+                    rttMs,
+                    uptimeMs:
+                      connectedAt !== null && connectionState === 'connected'
+                        ? Date.now() - connectedAt
+                        : null,
+                    reconnects: reconnectCount,
+                    cipher: connectionState === 'connected' ? negotiatedCipher : '',
+                    serverVersion: connectionState === 'connected' ? negotiatedServerVersion : ''
+                  }).map((row) => (
+                    <div className="webssh-conn-row" key={row.label}>
+                      <dt>{row.label}</dt>
+                      <dd className={`webssh-conn-tone--${row.tone}`}>{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ) : null}
           </span>
-          <span>
-            Remote Signer: Argon2id Ed25519 · {cols}x{rows} · Font: {fontSize}px
+          <span className="webssh-statusbar-meta">
+            <span>{cols}×{rows}</span>
+            <span aria-hidden="true">·</span>
+            <span>{fontSize}px</span>
+            <span aria-hidden="true">·</span>
+            <span>{transportMode === 'go-gateway' ? 'Gateway' : 'Relay'}</span>
+            {connectionState === 'connected' && negotiatedServerVersion ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{negotiatedServerVersion}</span>
+              </>
+            ) : null}
+            {rendererNotice ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span data-testid="terminal-renderer-notice" role="status">
+                  {rendererNotice}
+                </span>
+              </>
+            ) : null}
+            {ideMode ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>IDE</span>
+              </>
+            ) : null}
           </span>
         </footer>
       ) : null}

@@ -471,7 +471,7 @@
 .webssh-terminal-viewport {
   flex: 1;
   min-height: 0;
-  padding: var(--space-5);
+  padding: var(--space-2);
   background-color: var(--studio-terminal-bg);
   color: var(--studio-terminal-fg);
   border-radius: var(--radius-panel);
@@ -600,6 +600,128 @@
   color: var(--color-fg-secondary);
   font-size: var(--font-size-xs);
   gap: var(--space-3);
+}
+
+.webssh-statusbar-health {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.webssh-statusbar-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.webssh-statusbar-trigger:hover {
+  background-color: var(--color-bg-elevated);
+}
+
+.webssh-statusbar-trigger:focus-visible {
+  outline: var(--border-focus-ring);
+  outline-offset: var(--space-1);
+}
+
+.webssh-statusbar-metrics {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.webssh-conn-panel {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 60;
+  min-width: 20rem;
+  max-width: calc(100vw - var(--space-6));
+  padding: var(--space-3);
+  background-color: var(--color-bg-elevated);
+  border: var(--border-hairline);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--elevation-2);
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-sm);
+}
+
+.webssh-conn-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.webssh-conn-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-0);
+}
+
+.webssh-conn-row {
+  display: contents;
+}
+
+.webssh-conn-list dt {
+  color: var(--color-fg-muted);
+}
+
+.webssh-conn-list dd {
+  margin: var(--space-0);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.webssh-conn-tone--good {
+  color: var(--color-status-success);
+}
+
+.webssh-conn-tone--fair {
+  color: var(--color-status-warning);
+}
+
+.webssh-conn-tone--poor {
+  color: var(--color-status-danger);
+}
+
+.webssh-conn-tone--unknown {
+  color: var(--color-fg-secondary);
+}
+
+.webssh-conn-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background-color: var(--color-bg-elevated);
+  border-top: var(--border-hairline);
+  border-left: var(--space-1) solid var(--color-status-warning);
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-sm);
+}
+
+.webssh-conn-banner--info {
+  border-left-color: var(--color-status-success);
+}
+
+.webssh-conn-banner-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .webssh-fullscreen-hover-zone {
@@ -1012,11 +1134,34 @@
 }
 
 .webssh-rail-presets {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-1);
   padding: var(--space-1) 0;
   border-bottom: var(--border-hairline);
   margin-bottom: var(--space-1);
+}
+
+.webssh-rail-presets-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.webssh-rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: var(--border-hairline);
+}
+
+.webssh-rail-group-title {
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--font-letter-spacing-tight);
+  padding: 0 var(--space-1);
+  text-transform: uppercase;
 }
 
 .webssh-rail-resizer {
@@ -1092,4 +1237,407 @@
   flex-direction: column;
   gap: var(--space-1);
   margin-bottom: var(--space-1);
+}
+
+/* ---- Shell density: one header row, one footer row, rail footer pinned ---- */
+/* The session toolbar wraps into a second row once the control count grows.
+   Keep it on one row and let it scroll horizontally instead. */
+.webssh-topbar.webssh-studio-toolbar {
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  /* Never clip: the ⋯ dropdown escapes here. */
+  overflow: visible;
+}
+
+.webssh-studio-tabs {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.webssh-studio-controls {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: var(--space-1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.webssh-studio-controls::-webkit-scrollbar {
+  display: none;
+}
+
+.webssh-studio-controls .ui-btn {
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.webssh-rail {
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+.webssh-rail-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.webssh-rail-footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: var(--border-hairline);
+}
+
+/* The special-keys row is a touch affordance; on a desktop pointer it is
+   permanently visible chrome that eats terminal height. */
+@media (min-width: 821px) and (pointer: fine) {
+  .webssh-special-keys {
+    display: none;
+  }
+}
+
+.webssh-statusbar {
+  flex-wrap: nowrap;
+  min-height: 0;
+}
+
+.webssh-statusbar-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-fg-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (max-width: 1599px) {
+  .webssh-label-collapsible {
+    display: none;
+  }
+}
+
+/* ---- Workspace IDE: the editor owns the remaining height ---- */
+.ws-mod-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ws-mod-content > .ws-mod-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.ide-editor {
+  flex: 1 1 auto;
+  min-height: 320px;
+  line-height: var(--font-line-height-editor);
+  tab-size: 2;
+  resize: vertical;
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+}
+
+/* xterm fills its pane; the scrollbar follows the terminal palette. */
+.webssh-xterm-pane .xterm {
+  height: 100%;
+  padding: 0;
+}
+
+.webssh-xterm-pane .xterm .xterm-viewport {
+  background-color: var(--studio-terminal-bg);
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+.webssh-xterm-pane .xterm .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+
+.webssh-xterm-pane .xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background-color: var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+/* Tight frame around the terminal so the emulator gets the pixels. */
+.webssh-studio-outer {
+  padding: var(--space-2);
+}
+
+.webssh-studio-container {
+  padding: var(--space-1);
+  gap: var(--space-1);
+}
+
+.webssh-rail-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+.webssh-rail-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.webssh-rail-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.webssh-rail-scroll::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+/* The editor must dominate the height; the find/run panel is secondary. */
+.ide-workspace-split {
+  flex: 3 1 0;
+  min-height: 0;
+}
+
+.ide-secondary-split {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 40%;
+}
+
+/* Native scrollbars inherit the UI palette instead of the browser default. */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+/* Presets are a layout switch, not a destination: never read as a second
+   selected nav item. */
+.webssh-rail-presets .ui-btn {
+  padding: var(--space-1) var(--space-1);
+  font-size: var(--font-size-xs);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The remote editor owns its width and reads as code, not prose. */
+.webssh-editor-textarea {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-height: 320px;
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-editor);
+  resize: vertical;
+}
+
+/* ---- Welcome: creator card over an aurora backdrop ---------------------- */
+.webssh-welcome {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.webssh-aurora {
+  position: absolute;
+  inset: calc(-1 * var(--space-6));
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      42% 46% at 22% 18%,
+      color-mix(in oklab, var(--color-accent-primary) 26%, transparent) 0%,
+      transparent 70%
+    ),
+    radial-gradient(
+      38% 42% at 82% 8%,
+      color-mix(in oklab, var(--color-status-warning) 14%, transparent) 0%,
+      transparent 72%
+    ),
+    radial-gradient(
+      46% 50% at 68% 92%,
+      color-mix(in oklab, var(--color-accent-hover) 16%, transparent) 0%,
+      transparent 74%
+    );
+  filter: blur(48px);
+  animation: webssh-aurora-drift 24s ease-in-out infinite alternate;
+}
+
+@keyframes webssh-aurora-drift {
+  from {
+    transform: translate3d(-1%, -1%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2%, 2%, 0) scale(1.08);
+  }
+}
+
+.webssh-welcome-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.webssh-welcome-copy h1 {
+  margin: 0 0 var(--space-1);
+}
+
+.webssh-welcome-eyebrow {
+  display: inline-block;
+  margin-bottom: var(--space-1);
+  color: var(--color-accent-primary);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.webssh-welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.webssh-profile {
+  position: relative;
+  min-width: 264px;
+  max-width: 340px;
+  padding: var(--space-3);
+  border: var(--border-hairline);
+  border-radius: var(--radius-panel);
+  background-color: color-mix(in oklab, var(--color-bg-elevated) 72%, transparent);
+  backdrop-filter: blur(14px) saturate(1.15);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+  box-shadow: var(--elevation-3);
+  transition:
+    transform var(--motion-fast) ease,
+    border-color var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
+}
+
+.webssh-profile:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in oklab, var(--color-accent-primary) 55%, var(--color-border-subtle));
+  box-shadow: var(--elevation-3), 0 0 0 1px color-mix(in oklab, var(--color-accent-primary) 22%, transparent);
+}
+
+.webssh-profile-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.webssh-profile-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--color-accent-primary) 90%, white),
+    color-mix(in oklab, var(--color-accent-hover) 70%, var(--color-status-warning))
+  );
+  color: var(--color-bg-canvas);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.webssh-profile-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.webssh-profile-name {
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.webssh-profile-role {
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-xs);
+}
+
+.webssh-profile-tagline {
+  margin: var(--space-2) 0;
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-ui);
+}
+
+.webssh-profile-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.webssh-profile-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-hairline);
+  border-radius: var(--radius-pill);
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-xs);
+  text-decoration: none;
+  transition:
+    transform var(--motion-fast) ease,
+    background-color var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease;
+}
+
+.webssh-profile-link:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--color-accent-primary) 60%, var(--color-border-subtle));
+  background-color: color-mix(in oklab, var(--color-accent-primary) 14%, transparent);
+  color: var(--color-fg-primary);
+}
+
+.webssh-profile-link:focus-visible {
+  outline: var(--border-focus-ring);
+  outline-offset: var(--space-1);
+}
+
+@media (max-width: 860px) {
+  .webssh-welcome-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .webssh-profile {
+    max-width: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .webssh-aurora {
+    animation: none;
+  }
+
+  .webssh-profile,
+  .webssh-profile-link {
+    transition: none;
+  }
+
+  .webssh-profile:hover,
+  .webssh-profile-link:hover {
+    transform: none;
+  }
 }
