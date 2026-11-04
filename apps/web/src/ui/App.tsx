@@ -23,7 +23,9 @@ import { HostRegistry, type HostProfile } from '../hosts';
 import { PreferencesStore, type CursorShape, type LayoutPreset, type WorkspacePreset } from '../prefs';
 import { XtermPaneAdapter, type TerminalRendererMode } from '../terminal/xterm-adapter';
 import { TerminalPane, type PaneTransport } from '../terminal/TerminalPane';
+import { ChannelOutputBuffer } from '../terminal/channel-output-buffer';
 import { ConnectionRegistry, nextConnectionId } from '../session/connection-registry';
+import { LightIde } from './LightIde';
 import {
   BrowserSshRelaySessionClient,
   LiveGatewaySessionClient,
@@ -82,6 +84,7 @@ export type ScreenId =
   | 'hosts'
   | 'files'
   | 'editor'
+  | 'ide'
   | 'snippets'
   | 'settings'
   | 'overview'
@@ -235,6 +238,9 @@ export function App(): JSX.Element {
   // One adapter per pane; incoming PTY bytes are routed by channel, never to a
   // single shared terminal.
   const paneAdaptersRef = useRef<Map<string, XtermPaneAdapter>>(new Map());
+  // Output that arrives before its pane can render. Without this a PTY's first
+  // banner and prompt are dropped and the terminal looks blank.
+  const channelOutputRef = useRef(new ChannelOutputBuffer());
 
   const turnstileSiteKey = resolveTurnstileSiteKey();
   const prefsStore = useMemo(() => new PreferencesStore(), []);
@@ -593,8 +599,15 @@ export function App(): JSX.Element {
   };
 
   const registerPaneAdapter = (paneId: string, adapter: XtermPaneAdapter | null): void => {
-    if (adapter) paneAdaptersRef.current.set(paneId, adapter);
-    else paneAdaptersRef.current.delete(paneId);
+    if (!adapter) {
+      paneAdaptersRef.current.delete(paneId);
+      return;
+    }
+    paneAdaptersRef.current.set(paneId, adapter);
+    const tab = tabsRef.current.find((t) => t.id === paneId);
+    if (tab?.connectionId && tab.channelId !== undefined) {
+      channelOutputRef.current.drainTo(`${tab.connectionId}:${tab.channelId}`, adapter);
+    }
   };
 
   const handleRendererChange = (_paneId: string, mode: TerminalRendererMode): void => {
@@ -1193,12 +1206,16 @@ export function App(): JSX.Element {
             (splitOwnerRef.current === connectionId && splitChannelRef.current === channel
               ? 'split-2'
               : null);
-          if (!paneId) return;
-          try {
-            paneAdaptersRef.current.get(paneId)?.writeBytes(data);
-          } catch {
-            // A pane disposed mid-write must not break the transport.
+          const adapter = paneId ? paneAdaptersRef.current.get(paneId) : undefined;
+          if (adapter) {
+            try {
+              adapter.writeBytes(data);
+              return;
+            } catch {
+              // A pane disposed mid-write must not break the transport.
+            }
           }
+          channelOutputRef.current.push(`${connectionId}:${channel}`, data);
         },
         onHostKeyPrompt: async (prompt: {
           type: 'hostkey_prompt';
@@ -1676,6 +1693,21 @@ export function App(): JSX.Element {
       updateCurrentInput((prev) => prev + e.key);
     }
   };
+
+  // Flush output that arrived while a pane was still binding its channel.
+  useEffect(() => {
+    for (const tab of tabs) {
+      if (!tab.connectionId || tab.channelId === undefined) continue;
+      const adapter = paneAdaptersRef.current.get(tab.id);
+      if (adapter) {
+        channelOutputRef.current.drainTo(`${tab.connectionId}:${tab.channelId}`, adapter);
+      }
+    }
+    const splitAdapter = paneAdaptersRef.current.get('split-2');
+    if (splitAdapter && splitOwnerRef.current && splitPaneChannel !== null) {
+      channelOutputRef.current.drainTo(`${splitOwnerRef.current}:${splitPaneChannel}`, splitAdapter);
+    }
+  }, [tabs, splitPaneChannel]);
 
   // A split pane is a real second channel on the active connection. It opens
   // only after the server acknowledges it, and it is closed with the pane.
@@ -2706,6 +2738,13 @@ export function App(): JSX.Element {
                   Editor
                 </Button>
                 <Button
+                  variant={activeScreen === 'ide' ? 'primary' : 'ghost'}
+                  onClick={() => setActiveScreen('ide')}
+                  testId="nav-ide"
+                >
+                  Workspace IDE
+                </Button>
+                <Button
                   variant={activeScreen === 'snippets' ? 'primary' : 'ghost'}
                   onClick={() => setActiveScreen('snippets')}
                   testId="nav-snippets"
@@ -2922,6 +2961,12 @@ export function App(): JSX.Element {
             </div>
           ) : null}
 
+          {activeScreen === 'ide' ? (
+            <LightIde
+              session={remoteSession}
+              connectedLabel={connectedHost ? `${connectedUser}@${connectedHost}` : ''}
+            />
+          ) : null}
           {activeScreen === 'overview' ? <OverviewPanel ctx={moduleContext} /> : null}
           {activeScreen === 'software' ? <SoftwarePanel ctx={moduleContext} /> : null}
           {activeScreen === 'containers' ? <ContainersPanel ctx={moduleContext} /> : null}

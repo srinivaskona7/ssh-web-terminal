@@ -57,6 +57,15 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Transfer queue and bounded concurrency | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
 | StorageGuard memory/local caps | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
 | Remote editor with conflict refusal | `apps/web/src/ui/App.tsx` (`saveEditorBuffer`) | Implemented | compares remote content before writing; needs SFTP |
+| Workspace IDE: browse, create, rename, delete over SFTP | `apps/web/src/ui/LightIde.tsx`, `ide-editing.ts` | Verified | `LightIde.test.tsx`, `ide-editing.test.ts`; both transports — the Go gateway returns 256 KiB read chunks, and `adapters.readFile` pages until the reported size is met (a partial read is refused) |
+| Workspace IDE: UTF-8-only editing | `apps/web/src/session/adapters.ts` (`decodeUtf8Text`) | Implemented | non-UTF-8 files are rejected before editing; needs a real host to call it verified |
+| Workspace IDE: open/edit files with auto-save (1.2 s debounce) | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx` (auto-save on, off, and manual save; pending edits flush on unmount) |
+| Workspace IDE: read-before-write conflict refusal | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx`; explicit "Overwrite with my version"; concurrent writers inside the read→write window are not detected |
+| Workspace IDE: find/replace, go-to-line, comment, duplicate/move line, indent selection | `apps/web/src/ui/ide-editing.ts` | Verified | `ide-editing.test.ts`; Ctrl+D shortcut covered in `LightIde.test.tsx` |
+| Workspace IDE: project search, quick open, git status and git diff | `apps/web/src/ui/LightIde.tsx` (`parseGrepMatches`, `parseGitStatus`, `parseDiff`) | Verified | parsing covered in `ide-editing.test.ts`, wiring in `LightIde.test.tsx`; all read-only shell commands, POSIX-quoted |
+| Workspace IDE: command runner with history, pinned presets, run-in-project-root | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx`; commands run in a fresh exec channel, so `cd` and shell variables do not persist between commands; command history is in-memory only (never written to local storage) |
+| Workspace IDE: saved projects and recent files (browser local storage) | `apps/web/src/ui/LightIde.tsx` | Implemented | no test asserts persistence; storage holds paths only, never file contents |
+| Limits of the Workspace IDE | — | — | no language servers, debugger, extension host, terminals or git UI beyond status/diff; binary and non-UTF-8 files are refused; nothing is installed on the server |
 | Browser upload / download of a file | `apps/web/src/ui/App.tsx` | Implemented | writes via `sftpOp`, capped at 64 MiB in the panel |
 | Binary-safe large transfers | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
 
@@ -101,7 +110,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 
 ## Test suite reference
 
-- Vitest: `npm test` at the repo root (currently 18 files / 114 tests).
+- Vitest: `npm test` at the repo root (currently 24 files / 153 tests).
 - Go: `npm run test:go` (gateway packages).
 - Playwright: `npm run test:e2e` (cross-browser, full-screen, accessibility).
 - Token invariant: `npm run lint:tokens`.

@@ -1,0 +1,1 @@
+{"version":3,"file":"LightIde.d.ts","sourceRoot":"","sources":["../../src/ui/LightIde.tsx"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,GAAG,EAAE,MAAM,QAAQ,CAAC;AAElC,OAAO,KAAK,EAAiB,sBAAsB,EAAE,MAAM,qBAAqB,CAAC;AA+DjF;;;;;;;GAOG;AACH,wBAAgB,QAAQ,CAAC,EACvB,OAAO,EACP,cAAc,EACf,EAAE;IACD,OAAO,EAAE,sBAAsB,GAAG,IAAI,CAAC;IACvC,cAAc,EAAE,MAAM,CAAC;CACxB,GAAG,GAAG,CAAC,OAAO,CAonCd"}
