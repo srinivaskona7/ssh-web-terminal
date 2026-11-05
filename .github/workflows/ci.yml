@@ -32,6 +32,9 @@ jobs:
       - name: Lint design token usage (no hardcoded values)
         run: npm run lint:tokens
 
+      - name: Check line endings (LF only)
+        run: npm run lint:eol
+
       - name: Typecheck all workspaces
         run: npm run typecheck
 
