@@ -1,5 +1,25 @@
 import type { JumpHop } from '@webssh/protocol';
 
+export { validateEnvVars, type EnvVarError } from '@webssh/protocol';
+
+/** How a saved jump hop signs in. Absent means it reuses the target's credentials. */
+export type HopAuthMethod = 'password' | 'private_key' | 'remote_signer';
+
+const HOP_AUTH_METHODS: readonly HopAuthMethod[] = ['password', 'private_key', 'remote_signer'];
+
+/**
+ * A saved ProxyJump hop. Like the profile itself it holds no secret: a
+ * password or key hop gets its secret at connect time, and a browser-key hop
+ * names its vault key by fingerprint.
+ */
+export interface HostJumpHop {
+  host: string;
+  port: number;
+  user: string;
+  authMethod?: HopAuthMethod;
+  keyFingerprint?: string;
+}
+
 export interface HostProfile {
   id: string;
   alias: string;
@@ -11,7 +31,13 @@ export interface HostProfile {
   tags: string[];
   favorite: boolean;
   notes?: string;
-  jumpHops: JumpHop[];
+  jumpHops: HostJumpHop[];
+  /**
+   * Environment requested for the shell. The server decides what it takes
+   * (OpenSSH accepts only LANG and LC_* by default), so values are exported
+   * with the profile: keep secrets out of them.
+   */
+  env?: Record<string, string>;
   tmuxAutoAttach?: string;
   lastConnectedAt?: number;
 }
@@ -46,20 +72,26 @@ export class HostRegistry {
     }
   }
 
-  private save(): void {
+  private save(): boolean {
     try {
-      if (typeof localStorage !== 'undefined' && typeof localStorage.setItem === 'function') {
-        localStorage.setItem(this.storageKey, JSON.stringify(Array.from(this.hosts.values())));
+      if (typeof localStorage === 'undefined' || typeof localStorage.setItem !== 'function') {
+        // No storage at all: nothing was persisted, so say so.
+        return false;
       }
+      localStorage.setItem(this.storageKey, JSON.stringify(Array.from(this.hosts.values())));
+      return true;
     } catch {
-      // Ignore unavailable storage
+      // Unavailable or full storage: the caller reports that nothing persisted.
+      return false;
     }
   }
 
   upsert(profile: HostProfile): HostProfile {
-    this.hosts.set(profile.id, profile);
+    // A hop handed over with its connect-time secrets must not carry them into storage.
+    const stored: HostProfile = { ...profile, jumpHops: profile.jumpHops.map(toSavedHop) };
+    this.hosts.set(stored.id, stored);
     this.save();
-    return profile;
+    return stored;
   }
 
   remove(id: string): boolean {
@@ -92,6 +124,47 @@ export class HostRegistry {
       });
   }
 
+  /**
+   * Host profiles contain no secrets — private keys live in the Key Vault and
+   * passwords are never stored — so the export is safe to share.
+   */
+  exportJson(): string {
+    return JSON.stringify({ version: 1, hosts: Array.from(this.hosts.values()) }, null, 2);
+  }
+
+  /** Merge a previously exported file; malformed entries are skipped, not fatal. */
+  importJson(text: string): { imported: HostProfile[]; skipped: number; persisted: boolean } {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error('Not valid JSON');
+    }
+    const rawList = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object' && Array.isArray((parsed as { hosts?: unknown }).hosts)
+        ? ((parsed as { hosts: unknown[] }).hosts)
+        : null;
+    if (!rawList) {
+      throw new Error('Expected an array of hosts or { "hosts": [...] }');
+    }
+    const imported: HostProfile[] = [];
+    let skipped = 0;
+    for (const item of rawList) {
+      const sanitized = sanitizeHostProfile(item);
+      if (!sanitized) {
+        skipped += 1;
+        continue;
+      }
+      this.hosts.set(sanitized.id, sanitized);
+      imported.push(sanitized);
+    }
+    // Report the write result: a full or blocked localStorage would otherwise
+    // let the UI announce a successful import whose hosts vanish on reload.
+    const persisted = imported.length > 0 ? this.save() : true;
+    return { imported, skipped, persisted };
+  }
+
   importSshConfig(configText: string, defaultUser = 'root'): HostProfile[] {
     const imported = parseOpenSshConfig(configText, defaultUser);
     for (const h of imported) {
@@ -108,6 +181,64 @@ interface RawHostBlock {
   user?: string;
   port?: number;
   proxyJump?: string[];
+}
+
+/** Keep only what a profile may hold for a hop: where it is and how it signs in. */
+function toSavedHop(hop: HostJumpHop): HostJumpHop {
+  const saved: HostJumpHop = { host: hop.host, port: hop.port, user: hop.user };
+  if (hop.authMethod && HOP_AUTH_METHODS.includes(hop.authMethod)) saved.authMethod = hop.authMethod;
+  if (typeof hop.keyFingerprint === 'string' && hop.keyFingerprint) saved.keyFingerprint = hop.keyFingerprint;
+  return saved;
+}
+
+function sanitizeEnv(raw: unknown): Record<string, string> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'string') env[name] = value;
+  }
+  return Object.keys(env).length > 0 ? env : undefined;
+}
+
+/** Secrets for one hop, supplied at connect time and never saved. */
+export interface JumpHopSecret {
+  password?: string;
+  privateKeyPem?: string;
+  privateKeyPassphrase?: string;
+  /** authorized_keys line of the vault key a `remote_signer` hop names. */
+  publicKey?: string;
+}
+
+/**
+ * Turn saved hops plus this connect's secrets (by hop position) into the
+ * `connect.jump` entries. A hop with its own auth method must get its own
+ * secret: sending it bare would make it borrow the target's credentials.
+ */
+export function buildConnectJumpHops(
+  hops: HostJumpHop[],
+  secrets: Array<JumpHopSecret | undefined> = []
+): JumpHop[] {
+  return hops.map((hop, index) => {
+    const wire: JumpHop = { host: hop.host, port: hop.port, user: hop.user };
+    if (!hop.authMethod) return wire;
+    const label = `Jump hop ${index + 1} (${hop.user}@${hop.host}:${hop.port})`;
+    const secret = secrets[index] ?? {};
+    wire.authMethod = hop.authMethod;
+    if (hop.authMethod === 'password') {
+      if (!secret.password) throw new Error(`${label} needs its password`);
+      wire.password = secret.password;
+    } else if (hop.authMethod === 'private_key') {
+      if (!secret.privateKeyPem) throw new Error(`${label} needs its private key`);
+      wire.privateKeyPem = secret.privateKeyPem;
+      if (secret.privateKeyPassphrase) wire.privateKeyPassphrase = secret.privateKeyPassphrase;
+    } else {
+      if (!hop.keyFingerprint) throw new Error(`${label} names no vault key fingerprint`);
+      if (!secret.publicKey) throw new Error(`${label} needs the public key of ${hop.keyFingerprint}`);
+      wire.keyFingerprint = hop.keyFingerprint;
+      wire.publicKey = secret.publicKey;
+    }
+    return wire;
+  });
 }
 
 function sanitizeHostProfile(raw: unknown): HostProfile | null {
@@ -129,15 +260,19 @@ function sanitizeHostProfile(raw: unknown): HostProfile | null {
   const tags = Array.isArray(obj.tags)
     ? obj.tags.filter((t): t is string => typeof t === 'string')
     : [];
-  const jumpHops: JumpHop[] = Array.isArray(obj.jumpHops)
+  const jumpHops: HostJumpHop[] = Array.isArray(obj.jumpHops)
     ? obj.jumpHops
         .filter((jh): jh is Record<string, unknown> => typeof jh === 'object' && jh !== null)
         .filter((jh) => typeof jh.host === 'string' && jh.host.length > 0)
-        .map((jh) => ({
-          host: String(jh.host),
-          port: typeof jh.port === 'number' && Number.isFinite(jh.port) ? jh.port : 22,
-          user: typeof jh.user === 'string' && jh.user.length > 0 ? jh.user : 'root'
-        }))
+        .map((jh) =>
+          toSavedHop({
+            host: String(jh.host),
+            port: typeof jh.port === 'number' && Number.isFinite(jh.port) ? jh.port : 22,
+            user: typeof jh.user === 'string' && jh.user.length > 0 ? jh.user : 'root',
+            authMethod: jh.authMethod as HopAuthMethod | undefined,
+            keyFingerprint: jh.keyFingerprint as string | undefined
+          })
+        )
     : [];
 
   return {
@@ -152,12 +287,13 @@ function sanitizeHostProfile(raw: unknown): HostProfile | null {
     favorite: Boolean(obj.favorite),
     notes: typeof obj.notes === 'string' ? obj.notes : undefined,
     jumpHops,
+    env: sanitizeEnv(obj.env),
     tmuxAutoAttach: typeof obj.tmuxAutoAttach === 'string' ? obj.tmuxAutoAttach : undefined,
     lastConnectedAt: typeof obj.lastConnectedAt === 'number' ? obj.lastConnectedAt : undefined
   };
 }
 
-function parseJumpHopSpec(spec: string, byAlias: Map<string, RawHostBlock>, defaultUser: string): JumpHop {
+function parseJumpHopSpec(spec: string, byAlias: Map<string, RawHostBlock>, defaultUser: string): HostJumpHop {
   const existing = byAlias.get(spec);
   if (existing) {
     return {
@@ -241,7 +377,7 @@ export function parseOpenSshConfig(configText: string, defaultUser = 'root'): Ho
   }
 
   return blocks.map((b) => {
-    const jumpHops: JumpHop[] = [];
+    const jumpHops: HostJumpHop[] = [];
     if (b.proxyJump) {
       for (const spec of b.proxyJump) {
         const referenced = byAlias.get(spec);

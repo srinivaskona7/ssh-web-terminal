@@ -15,6 +15,8 @@ export interface RemoteExecOptions {
   onStderr?: (chunk: string) => void;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Keep output for the resolved result (default true); set false for long log follows. */
+  retainOutput?: boolean;
 }
 
 export interface RemoteSession {

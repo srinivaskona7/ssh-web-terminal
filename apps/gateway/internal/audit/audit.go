@@ -10,13 +10,13 @@ import (
 type EventType string
 
 const (
-	EventConnect       EventType = "session.connect"
-	EventDisconnect    EventType = "session.disconnect"
-	EventResume        EventType = "session.resume"
-	EventAuthSuccess   EventType = "ssh.auth_success"
-	EventAuthFailure   EventType = "ssh.auth_failure"
-	EventPolicyDenied  EventType = "policy.denied"
-	EventSftpTransfer  EventType = "sftp.transfer_meta"
+	EventConnect      EventType = "session.connect"
+	EventDisconnect   EventType = "session.disconnect"
+	EventResume       EventType = "session.resume"
+	EventAuthSuccess  EventType = "ssh.auth_success"
+	EventAuthFailure  EventType = "ssh.auth_failure"
+	EventPolicyDenied EventType = "policy.denied"
+	EventSftpTransfer EventType = "sftp.transfer_meta"
 )
 
 // Entry strictly records metadata only — never terminal content, key material, or passwords.
@@ -31,6 +31,21 @@ type Entry struct {
 	KeyFingerprint string    `json:"keyFingerprint,omitempty"`
 	BytesCount     int64     `json:"bytesCount,omitempty"`
 	Reason         string    `json:"reason,omitempty"`
+	// Jumps lists the ProxyJump hops traversed, in dial order. A session that
+	// went through a bastion must be distinguishable from a direct one.
+	Jumps []Hop `json:"jumps,omitempty"`
+	// EnvAccepted and EnvRejected name the environment variables the server
+	// took or refused. Values are never recorded.
+	EnvAccepted []string `json:"envAccepted,omitempty"`
+	EnvRejected []string `json:"envRejected,omitempty"`
+}
+
+// Hop is one ProxyJump host and how the gateway authenticated to it.
+type Hop struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	User       string `json:"user"`
+	AuthMethod string `json:"authMethod,omitempty"`
 }
 
 type Logger struct {

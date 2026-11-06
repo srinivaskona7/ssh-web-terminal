@@ -56,6 +56,19 @@ export class XtermPaneAdapter {
     this.terminal.loadAddon(unicode11Addon);
     this.terminal.unicode.activeVersion = '11';
 
+    // Ctrl/Cmd+F and Ctrl/Cmd+K belong to the app (find bar, command palette).
+    // xterm's keydown handler calls stopPropagation() for Ctrl+letter on
+    // Windows/Linux, so a document listener never sees them and the control
+    // byte is typed into the remote shell instead. Returning false leaves the
+    // event to bubble untouched.
+    this.terminal.attachCustomKeyEventHandler((event) => {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === 'f' || key === 'k') return false;
+      }
+      return true;
+    });
+
     if (options.onData) {
       this.terminal.onData(options.onData);
     }
@@ -136,8 +149,30 @@ export class XtermPaneAdapter {
     this.terminal.write(text);
   }
 
+  /**
+   * The visible buffer as plain text. The WebGL and canvas renderers draw no
+   * text into the DOM, so browser tests (and support diagnostics) read the
+   * emulator buffer rather than the viewport's textContent.
+   */
+  readScreenText(): string {
+    const buffer = this.terminal.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < buffer.length; i += 1) {
+      lines.push(buffer.getLine(i)?.translateToString(true) ?? '');
+    }
+    return lines.join('\n');
+  }
+
   findNext(term: string, regex = false, caseSensitive = false): boolean {
     return this.searchAddon.findNext(term, { regex, caseSensitive });
+  }
+
+  focus(): void {
+    this.terminal.focus();
+  }
+
+  findPrevious(term: string, regex = false, caseSensitive = false): boolean {
+    return this.searchAddon.findPrevious(term, { regex, caseSensitive });
   }
 
   dispose(): void {

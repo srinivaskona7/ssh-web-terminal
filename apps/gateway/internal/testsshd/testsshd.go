@@ -11,9 +11,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -40,6 +43,13 @@ type Server struct {
 	conns          map[net.Conn]struct{}
 	wg             sync.WaitGroup
 	closed         chan struct{}
+
+	// openSessions counts session channels whose handler and command
+	// goroutines are still running; requestLog and signals record what
+	// clients asked for, so tests can assert on the wire behaviour.
+	openSessions atomic.Int64
+	requestLog   [][]string
+	signals      []string
 }
 
 func NewServer(rootDir string, password string, initialKeys []ssh.PublicKey) (*Server, error) {
@@ -92,6 +102,37 @@ func (s *Server) HostKey() ssh.PublicKey {
 
 func (s *Server) RootDir() string {
 	return s.rootDir
+}
+
+// OpenSessions reports session channels that are still being served,
+// including any command still running on one.
+func (s *Server) OpenSessions() int {
+	return int(s.openSessions.Load())
+}
+
+// RequestLog returns, per session channel in open order, the request types
+// the client sent (for example "env", "pty-req", "shell").
+func (s *Server) RequestLog() [][]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([][]string, len(s.requestLog))
+	for i, reqs := range s.requestLog {
+		out[i] = append([]string(nil), reqs...)
+	}
+	return out
+}
+
+// ReceivedSignals returns the signal names delivered by "signal" requests.
+func (s *Server) ReceivedSignals() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.signals...)
+}
+
+func (s *Server) logRequest(idx int, reqType string) {
+	s.mu.Lock()
+	s.requestLog[idx] = append(s.requestLog[idx], reqType)
+	s.mu.Unlock()
 }
 
 func (s *Server) RotateHostKey() error {
@@ -239,7 +280,7 @@ func (s *Server) handleDirectTCPIP(newChan ssh.NewChannel) {
 		_ = newChan.Reject(ssh.Prohibited, "invalid direct-tcpip payload")
 		return
 	}
-	target := fmt.Sprintf("%s:%d", msg.DestAddr, msg.DestPort)
+	target := net.JoinHostPort(msg.DestAddr, strconv.Itoa(int(msg.DestPort)))
 	destConn, err := net.Dial("tcp", target)
 	if err != nil {
 		_ = newChan.Reject(ssh.ConnectionFailed, err.Error())
@@ -267,6 +308,140 @@ type shellState struct {
 	user     string
 	cwd      string // virtual path starting at "/" (mapped to s.rootDir)
 	lastExit int
+	env      map[string]string
+
+	// done closes when the session channel closes; signals carries "signal"
+	// requests. Long-running builtins (sleep, tail -f) stop on either.
+	done     <-chan struct{}
+	signals  <-chan string
+	killedBy string
+	// emit writes output immediately, before the command line finishes.
+	emit func(stdout, stderr string)
+}
+
+// acceptEnv mirrors OpenSSH's stock "AcceptEnv LANG LC_*".
+func acceptEnv(name string) bool {
+	return name == "LANG" || strings.HasPrefix(name, "LC_")
+}
+
+var signalNumbers = map[string]int{"HUP": 1, "INT": 2, "QUIT": 3, "KILL": 9, "USR1": 10, "USR2": 12, "PIPE": 13, "ALRM": 14, "TERM": 15}
+
+// signalName normalises "-TERM", "SIGTERM" and "15" to "TERM".
+func signalName(spec string) string {
+	spec = strings.TrimPrefix(strings.ToUpper(strings.TrimPrefix(spec, "-")), "SIG")
+	if n, err := strconv.Atoi(spec); err == nil {
+		for name, num := range signalNumbers {
+			if num == n {
+				return name
+			}
+		}
+		return ""
+	}
+	if _, ok := signalNumbers[spec]; ok {
+		return spec
+	}
+	return ""
+}
+
+func (st *shellState) kill(sig string) (int, bool) {
+	st.killedBy = sig
+	return 128 + signalNumbers[sig], true
+}
+
+// pause waits for d unless the channel closes or a signal arrives first.
+func (st *shellState) pause(d time.Duration) (int, bool) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return 0, false
+	case <-st.done:
+		return 0, true
+	case sig := <-st.signals:
+		return st.kill(sig)
+	}
+}
+
+func (st *shellState) pendingSignal() string {
+	select {
+	case sig := <-st.signals:
+		return sig
+	default:
+		return ""
+	}
+}
+
+func lastLines(data []byte, n int) string {
+	text := strings.TrimSuffix(string(data), lf)
+	if text == "" || n <= 0 {
+		return ""
+	}
+	lines := strings.Split(text, lf)
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, lf) + lf
+}
+
+// followFile behaves like tail -f (retry=false) or tail -F (retry=true):
+// it prints the last lines, then streams appended bytes until stopped.
+func (s *Server) followFile(st *shellState, target string, retry bool, lines int) (int, bool) {
+	if target == "/dev/null" {
+		for {
+			if code, stopped := st.pause(time.Hour); stopped {
+				return code, true
+			}
+		}
+	}
+	_, hostPath, err := s.resolveHostPath(st.cwd, target)
+	if err != nil {
+		st.emit("", fmt.Sprintf("tail: cannot open '%s' for reading: %v", target, err)+lf)
+		return 1, false
+	}
+	offset := int64(-1) // -1 until the file has been opened
+	missingReported := false
+	for {
+		info, statErr := os.Stat(hostPath)
+		switch {
+		case statErr != nil:
+			if !missingReported {
+				if offset >= 0 {
+					st.emit("", fmt.Sprintf("tail: '%s' has become inaccessible: No such file or directory", target)+lf)
+				} else {
+					st.emit("", fmt.Sprintf("tail: cannot open '%s' for reading: No such file or directory", target)+lf)
+				}
+				if !retry {
+					return 1, false
+				}
+				missingReported = true
+			}
+			offset = -1
+		case offset < 0:
+			data, _ := os.ReadFile(hostPath)
+			if missingReported {
+				st.emit("", fmt.Sprintf("tail: '%s' has appeared;  following new file", target)+lf)
+				st.emit(string(data), "")
+			} else {
+				st.emit(lastLines(data, lines), "")
+			}
+			missingReported = false
+			offset = int64(len(data))
+		case info.Size() != offset:
+			if info.Size() < offset {
+				st.emit("", fmt.Sprintf("tail: %s: file truncated", target)+lf)
+				offset = 0
+			}
+			if f, openErr := os.Open(hostPath); openErr == nil {
+				chunk, _ := io.ReadAll(io.NewSectionReader(f, offset, info.Size()-offset))
+				_ = f.Close()
+				offset += int64(len(chunk))
+				st.emit(string(chunk), "")
+			}
+		}
+		if code, stopped := st.pause(50 * time.Millisecond); stopped {
+			return code, true
+		}
+	}
 }
 
 func (s *Server) resolveHostPath(virtualCwd, target string) (string, string, error) {
@@ -310,6 +485,17 @@ func (s *Server) evalSingleCommand(st *shellState, rawCmd string) (stdout string
 	}
 
 	cmd = strings.ReplaceAll(cmd, "$?", strconv.Itoa(st.lastExit))
+
+	// ">&2" sends the command's stdout to stderr, as in printf 'oops' >&2.
+	toStderr := false
+	if strings.HasSuffix(cmd, ">&2") {
+		toStderr = true
+		cmd = strings.TrimSuffix(cmd, ">&2")
+		if strings.HasSuffix(cmd, " 1") {
+			cmd = strings.TrimSuffix(cmd, "1")
+		}
+		cmd = strings.TrimSpace(cmd)
+	}
 
 	var redirectFile string
 	var appendMode bool
@@ -625,6 +811,117 @@ func (s *Server) evalSingleCommand(st *shellState, rawCmd string) (stdout string
 			"    1 ?        00:00:01 sshd" + lf +
 			"  102 pts/0    00:00:00 bash" + lf)
 
+	case "printenv":
+		if len(args) == 0 {
+			names := make([]string, 0, len(st.env))
+			for name := range st.env {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				outBuf.WriteString(name + "=" + st.env[name] + lf)
+			}
+		} else {
+			for _, name := range args {
+				if v, ok := st.env[name]; ok {
+					outBuf.WriteString(v + lf)
+				} else {
+					code = 1
+				}
+			}
+		}
+
+	case "sleep":
+		secs := 0.0
+		if len(args) > 0 {
+			v, err := strconv.ParseFloat(args[0], 64)
+			if err != nil || v < 0 {
+				errBuf.WriteString(fmt.Sprintf("sleep: invalid time interval '%s'", args[0]) + lf)
+				code = 1
+			}
+			secs = v
+		}
+		if code == 0 {
+			if c, stopped := st.pause(time.Duration(secs * float64(time.Second))); stopped {
+				st.lastExit = c
+				return outBuf.String(), errBuf.String(), c, true
+			}
+		}
+
+	case "kill":
+		// Only the session's own process ($$) exists here; killing it ends
+		// the command with that signal, which the client sees as exit-signal.
+		sig := "TERM"
+		var pids []string
+		for i := 0; i < len(args); i++ {
+			switch a := args[i]; {
+			case a == "-s" && i+1 < len(args):
+				sig = signalName(args[i+1])
+				i++
+			case strings.HasPrefix(a, "-"):
+				sig = signalName(a)
+			default:
+				pids = append(pids, a)
+			}
+		}
+		switch {
+		case sig == "":
+			errBuf.WriteString("kill: invalid signal specification" + lf)
+			code = 1
+		case len(pids) == 0:
+			errBuf.WriteString("kill: usage: kill [-s sigspec | -sigspec] pid" + lf)
+			code = 2
+		default:
+			for _, pid := range pids {
+				if pid == "$$" {
+					c, _ := st.kill(sig)
+					st.lastExit = c
+					return outBuf.String(), errBuf.String(), c, true
+				}
+				errBuf.WriteString(fmt.Sprintf("kill: (%s) - No such process", pid) + lf)
+				code = 1
+			}
+		}
+
+	case "tail":
+		follow, retry, lines := false, false, 10
+		target := ""
+		for i := 0; i < len(args); i++ {
+			switch a := args[i]; {
+			case a == "-f":
+				follow = true
+			case a == "-F":
+				follow, retry = true, true
+			case a == "-n" && i+1 < len(args):
+				if v, err := strconv.Atoi(args[i+1]); err == nil {
+					lines = v
+				}
+				i++
+			case strings.HasPrefix(a, "-"):
+			default:
+				target = a
+			}
+		}
+		switch {
+		case target == "":
+			errBuf.WriteString("tail: reading standard input is not supported" + lf)
+			code = 1
+		case follow:
+			// Output is emitted as it appears; nothing is left to return.
+			c, stopped := s.followFile(st, target, retry, lines)
+			st.lastExit = c
+			return "", "", c, stopped
+		default:
+			_, hostPath, err := s.resolveHostPath(st.cwd, target)
+			data, readErr := os.ReadFile(hostPath)
+			if err != nil || readErr != nil {
+				errBuf.WriteString(fmt.Sprintf("tail: cannot open '%s' for reading: No such file or directory", target) + lf)
+				code = 1
+			} else {
+				outBuf.WriteString(lastLines(data, lines))
+			}
+		}
+
 	default:
 		if strings.HasPrefix(cmd, "legacy-echo ") {
 			outBuf.WriteString("executed:" + cmd)
@@ -632,6 +929,11 @@ func (s *Server) evalSingleCommand(st *shellState, rawCmd string) (stdout string
 			errBuf.WriteString(fmt.Sprintf("bash: %s: command not found", prog) + lf)
 			code = 127
 		}
+	}
+
+	if toStderr {
+		errBuf.Write(outBuf.Bytes())
+		outBuf.Reset()
 	}
 
 	if redirectFile != "" && code == 0 {
@@ -663,27 +965,59 @@ func (s *Server) evalSingleCommand(st *shellState, rawCmd string) (stdout string
 }
 
 func (s *Server) executeCommandLine(st *shellState, line string) (stdout string, stderr string, exitCode int, shouldExit bool) {
-	segments := splitCompoundCommand(line)
 	var allOut bytes.Buffer
 	var allErr bytes.Buffer
-	lastCode := 0
+	code, exitNow := s.runCommandLine(st, line, func(out, errStr string) {
+		allOut.WriteString(out)
+		allErr.WriteString(errStr)
+	})
+	return allOut.String(), allErr.String(), code, exitNow
+}
 
-	for _, seg := range segments {
+// runCommandLine evaluates a compound command line and hands each segment's
+// output to emit as soon as that segment produces it, so exec clients see
+// output while later segments are still running.
+func (s *Server) runCommandLine(st *shellState, line string, emit func(stdout, stderr string)) (exitCode int, shouldExit bool) {
+	st.emit = emit
+	defer func() { st.emit = nil }()
+
+	lastCode := 0
+	for _, seg := range splitCompoundCommand(line) {
 		if seg.op == "&&" && lastCode != 0 {
 			continue
 		}
 		if seg.op == "||" && lastCode == 0 {
 			continue
 		}
+		if sig := st.pendingSignal(); sig != "" {
+			code, _ := st.kill(sig)
+			return code, true
+		}
 		out, errStr, code, exitNow := s.evalSingleCommand(st, seg.cmd)
-		allOut.WriteString(out)
-		allErr.WriteString(errStr)
+		if out != "" || errStr != "" {
+			emit(out, errStr)
+		}
 		lastCode = code
 		if exitNow {
-			return allOut.String(), allErr.String(), lastCode, true
+			return lastCode, true
 		}
 	}
-	return allOut.String(), allErr.String(), lastCode, false
+	return lastCode, false
+}
+
+// sendExit reports how the command ended: exit-signal when it was killed,
+// exit-status otherwise.
+func sendExit(ch ssh.Channel, st *shellState, code int) {
+	if st.killedBy != "" {
+		_, _ = ch.SendRequest("exit-signal", false, ssh.Marshal(&struct {
+			Signal     string
+			CoreDumped bool
+			Error      string
+			Lang       string
+		}{Signal: st.killedBy}))
+		return
+	}
+	_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&struct{ Status uint32 }{uint32(code)}))
 }
 
 type cmdSegment struct {
@@ -797,22 +1131,74 @@ func (s *Server) formatPrompt(st *shellState) string {
 }
 
 func (s *Server) handleSessionChannel(user string, ch ssh.Channel, requests <-chan *ssh.Request) {
+	s.openSessions.Add(1)
+	s.mu.Lock()
+	logIdx := len(s.requestLog)
+	s.requestLog = append(s.requestLog, nil)
+	s.mu.Unlock()
+
+	done := make(chan struct{})
+	signals := make(chan string, 4)
+	var running sync.WaitGroup
+	defer func() {
+		close(done)
+		running.Wait()
+		s.openSessions.Add(-1)
+	}()
+
 	st := &shellState{
 		user:     user,
 		cwd:      "/",
 		lastExit: 0,
+		env:      make(map[string]string),
+		done:     done,
+		signals:  signals,
 	}
+	started := false
 	for req := range requests {
+		s.logRequest(logIdx, req.Type)
 		switch req.Type {
-		case "pty-req", "window-change", "env":
+		case "pty-req", "window-change":
 			if req.WantReply {
 				_ = req.Reply(true, nil)
+			}
+		case "env":
+			// Like sshd, only variables on the accept-list are applied, and
+			// only before the shell or command starts.
+			var kv struct{ Name, Value string }
+			ok := ssh.Unmarshal(req.Payload, &kv) == nil && !started && acceptEnv(kv.Name)
+			if ok {
+				st.env[kv.Name] = kv.Value
+			}
+			if req.WantReply {
+				_ = req.Reply(ok, nil)
+			}
+		case "signal":
+			var msg struct{ Signal string }
+			if ssh.Unmarshal(req.Payload, &msg) == nil {
+				sig := msg.Signal
+				if name := signalName(sig); name != "" {
+					sig = name
+				}
+				s.mu.Lock()
+				s.signals = append(s.signals, sig)
+				s.mu.Unlock()
+				select {
+				case signals <- sig:
+				default:
+				}
+			}
+			if req.WantReply {
+				_ = req.Reply(false, nil)
 			}
 		case "shell":
+			started = true
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}
+			running.Add(1)
 			go func() {
+				defer running.Done()
 				defer ch.Close()
 				_, _ = ch.Write([]byte(s.formatPrompt(st)))
 				var lineBuf []byte
@@ -900,7 +1286,7 @@ func (s *Server) handleSessionChannel(user string, ch ssh.Channel, requests <-ch
 									_, _ = ch.Write([]byte(toCRLF(errStr)))
 								}
 								if exitNow {
-									_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&struct{ Status uint32 }{uint32(code)}))
+									sendExit(ch, st, code)
 									return
 								}
 								_, _ = ch.Write([]byte(s.formatPrompt(st)))
@@ -920,30 +1306,37 @@ func (s *Server) handleSessionChannel(user string, ch ssh.Channel, requests <-ch
 				}
 			}()
 		case "exec":
+			started = true
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}
 			var payload struct{ Command string }
 			_ = ssh.Unmarshal(req.Payload, &payload)
+			running.Add(1)
 			go func(cmd string) {
+				defer running.Done()
 				defer ch.Close()
-				out, errStr, code, _ := s.executeCommandLine(st, cmd)
-				if out != "" {
-					_, _ = ch.Write([]byte(out))
-				}
-				if errStr != "" {
-					_, _ = ch.Stderr().Write([]byte(errStr))
-				}
-				_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&struct{ Status uint32 }{uint32(code)}))
+				code, _ := s.runCommandLine(st, cmd, func(out, errStr string) {
+					if out != "" {
+						_, _ = ch.Write([]byte(out))
+					}
+					if errStr != "" {
+						_, _ = ch.Stderr().Write([]byte(errStr))
+					}
+				})
+				sendExit(ch, st, code)
 			}(payload.Command)
 		case "subsystem":
 			var sub struct{ Name string }
 			_ = ssh.Unmarshal(req.Payload, &sub)
 			if sub.Name == "sftp" {
+				started = true
 				if req.WantReply {
 					_ = req.Reply(true, nil)
 				}
+				running.Add(1)
 				go func() {
+					defer running.Done()
 					defer ch.Close()
 					srv, err := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(s.rootDir))
 					if err != nil {

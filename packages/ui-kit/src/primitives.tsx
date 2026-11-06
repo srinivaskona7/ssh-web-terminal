@@ -9,6 +9,7 @@ export interface ButtonProps {
   type?: 'button' | 'submit' | 'reset';
   disabled?: boolean;
   onClick?: (e: MouseEvent) => void;
+  onMouseEnter?: () => void;
   title?: string;
   ariaLabel?: string;
   ariaPressed?: boolean;
@@ -22,6 +23,7 @@ export function Button({
   type = 'button',
   disabled,
   onClick,
+  onMouseEnter,
   title,
   ariaLabel,
   ariaPressed,
@@ -35,6 +37,7 @@ export function Button({
       type={type}
       disabled={disabled}
       onClick={onClick}
+      onMouseEnter={onMouseEnter}
       title={title}
       aria-label={ariaLabel}
       aria-pressed={ariaPressed}

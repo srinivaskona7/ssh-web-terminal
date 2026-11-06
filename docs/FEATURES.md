@@ -8,7 +8,9 @@ code that exists in this repository, and the status states exactly how far it ha
 
 | Status | Meaning |
 |---|---|
-| **Verified** | Exercised by a Vitest or Go test in this repo (proof column). |
+| **Verified** | An automated test in this repo (Vitest, Go or Playwright), named in the proof column, exercises the behaviour. |
+| **Verified (unit)** | Proven only against test doubles; no real SSH server took part. |
+| **Verified (local e2e)** | Proven by Playwright against the local Go gateway and its embedded testsshd. |
 | **Implemented** | The code path exists and type-checks, but has not been run against a real server in this build. |
 | **Conditional** | Works only with a prerequisite the app cannot supply (Go gateway, passwordless sudo, a package, a cluster). |
 | **Unsupported** | Deliberately not provided. |
@@ -20,7 +22,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Capability | Module | Status | Proof / prerequisite |
 |---|---|---|---|
 | Browser SSH-2.0 over the Cloudflare relay | `apps/web/src/transport/browser-ssh-client.ts`, `apps/relay/src` | Verified | `browser-ssh.test.ts`, `apps/relay/src/relay.test.ts` |
-| Go gateway WebSocket bridge | `apps/gateway`, `apps/web/src/transport/transport.ts` | Implemented | Go tests exist; needs a deployed gateway endpoint |
+| Go gateway WebSocket bridge | `apps/gateway`, `apps/web/src/transport/transport.ts` | Verified (local e2e) | `npm run test:e2e` starts the gateway against its embedded testsshd and types real POSIX commands whose output is read from the emulator buffer (Chromium and WebKit). A deployed endpoint is still needed for production use |
 | Guest connections (Turnstile → short-lived ticket, no account) | `apps/relay/src/auth.ts` (`issueGuestTicket`), `apps/relay/src/index.ts` (`POST /auth/ticket`), `apps/web/src/ui/App.tsx` | Verified | `relay.test.ts`, `browser-ssh.test.ts`, `app.test.tsx`; requires `TURNSTILE_SECRET_KEY` on the Worker and `VITE_TURNSTILE_SITE_KEY` at build |
 | Guest tickets scoped to one host and port | `apps/relay/src/index.ts` (`ERR_TICKET_SCOPE`) | Verified | `relay.test.ts` |
 | Relay user login (short-lived JWT, administrator mode) | `apps/relay/src/auth.ts`, `apps/relay/src/index.ts` | Verified | `relay.test.ts` |
@@ -28,6 +30,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Destination validation / anti-rebinding pinning | `apps/relay/src/policy.ts` | Verified | `relay.test.ts` |
 | Host-key TOFU pinning and mismatch blocking | `apps/web/src/vault/known-hosts.ts` | Verified | `vault.test.ts`, `browser-ssh.test.ts` |
 | Non-extractable key vault | `apps/web/src/vault/vault.ts` | Verified | `vault.test.ts` |
+| ProxyJump chains dialled by the gateway | `apps/gateway/cmd/gateway/main.go`, `apps/gateway/internal/sshbridge` (`DialChain`), `apps/web/src/ui/App.tsx` | Verified (local e2e) | `main_test.go` (connects through a bastion testsshd to a target testsshd and asserts one host-key prompt per hop in chain order; 8-hop cap, per-hop destination policy rejection, blank hop user falls back to the target user); the client sends the chain in the session's `jump` field and the connect modal shows it; audit entries carry the hop path. Every hop authenticates with the target's credentials — the modal states this; per-hop credentials are not implemented. Real network-segmented hosts are still unproven |
 | No billing, subscriptions or feature paywalls | entire repository | Verified | no billing code exists |
 
 ## Terminal & workspace
@@ -48,7 +51,16 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Workspace presets Terminal / Develop / Operate | `apps/web/src/prefs/index.ts`, `apps/web/src/ui/App.tsx` | Implemented | persisted through `PreferencesStore` |
 | Resizable navigation rail (pointer + keyboard) | `apps/web/src/ui/App.tsx`, `railWidthPx` preference | Implemented | width persists across reloads |
 | Command palette, snippets, keybindings | `apps/web/src/ui/productivity.ts` | Verified | `productivity.test.ts` |
-| Session recording (asciicast v2) | `apps/web/src/ui/productivity.ts` | Verified | `productivity.test.ts` |
+| Command palette v2: arrow/Enter/Esc navigation, hover sync, twelve commands | `apps/web/src/ui/App.tsx` | Verified | `app.test.tsx` (arrows move the highlight, Enter runs it, Esc closes; the broadcast command opens the split) |
+| Terminal find bar (Ctrl/Cmd+F anywhere in the workspace except text fields, Enter next, Shift+Enter previous, Esc closes and refocuses the shell) | `apps/web/src/ui/App.tsx`, `apps/web/src/terminal/xterm-adapter.ts` (`findNext`/`findPrevious`/`focus`, custom key handler) | Verified | `xterm-adapter.test.ts` (both directions, `focus()`, and Ctrl/Cmd+F/K left to the app so xterm cannot swallow them), `app.test.tsx` (Ctrl+F opens the bar and moves the caret, Esc closes it); "No terminal to search" is browser-checked while disconnected |
+| Broadcast input to both split panes | `apps/web/src/terminal/TerminalPane.tsx` (`sendPaneInput`) | Verified (unit) | `TerminalPane.test.tsx` (mirrors bytes, never double-sends, drops input when disconnected); button appears only when split panes > 1 |
+| Rename a session tab by double-click | `apps/web/src/ui/App.tsx` | Verified | `app.test.tsx` (double-click renames the active tab; cancelling the prompt leaves the old name) |
+| Keyboard shortcut cheatsheet (`?`, also a palette command) | `apps/web/src/ui/App.tsx` | Verified | `app.test.tsx` (opens with `?` outside the terminal, refuses it inside the viewport, closes on Esc) |
+| Theme switch in the menubar View menu (nine themes, persisted) | `apps/web/src/ui/App.tsx`, `apps/web/src/prefs` | Verified | `app.test.tsx` (the choice applies to the document root and is written to `webssh.preferences.v2`), `prefs.test.ts` |
+| Recent hosts on Welcome (last connected first) | `apps/web/src/ui/App.tsx`, `apps/web/src/hosts/index.ts` | Verified | `app.test.tsx` (newest first, never-connected hosts skipped, one click prefills Quick Connect); registry round-trip covered by `hosts.test.ts` |
+| Session recording (asciicast v2), replay and download | `apps/web/src/ui/productivity.ts`, `apps/web/src/ui/App.tsx` | Verified (unit) | `productivity.test.ts` (recorder size cap, asciicast v2 output, timeline scrubbing), `recording.test.tsx` (refused while disconnected, empty state, no fake sample); capturing a live PTY session and the download button are not covered by an automated test |
+| Dual-pane SFTP with a local folder (File System Access API) | `apps/web/src/ui/App.tsx` | Implemented | `dual-pane.test.tsx` stubs the API and proves the folder listing, the entry count and the honest "no File System Access API" fallback; the native picker cannot be driven, so move-files-both-ways still needs a manual Chromium run |
+| Initial bundle code-split (IDE, server modules, capability matrix) | `apps/web/src/ui/App.tsx` | Implemented | `npm run build` emits `LightIde`, `ServerModules` and `CapabilityMatrixPanel` as separate chunks loaded on first open; no bundle-size assertion in CI |
 | Scrollback caps and bounded buffers | `apps/web/src/terminal/xterm-adapter.ts`, prefs | Verified | `terminal.test.ts`, `prefs.test.ts` |
 
 ## Files, SFTP & editor
@@ -61,7 +73,7 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Resumable `.webssh-part` uploads | `apps/web/src/transport/sftp-client.ts` | Verified | `sftp-client.test.ts` |
 | Transfer queue and bounded concurrency | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
 | StorageGuard memory/local caps | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
-| Remote editor with conflict refusal | `apps/web/src/ui/App.tsx` (`saveEditorBuffer`) | Implemented | compares remote content before writing; needs SFTP |
+| Remote editor with conflict refusal | `apps/web/src/ui/App.tsx` (`saveEditorBuffer`), `apps/web/src/files/remote-file-io.ts` | Implemented | reads page until the gateway-reported size is met and refuses a short read, refuses non-UTF-8 instead of saving a lossy decode, saves above ~3 MiB chunk by chunk, compares remote content before writing (`remote-file-io.test.ts`); needs SFTP |
 | Workspace IDE: browse, create, rename, delete over SFTP | `apps/web/src/ui/LightIde.tsx`, `ide-editing.ts` | Verified | `LightIde.test.tsx` (create/open/rename/delete), `adapters.test.ts` (chunked paging, canonical child paths); the Go gateway returns 256 KiB read chunks and `adapters.readFile` pages until the reported size is met, refusing a partial read |
 | Workspace IDE: UTF-8-only editing | `apps/web/src/session/adapters.ts` (`decodeUtf8Text`) | Verified | `adapters.test.ts` refuses invalid UTF-8; binary files are refused in `LightIde.tsx` |
 | Workspace IDE: open/edit files with auto-save (1.2 s debounce) | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx` (auto-save on, off, and manual save; pending edits flush on unmount) |
@@ -72,7 +84,10 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 | Workspace IDE: project search, quick open, git status and git diff | `apps/web/src/ui/LightIde.tsx` (`parseGrepMatches`, `parseGitStatus`, `parseDiff`) | Verified | parsing covered in `ide-editing.test.ts`, wiring in `LightIde.test.tsx`; all read-only shell commands, POSIX-quoted |
 | Workspace IDE: command runner with history, pinned presets, run-in-project-root | `apps/web/src/ui/LightIde.tsx` | Verified | `LightIde.test.tsx` (run, recall, pin, run-in-root); commands run in a fresh exec channel, so `cd` and shell variables do not persist between commands; command history is in-memory only (never written to local storage) |
 | Workspace IDE: saved projects and recent files (browser local storage) | `apps/web/src/ui/LightIde.tsx` | Implemented | no test asserts persistence; storage holds paths only, never file contents |
+| Workspace IDE: line-number gutter synced to scroll, soft-wrap toggle (persisted) | `apps/web/src/ui/LightIde.tsx`, `app.css` | Verified | `LightIde.test.tsx` (one number per line, `translateY` follows `scrollTop` and is restored after wrap is turned back off, wrap survives a remount; the gutter is hidden while wrapping and above 5,000 lines) |
+| Workspace IDE: confirm before closing an unsaved buffer | `apps/web/src/ui/LightIde.tsx` (`closeFile`) | Verified | `LightIde.test.tsx` (a declined confirm keeps the buffer, an accepted one drops it) |
 | Limits of the Workspace IDE | — | — | no language servers, debugger, extension host, terminals or git UI beyond status/diff; binary and non-UTF-8 files are refused; nothing is installed on the server |
+| Host profiles export / import as JSON | `apps/web/src/hosts/index.ts` (`exportJson`/`importJson`) | Verified | `hosts.test.ts` (round-trip, bare array, malformed entries skipped, and `persisted: false` reported when browser storage refuses the write); profiles hold no keys or passwords |
 | Browser upload / download of a file | `apps/web/src/ui/App.tsx` | Implemented | writes via `sftpOp`, capped at 64 MiB in the panel |
 | Binary-safe large transfers | `apps/web/src/files/transfer-engine.ts` | Verified | `files.test.ts` |
 
@@ -117,10 +132,11 @@ No row may be marked *Verified* from a screenshot or a connection banner.
 
 ## Test suite reference
 
-- Vitest: `npm test` at the repo root (currently 28 files / 179 tests).
+- Vitest: `npm test` at the repo root (834 tests across 65 files as verified on 2026-11-06).
 - Go: `npm run test:go` (gateway packages).
 - Playwright: `npm run test:e2e` (cross-browser, full-screen, accessibility).
 - Token invariant: `npm run lint:tokens`.
 
 Real-server verification against a disposable host is **not** claimed here. The rows marked
-Implemented still need that run; see `docs/RUNBOOK.md` for the disposable-host procedure.
+Implemented still need that run. `docs/RUNBOOK.md` §5 covers connecting to a target and §6 the
+in-browser terminal checks; a scripted disposable-host procedure has not been written yet.

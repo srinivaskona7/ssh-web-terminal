@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +23,26 @@ import (
 	"github.com/webssh-studio/gateway/internal/testsshd"
 	"golang.org/x/crypto/ssh"
 )
+
+// lockedBuffer is a goroutine-safe io.Writer. Audit records are written from
+// the HTTP handler goroutine while the test goroutine reads them, so a plain
+// strings.Builder trips `go test -race`.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func TestGatewayHTTPAndSecurityEndpoints(t *testing.T) {
 	cfg := ServerConfig{
@@ -243,6 +265,335 @@ func (c *testWSClient) readFrame(timeout time.Duration) (protocol.BinaryFrame, e
 	return protocol.DecodeFrame(buf)
 }
 
+func TestConnectProxiesThroughJumpHops(t *testing.T) {
+	target, err := testsshd.NewServer(t.TempDir(), "secret-pass", nil)
+	if err != nil {
+		t.Fatalf("target testsshd.NewServer failed: %v", err)
+	}
+	defer target.Close()
+	bastion, err := testsshd.NewServer(t.TempDir(), "secret-pass", nil)
+	if err != nil {
+		t.Fatalf("bastion testsshd.NewServer failed: %v", err)
+	}
+	defer bastion.Close()
+
+	bastionHost, bastionPort := bastion.HostPort()
+	targetHost, targetPort := target.HostPort()
+
+	var auditLog lockedBuffer
+	cfg := ServerConfig{
+		ListenAddr:         ":0",
+		AllowedOrigins:     []string{"http://localhost:5173"},
+		DestAllowlist:      []string{"127.0.0.1"},
+		DestDenylist:       []string{},
+		SessionGrace:       time.Minute,
+		RingBufferBytes:    65536,
+		MaxSessionsPerUser: 10,
+		RateLimitPerSec:    200,
+		AuditWriter:        &auditLog,
+	}
+	handler, err := NewMux(cfg)
+	if err != nil {
+		t.Fatalf("NewMux failed: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	ws := dialTestWS(t, srv.URL, "http://localhost:5173")
+	defer ws.conn.Close()
+
+	if err := ws.sendControl(protocol.ControlMessage{
+		Type:       "connect",
+		Host:       targetHost,
+		Port:       targetPort,
+		User:       "ubuntu",
+		AuthMethod: "password",
+		Password:   "secret-pass",
+		Jump: []protocol.JumpHop{
+			{Host: bastionHost, Port: bastionPort, User: "ubuntu"},
+		},
+		Cols: 80,
+		Rows: 24,
+	}); err != nil {
+		t.Fatalf("send connect failed: %v", err)
+	}
+
+	// A ProxyJump chain performs one SSH handshake per hop, so the client must
+	// be asked to trust the bastion first and the target second.
+	var promptedPorts []int
+	connected := false
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && !connected {
+		f, err := ws.readFrame(5 * time.Second)
+		if err != nil {
+			t.Fatalf("readFrame during jump handshake failed: %v", err)
+		}
+		if f.Type != protocol.FrameTypeControl {
+			continue
+		}
+		ctrl, err := protocol.DecodeControlPayload(f.Payload)
+		if err != nil {
+			t.Fatalf("DecodeControlPayload failed: %v", err)
+		}
+		switch ctrl.Type {
+		case "hostkey_prompt":
+			promptedPorts = append(promptedPorts, ctrl.Port)
+			if err := ws.sendControl(protocol.ControlMessage{
+				Type:    "hostkey_decision",
+				Trusted: true,
+			}); err != nil {
+				t.Fatalf("send hostkey_decision failed: %v", err)
+			}
+		case "connected":
+			connected = true
+		case "error":
+			t.Fatalf("unexpected error during jump connect: %s %s", ctrl.Code, ctrl.Message)
+		}
+	}
+
+	if !connected {
+		t.Fatal("expected a connected control message through the jump hop")
+	}
+	if len(promptedPorts) != 2 {
+		t.Fatalf("expected one host-key prompt per hop, got ports %v", promptedPorts)
+	}
+	if promptedPorts[0] != bastionPort || promptedPorts[1] != targetPort {
+		t.Fatalf("expected prompts for bastion :%d then target :%d, got %v", bastionPort, targetPort, promptedPorts)
+	}
+	// The success record must name the hop, or a bastioned session is
+	// indistinguishable from a direct one in the audit trail.
+	expectedHop := fmt.Sprintf(`"jumps":[{"host":%q,"port":%d,"user":"ubuntu","authMethod":"password"}]`, bastionHost, bastionPort)
+	if !strings.Contains(auditLog.String(), `"event":"ssh.auth_success"`) {
+		t.Fatalf("expected an auth_success audit record, got %q", auditLog.String())
+	}
+	if !strings.Contains(auditLog.String(), expectedHop) {
+		t.Fatalf("expected the success record to name hop %s, got %q", expectedHop, auditLog.String())
+	}
+
+	// The per-hop handshake deadline must not survive into the session: a
+	// command over the chained client has to succeed rather than time out.
+	if err := ws.sendControl(protocol.ControlMessage{
+		Type:    "exec_command",
+		OpID:    "jump-exec",
+		Command: "printf 'through-bastion'",
+	}); err != nil {
+		t.Fatalf("send exec_command through the jump chain failed: %v", err)
+	}
+	var jumpExec protocol.ControlMessage
+	for jumpExec.Type != "exec_result" {
+		f, err := ws.readFrame(5 * time.Second)
+		if err != nil {
+			t.Fatalf("readFrame for jump exec_result failed: %v", err)
+		}
+		if f.Type != protocol.FrameTypeControl {
+			continue
+		}
+		ctrl, _ := protocol.DecodeControlPayload(f.Payload)
+		if ctrl.Type == "exec_result" && ctrl.OpID == "jump-exec" {
+			jumpExec = ctrl
+		}
+	}
+	if !jumpExec.OK || !strings.Contains(jumpExec.Stdout, "through-bastion") {
+		t.Fatalf("command through the jump chain failed: %+v", jumpExec)
+	}
+}
+
+func TestJumpHopFallsBackToTargetUser(t *testing.T) {
+	target, err := testsshd.NewServer(t.TempDir(), "secret-pass", nil)
+	if err != nil {
+		t.Fatalf("target testsshd.NewServer failed: %v", err)
+	}
+	defer target.Close()
+	bastion, err := testsshd.NewServer(t.TempDir(), "secret-pass", nil)
+	if err != nil {
+		t.Fatalf("bastion testsshd.NewServer failed: %v", err)
+	}
+	defer bastion.Close()
+
+	bastionHost, bastionPort := bastion.HostPort()
+	targetHost, targetPort := target.HostPort()
+
+	cfg := ServerConfig{
+		ListenAddr:         ":0",
+		AllowedOrigins:     []string{"http://localhost:5173"},
+		DestAllowlist:      []string{"127.0.0.1"},
+		DestDenylist:       []string{},
+		SessionGrace:       time.Minute,
+		RingBufferBytes:    65536,
+		MaxSessionsPerUser: 10,
+		RateLimitPerSec:    200,
+	}
+	handler, err := NewMux(cfg)
+	if err != nil {
+		t.Fatalf("NewMux failed: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	ws := dialTestWS(t, srv.URL, "http://localhost:5173")
+	defer ws.conn.Close()
+
+	// A hop with no user authenticates as the target user, which is the only
+	// account the testsshd accepts.
+	if err := ws.sendControl(protocol.ControlMessage{
+		Type:       "connect",
+		Host:       targetHost,
+		Port:       targetPort,
+		User:       "ubuntu",
+		AuthMethod: "password",
+		Password:   "secret-pass",
+		Jump:       []protocol.JumpHop{{Host: bastionHost, Port: bastionPort}},
+		Cols:       80,
+		Rows:       24,
+	}); err != nil {
+		t.Fatalf("send connect failed: %v", err)
+	}
+
+	for {
+		f, err := ws.readFrame(5 * time.Second)
+		if err != nil {
+			t.Fatalf("readFrame failed: %v", err)
+		}
+		if f.Type != protocol.FrameTypeControl {
+			continue
+		}
+		ctrl, err := protocol.DecodeControlPayload(f.Payload)
+		if err != nil {
+			t.Fatalf("DecodeControlPayload failed: %v", err)
+		}
+		switch ctrl.Type {
+		case "hostkey_prompt":
+			if err := ws.sendControl(protocol.ControlMessage{Type: "hostkey_decision", Trusted: true}); err != nil {
+				t.Fatalf("send hostkey_decision failed: %v", err)
+			}
+		case "connected":
+			return
+		case "error":
+			t.Fatalf("unexpected error: %s %s", ctrl.Code, ctrl.Message)
+		}
+	}
+}
+
+func TestRejectsJumpChainAboveLimit(t *testing.T) {
+	cfg := ServerConfig{
+		ListenAddr:         ":0",
+		AllowedOrigins:     []string{"http://localhost:5173"},
+		DestAllowlist:      []string{"127.0.0.1"},
+		DestDenylist:       []string{},
+		SessionGrace:       time.Minute,
+		RingBufferBytes:    65536,
+		MaxSessionsPerUser: 10,
+		RateLimitPerSec:    200,
+	}
+	handler, err := NewMux(cfg)
+	if err != nil {
+		t.Fatalf("NewMux failed: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	ws := dialTestWS(t, srv.URL, "http://localhost:5173")
+	defer ws.conn.Close()
+
+	hops := make([]protocol.JumpHop, maxJumpHops+1)
+	for i := range hops {
+		hops[i] = protocol.JumpHop{Host: "127.0.0.1", Port: 22, User: "ubuntu"}
+	}
+	if err := ws.sendControl(protocol.ControlMessage{
+		Type:       "connect",
+		Host:       "127.0.0.1",
+		Port:       22,
+		User:       "ubuntu",
+		AuthMethod: "password",
+		Password:   "secret-pass",
+		Jump:       hops,
+		Cols:       80,
+		Rows:       24,
+	}); err != nil {
+		t.Fatalf("send connect failed: %v", err)
+	}
+
+	for {
+		f, err := ws.readFrame(5 * time.Second)
+		if err != nil {
+			t.Fatalf("readFrame failed: %v", err)
+		}
+		if f.Type != protocol.FrameTypeControl {
+			continue
+		}
+		ctrl, err := protocol.DecodeControlPayload(f.Payload)
+		if err != nil {
+			t.Fatalf("DecodeControlPayload failed: %v", err)
+		}
+		if ctrl.Type != "error" {
+			continue
+		}
+		if ctrl.Code != "INVALID_JUMP_CHAIN" {
+			t.Fatalf("expected INVALID_JUMP_CHAIN, got %s: %s", ctrl.Code, ctrl.Message)
+		}
+		return
+	}
+}
+
+func TestRejectsJumpHopOutsideDestinationPolicy(t *testing.T) {
+	cfg := ServerConfig{
+		ListenAddr:         ":0",
+		AllowedOrigins:     []string{"http://localhost:5173"},
+		DestAllowlist:      []string{"127.0.0.1"},
+		DestDenylist:       []string{},
+		SessionGrace:       time.Minute,
+		RingBufferBytes:    65536,
+		MaxSessionsPerUser: 10,
+		RateLimitPerSec:    200,
+	}
+	handler, err := NewMux(cfg)
+	if err != nil {
+		t.Fatalf("NewMux failed: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	ws := dialTestWS(t, srv.URL, "http://localhost:5173")
+	defer ws.conn.Close()
+
+	// The target is allowed; the hop is not. A chain must never be a way to
+	// reach a host the destination policy would refuse directly.
+	if err := ws.sendControl(protocol.ControlMessage{
+		Type:       "connect",
+		Host:       "127.0.0.1",
+		Port:       22,
+		User:       "ubuntu",
+		AuthMethod: "password",
+		Password:   "secret-pass",
+		Jump:       []protocol.JumpHop{{Host: "10.0.0.1", Port: 22, User: "ubuntu"}},
+		Cols:       80,
+		Rows:       24,
+	}); err != nil {
+		t.Fatalf("send connect failed: %v", err)
+	}
+
+	for {
+		f, err := ws.readFrame(5 * time.Second)
+		if err != nil {
+			t.Fatalf("readFrame failed: %v", err)
+		}
+		if f.Type != protocol.FrameTypeControl {
+			continue
+		}
+		ctrl, err := protocol.DecodeControlPayload(f.Payload)
+		if err != nil {
+			t.Fatalf("DecodeControlPayload failed: %v", err)
+		}
+		if ctrl.Type != "error" {
+			continue
+		}
+		if ctrl.Code != "POLICY_DENIED" {
+			t.Fatalf("expected POLICY_DENIED, got %s: %s", ctrl.Code, ctrl.Message)
+		}
+		return
+	}
+}
+
 func TestWebSocketEndToEndSSHPTYExecSFTPAndTunnel(t *testing.T) {
 	tmpDir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(tmpDir, "hello.txt"), []byte("initial content"+string([]byte{10})), 0644)
@@ -305,6 +656,7 @@ func TestWebSocketEndToEndSSHPTYExecSFTPAndTunnel(t *testing.T) {
 
 	// Expect hostkey_prompt -> send hostkey_decision -> expect connected
 	var connectedMsg protocol.ControlMessage
+	var connectedRaw []byte
 	for connectedMsg.Type != "connected" {
 		f, err := ws.readFrame(5 * time.Second)
 		if err != nil {
@@ -328,6 +680,7 @@ func TestWebSocketEndToEndSSHPTYExecSFTPAndTunnel(t *testing.T) {
 				}
 			case "connected":
 				connectedMsg = ctrl
+				connectedRaw = f.Payload
 			case "error":
 				t.Fatalf("unexpected error during connect: %s %s", ctrl.Code, ctrl.Message)
 			}
@@ -337,8 +690,13 @@ func TestWebSocketEndToEndSSHPTYExecSFTPAndTunnel(t *testing.T) {
 	if !connectedMsg.SftpReady {
 		t.Fatalf("expected SftpReady=true, got false (err=%s)", connectedMsg.SftpError)
 	}
-	if !strings.Contains(connectedMsg.ServerVersion, "OpenSSH") {
-		t.Fatalf("expected ServerVersion to contain OpenSSH, got %q", connectedMsg.ServerVersion)
+	// Only what the server reported: its exact banner, and no cipher or KEX,
+	// which the SSH library does not expose.
+	if connectedMsg.ServerVersion != "SSH-2.0-OpenSSH_9.6_testsshd" {
+		t.Fatalf("expected the server's own version string, got %q", connectedMsg.ServerVersion)
+	}
+	if strings.Contains(string(connectedRaw), `"cipher"`) || strings.Contains(string(connectedRaw), `"kex"`) {
+		t.Fatalf("connected must not carry a guessed cipher or KEX: %s", connectedRaw)
 	}
 
 	// 1. Test interactive PTY command: uname -s -> Linux

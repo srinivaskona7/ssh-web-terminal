@@ -316,6 +316,7 @@
 .webssh-studio-container {
   display: flex;
   flex-direction: column;
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -1157,7 +1158,7 @@
 }
 
 .webssh-rail-group-title {
-  color: var(--color-fg-muted);
+  color: var(--color-fg-secondary);
   font-size: var(--font-size-xs);
   letter-spacing: var(--font-letter-spacing-tight);
   padding: 0 var(--space-1);
@@ -1420,8 +1421,8 @@ html {
 /* Presets are a layout switch, not a destination: never read as a second
    selected nav item. */
 .webssh-rail-presets .ui-btn {
-  padding: var(--space-1) var(--space-1);
-  font-size: var(--font-size-xs);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-sm);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1501,6 +1502,32 @@ html {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.webssh-quick-connect-row {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 6rem);
+  gap: var(--space-2);
+  align-items: end;
+}
+
+.webssh-quick-connect-row > div {
+  min-width: 0;
+}
+
+.webssh-quick-connect-row .ui-input {
+  min-width: 0;
+}
+
+@media (max-width: 560px) {
+  .webssh-quick-connect-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .webssh-quick-connect-row > div:first-child {
+    grid-column: 1 / -1;
+  }
 }
 
 .webssh-welcome-actions {
@@ -1640,4 +1667,236 @@ html {
   .webssh-profile-link:hover {
     transform: none;
   }
+}
+
+/* --- Terminal find bar ---------------------------------------------------- */
+.webssh-term-search {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-3);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elevation-3);
+}
+
+.webssh-term-search .ui-input {
+  min-width: 12rem;
+  padding-block: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+.webssh-term-search-status {
+  font-size: var(--font-size-xs);
+  color: var(--color-status-warning);
+  white-space: nowrap;
+}
+
+/* --- Theme quick switch -------------------------------------------------- */
+.webssh-theme-switch {
+  width: auto;
+  min-width: 0;
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  font-size: var(--font-size-sm);
+  text-transform: capitalize;
+}
+
+/* --- Shortcut cheatsheet ------------------------------------------------- */
+.webssh-shortcuts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.webssh-shortcuts dt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-fg-primary);
+  white-space: nowrap;
+}
+
+.webssh-shortcuts dd {
+  margin: 0;
+  color: var(--color-fg-secondary);
+}
+
+.webssh-shortcuts kbd {
+  padding-block: 0;
+  padding-inline: var(--space-1);
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-primary);
+  background: var(--color-bg-sunken);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+/* --- Recent hosts -------------------------------------------------------- */
+.webssh-recent-hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+/* --- IDE editor gutter --------------------------------------------------- */
+.ide-editor-shell {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 12rem;
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+}
+
+.ide-gutter {
+  flex: 0 0 auto;
+  overflow: hidden;
+  padding-block: var(--space-2);
+  padding-inline: var(--space-2) var(--space-1);
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-editor);
+  text-align: right;
+  color: var(--color-fg-muted);
+  background: var(--color-bg-elevated);
+  border-right: 1px solid var(--color-border-subtle);
+  user-select: none;
+}
+
+.ide-gutter-lines {
+  display: flex;
+  flex-direction: column;
+  will-change: transform;
+}
+
+.ide-editor-pane {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Bracket highlight overlay: sits over the textarea, never takes input. */
+.ide-bracket-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  padding-block: var(--space-2);
+  padding-inline: var(--space-3);
+  font-family: var(--font-font-mono);
+  line-height: var(--font-line-height-editor);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.ide-bracket-marker {
+  position: absolute;
+  width: 1ch;
+  height: 1em;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-primary);
+  color: transparent;
+  opacity: 0.4;
+  user-select: none;
+}
+
+/* A file drag hovering the project pane. */
+.ide-drop-active {
+  outline: var(--border-focus-ring);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
+.ide-editor-shell .ide-editor {
+  flex: 1 1 auto;
+  min-height: 100%;
+  padding-block: var(--space-2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  resize: none;
+  tab-size: 2;
+}
+
+/* Field rows inside a menubar dropdown (the View menu's theme picker). */
+.webssh-menu-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-primary);
+}
+
+.webssh-menu-field .ui-select,
+.webssh-menu-field .ui-input {
+  width: auto;
+  padding: var(--space-0) var(--space-2);
+  font-size: var(--font-size-xs);
+}
+
+.webssh-menu-separator {
+  height: 0;
+  margin: var(--space-1) 0;
+  border-top: var(--border-hairline);
+}
+
+/* Home is neutral; the active screen is marked by an accent rule, not a solid fill. */
+.webssh-rail-home--active {
+  background: var(--color-bg-elevated);
+  box-shadow: inset 3px 0 0 var(--color-accent-primary);
+}
+
+/* Persistent recording indicator: pulsing red dot beside the label. */
+.webssh-rec-dot {
+  display: inline-block;
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-right: var(--space-1);
+  border-radius: var(--radius-pill);
+  background-color: var(--studio-stop-square);
+  animation: webssh-rec-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes webssh-rec-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Rail labels: one readable size across every rail button. */
+.webssh-rail .ui-btn {
+  font-size: var(--font-size-sm);
+}
+
+/* Read-only image tab in the IDE. */
+.ide-image-preview {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  padding: var(--space-3);
+  flex: 1 1 auto;
+}
+
+.ide-image-preview img {
+  max-width: 100%;
+  height: auto;
+  image-rendering: auto;
 }

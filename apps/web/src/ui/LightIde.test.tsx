@@ -96,6 +96,28 @@ describe('LightIde', () => {
     expect(el.querySelector('[data-testid="ide-file-list"]')?.textContent).toContain('No entries');
   });
 
+  it('previews an image as a read-only blob instead of text, and never offers to save it', async () => {
+    const { session, writes } = fakeSession({ './logo.png': '' });
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    (session as { readFileBytes?: (path: string) => Promise<Uint8Array> }).readFileBytes = async () => bytes;
+    const createObjectURL = vi.fn(() => 'blob:logo');
+    const revokeObjectURL = vi.fn();
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+    input(el, 'ide-entry-logo.png').click();
+    await settle();
+
+    const img = el.querySelector('[data-testid="ide-image-preview"]') as HTMLImageElement;
+    expect(img).toBeTruthy();
+    expect(img.getAttribute('src')).toBe('blob:logo');
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(el.querySelector('[data-testid="ide-editor"]')).toBeNull();
+    expect(writes).toEqual([]);
+  });
+
   it('lists the folder, opens a file, and auto-saves edits back over SFTP', async () => {
     const { session, writes } = fakeSession({ './app.ts': 'export const a = 1;\n' });
     const el = container();
@@ -501,5 +523,296 @@ describe('LightIde', () => {
     await settle();
 
     expect(editor.value).toBe('  a\n');
+  });
+});
+
+describe('LightIde editing affordances', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  async function openEditor(el: HTMLElement, name = 'app.ts'): Promise<HTMLTextAreaElement> {
+    input(el, `ide-entry-${name}`).click();
+    await settle();
+    return input(el, 'ide-editor') as HTMLTextAreaElement;
+  }
+
+  it('highlights a bracket and its partner when the caret sits next to it', async () => {
+    const { session } = fakeSession({ './app.ts': 'if (x) { y }\n' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+    const editor = await openEditor(el);
+
+    // Caret just after the opening brace at offset 7.
+    editor.selectionStart = 8;
+    editor.selectionEnd = 8;
+    editor.dispatchEvent(new Event('select'));
+    await settle();
+
+    const markers = [...el.querySelectorAll('[data-testid="ide-bracket-marker"]')];
+    expect(markers.map((m) => m.textContent)).toEqual(['{', '}']);
+    expect(markers.map((m) => m.getAttribute('data-offset'))).toEqual(['7', '11']);
+
+    // A caret that is not beside a bracket clears the highlight.
+    editor.selectionStart = 2;
+    editor.selectionEnd = 2;
+    editor.dispatchEvent(new Event('select'));
+    await settle();
+    expect(el.querySelectorAll('[data-testid="ide-bracket-marker"]')).toHaveLength(0);
+  });
+
+  it('closes a typed bracket and steps over a closer that is already there', async () => {
+    const { session } = fakeSession({ './app.ts': 'const x = ' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+    const editor = await openEditor(el);
+
+    editor.selectionStart = 10;
+    editor.selectionEnd = 10;
+    const opening = new KeyboardEvent('keydown', { key: '{', bubbles: true, cancelable: true });
+    editor.dispatchEvent(opening);
+    await settle();
+
+    expect(opening.defaultPrevented).toBe(true);
+    expect(editor.value).toBe('const x = {}');
+    expect(editor.selectionStart).toBe(11);
+
+    // The caret now sits before the closing brace: typing it moves over.
+    editor.selectionStart = 11;
+    editor.selectionEnd = 11;
+    const closing = new KeyboardEvent('keydown', { key: '}', bubbles: true, cancelable: true });
+    editor.dispatchEvent(closing);
+    await settle();
+
+    expect(closing.defaultPrevented).toBe(true);
+    expect(editor.value).toBe('const x = {}');
+    expect(editor.selectionStart).toBe(12);
+  });
+
+  it('saves every changed buffer and reports how many were written', async () => {
+    const files: Record<string, string> = { './app.ts': 'one\n', './b.ts': 'two\n' };
+    const { session, writes } = fakeSession(files);
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+
+    const autoSave = input(el, 'ide-auto-save') as HTMLInputElement;
+    autoSave.checked = false;
+    autoSave.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+
+    const appEditor = await openEditor(el);
+    appEditor.value = 'one edited\n';
+    appEditor.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    const bEditor = await openEditor(el, 'b.ts');
+    bEditor.value = 'two edited\n';
+    bEditor.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    // b.ts changed underneath us: save-all must refuse it, not overwrite it.
+    files['./b.ts'] = 'changed elsewhere\n';
+
+    input(el, 'ide-save-all').click();
+    await settle();
+
+    expect(writes).toEqual([{ path: './app.ts', text: 'one edited\n' }]);
+    expect(files['./b.ts']).toBe('changed elsewhere\n');
+    const status = el.querySelector('[data-testid="ide-status"]')?.textContent ?? '';
+    expect(status).toContain('Saved 1 of 2');
+  });
+
+  it('saves all buffers from Ctrl/Cmd+Alt+S', async () => {
+    const files: Record<string, string> = { './app.ts': 'one\n', './b.ts': 'two\n' };
+    const { session, writes } = fakeSession(files);
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+
+    const autoSave = input(el, 'ide-auto-save') as HTMLInputElement;
+    autoSave.checked = false;
+    autoSave.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+
+    const appEditor = await openEditor(el);
+    appEditor.value = 'one edited\n';
+    appEditor.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    const bEditor = await openEditor(el, 'b.ts');
+    bEditor.value = 'two edited\n';
+    bEditor.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+
+    const shortcut = new KeyboardEvent('keydown', {
+      key: 's',
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true
+    });
+    bEditor.dispatchEvent(shortcut);
+    await settle();
+
+    expect(shortcut.defaultPrevented).toBe(true);
+    expect(writes.map((w) => w.path).sort()).toEqual(['./app.ts', './b.ts']);
+    expect(el.querySelector('[data-testid="ide-status"]')?.textContent).toContain('Saved 2 file(s)');
+  });
+
+  // jsdom's Blob has no arrayBuffer(), which is how uploadFile reads a drop.
+  function droppedFile(name: string, text: string): File {
+    return {
+      name,
+      size: text.length,
+      arrayBuffer: async () => new TextEncoder().encode(text).buffer
+    } as unknown as File;
+  }
+
+  it('uploads files dropped onto the file pane into the open folder', async () => {
+    const files: Record<string, string> = { './app.ts': 'x\n' };
+    const { session } = fakeSession(files);
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+
+    const zone = el.querySelector('[data-testid="ide-drop-zone"]') as HTMLElement;
+    expect(zone).toBeTruthy();
+    zone.dispatchEvent(new Event('dragover', { bubbles: true, cancelable: true }));
+    await settle();
+    expect(zone.className).toContain('ide-drop-active');
+
+    const drop = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: { files: [droppedFile('note.txt', 'hello')] }
+    });
+    zone.dispatchEvent(drop);
+    await settle();
+    await settle();
+
+    expect(drop.defaultPrevented).toBe(true);
+    expect(files['./note.txt']).toBe('hello');
+    expect(zone.className).not.toContain('ide-drop-active');
+    expect(el.querySelector('[data-testid="ide-status"]')?.textContent).toContain('Uploaded 1 file');
+  });
+
+  it('says SFTP is unavailable when files are dropped without a usable connection', async () => {
+    const el = container();
+    render(<LightIde session={null} connectedLabel="" />, el);
+    await settle();
+
+    const drop = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: { files: [droppedFile('note.txt', 'hello')] }
+    });
+    (el.querySelector('[data-testid="ide-drop-zone"]') as HTMLElement).dispatchEvent(drop);
+    await settle();
+
+    expect(el.querySelector('[data-testid="ide-status"]')?.textContent).toContain('unavailable');
+  });
+});
+
+describe('LightIde editor chrome', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    localStorage.clear();
+  });
+
+  it('renders one gutter number per buffer line and follows the editor scroll', async () => {
+    const { session } = fakeSession({ './app.ts': 'one\ntwo\nthree\n' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+
+    input(el, 'ide-entry-app.ts').click();
+    await settle();
+
+    const gutter = el.querySelector('[data-testid="ide-gutter"]') as HTMLElement | null;
+    expect(gutter).toBeTruthy();
+    expect([...gutter!.querySelectorAll('span')].map((s) => s.textContent)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4'
+    ]);
+
+    const editor = el.querySelector('[data-testid="ide-editor"]') as HTMLTextAreaElement;
+    Object.defineProperty(editor, 'scrollTop', { value: 42, configurable: true });
+    editor.dispatchEvent(new Event('scroll', { bubbles: false }));
+    expect(gutter!.style.transform).toBe('translateY(-42px)');
+
+    // The gutter unmounts while wrapping; coming back must reuse the editor's
+    // current offset instead of restarting at line 1 against mid-file text.
+    input(el, 'ide-wrap-toggle').click();
+    await sleep(20);
+    expect(el.querySelector('[data-testid="ide-gutter"]')).toBeNull();
+    input(el, 'ide-wrap-toggle').click();
+    await settle();
+    const remountedGutter = el.querySelector('[data-testid="ide-gutter"]') as HTMLElement | null;
+    expect(remountedGutter?.style.transform).toBe('translateY(-42px)');
+  });
+
+  it('toggles soft wrap, persists it, and never needs a reload to apply', async () => {
+    const { session } = fakeSession({ './app.ts': 'line\n' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+    input(el, 'ide-entry-app.ts').click();
+    await settle();
+
+    const editor = el.querySelector('[data-testid="ide-editor"]') as HTMLTextAreaElement;
+    expect(editor.style.whiteSpace).toBe('pre');
+    expect(el.querySelector('[data-testid="ide-gutter"]')).toBeTruthy();
+
+    input(el, 'ide-wrap-toggle').click();
+    await sleep(20);
+    expect(editor.style.whiteSpace).toBe('pre-wrap');
+    // Wrapped logical lines span several visual rows, so a fixed-height
+    // number column would drift; it is withdrawn instead of lying.
+    expect(el.querySelector('[data-testid="ide-gutter"]')).toBeNull();
+    expect(JSON.parse(localStorage.getItem('webssh.ide.v1') ?? '{}').wrap).toBe(true);
+
+    // A fresh mount must come back wrapped from storage alone.
+    render(null, el);
+    const remounted = container();
+    const fresh = fakeSession({ './app.ts': 'line\n' });
+    render(<LightIde session={fresh.session} connectedLabel="ubuntu@example.test" />, remounted);
+    await settle();
+    input(remounted, 'ide-entry-app.ts').click();
+    await settle();
+    const reloaded = remounted.querySelector('[data-testid="ide-editor"]') as HTMLTextAreaElement;
+    expect(reloaded.style.whiteSpace).toBe('pre-wrap');
+  });
+
+  it('keeps an unsaved buffer when the close confirm is declined, and drops it when accepted', async () => {
+    const { session } = fakeSession({ './app.ts': 'one\n' });
+    const el = container();
+    render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+    await settle();
+    input(el, 'ide-entry-app.ts').click();
+    await settle();
+
+    const editor = el.querySelector('[data-testid="ide-editor"]') as HTMLTextAreaElement;
+    editor.value = 'one edited\n';
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(20);
+
+    const closeBtn = el.querySelector('[aria-label="Close app.ts"]') as HTMLButtonElement;
+    const confirmSpy = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmSpy);
+    closeBtn.click();
+    await sleep(20);
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(el.querySelector('[data-testid="ide-editor"]')).toBeTruthy();
+
+    confirmSpy.mockReturnValue(true);
+    closeBtn.click();
+    await sleep(20);
+    expect(el.querySelector('[data-testid="ide-editor"]')).toBeNull();
+    vi.unstubAllGlobals();
   });
 });

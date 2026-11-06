@@ -120,3 +120,59 @@ describe('createRemoteSession', () => {
     expect(entries?.map((entry) => entry.path)).toEqual(['./app.ts', './src']);
   });
 });
+
+describe('createRemoteSession exec routing', () => {
+  function streamingClient() {
+    const calls: Array<{ via: string; command: string; options?: unknown; timeoutMs?: number }> = [];
+    const client = baseClient({
+      execCommand: async (command, timeoutMs) => {
+        calls.push({ via: 'execCommand', command, timeoutMs });
+        return { stdout: 'buffered', stderr: '', exitCode: 0 };
+      },
+      execStream: async (command, options) => {
+        calls.push({ via: 'execStream', command, options });
+        return { stdout: 'streamed', stderr: '', exitCode: 0 };
+      }
+    });
+    return { client, calls };
+  }
+
+  it('keeps a plain gateway exec on the buffered request', async () => {
+    const { client, calls } = streamingClient();
+    await expect(session(client).exec('uname -a')).resolves.toMatchObject({ stdout: 'buffered' });
+    expect(calls).toEqual([{ via: 'execCommand', command: 'uname -a', timeoutMs: 120_000 }]);
+  });
+
+  it('streams a gateway exec that asks for output callbacks, a signal or no retention', async () => {
+    for (const options of [{ onStdout: () => undefined }, { signal: new AbortController().signal }, { retainOutput: false }]) {
+      const { client, calls } = streamingClient();
+      await session(client).exec('tail -f log', options);
+      expect(calls).toEqual([{ via: 'execStream', command: 'tail -f log', options }]);
+    }
+  });
+
+  it('passes execStream options through unchanged, retainOutput included', async () => {
+    const { client, calls } = streamingClient();
+    const options = { retainOutput: false, onStdout: () => undefined };
+    await expect(session(client).execStream?.('journalctl -f', options)).resolves.toMatchObject({
+      stdout: 'streamed'
+    });
+    expect(calls).toEqual([{ via: 'execStream', command: 'journalctl -f', options }]);
+  });
+
+  it('runs every relay exec through its stream with a bounded default timeout', async () => {
+    const { client, calls } = streamingClient();
+    const relay = createRemoteSession(client, {
+      transport: 'cloudflare-relay',
+      host: 'example.test',
+      user: 'ubuntu',
+      port: 22
+    });
+    await relay.exec('uname -a');
+    await relay.exec('ls', { timeoutMs: 5000 });
+    expect(calls).toEqual([
+      { via: 'execStream', command: 'uname -a', options: { timeoutMs: 30 * 60_000 } },
+      { via: 'execStream', command: 'ls', options: { timeoutMs: 5000 } }
+    ]);
+  });
+});

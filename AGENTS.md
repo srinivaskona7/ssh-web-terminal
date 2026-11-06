@@ -33,3 +33,13 @@ Synchronized with `memory/MEMORY.md` and `memory/SESSION_PLAN.md`.
 - Operational setup and target connection checks are documented in `docs/RUNBOOK.md`, section 5.
 - `.npmrc` pins the public npm registry; all `package-lock.json` download URLs must use `registry.npmjs.org` so GitHub and Cloudflare runners can install without corporate network access. Keep dependency-install failures visible in CI logs.
 - Relay PTY creation must wait for server acknowledgements of both `pty-req` and `shell`; `connected`/`channel_opened` must not be reported before acceptance. Production limitations of relay file tools and process resumption are recorded in `docs/RUNBOOK.md`.
+
+## Workspace additions (2026-11)
+- `apps/web/src/ui/shell/`: `AppHeader.tsx`, `AppRail.tsx`, `SettingsScreen.tsx`, `WelcomeScreen.tsx`, `TurnstileWidget.tsx`, `types.ts`; extracted shell components used by `ui/App.tsx`.
+- Welcome dashboard: `ui/WelcomeDashboard.tsx`, `ui/welcome-data.ts`, `ui/welcome-dashboard.css`; `ui/ide-storage.ts` reads `webssh.ide.v1` project and recent-file paths only.
+- Remote I/O: `files/remote-file-io.ts` handles paged reads and chunked writes; `transport/exec-output.ts`, `remote-signer.ts`, `session-env.ts` handle bounded output, fingerprint routing and environment reports.
+- Gateway helpers: `apps/gateway/cmd/gateway/env.go`, `hops.go`, `execstream.go` implement environment validation, ProxyJump credentials and bounded command streams; integration tests use `harness_test.go`.
+- `apps/web/src/devops/`: `types.ts`, `exec.ts`, `logs/`, `tools/network/`, `tools/delivery/`, `tools/system/`; engine foundations, not a wired DevOps screen.
+- `apps/web/src/diagrams/`: `model.ts`, `graph-index.ts`, `diff.ts`, `download.ts`, `layout/`, `sources/`, `advanced/analyse/`, `advanced/data/`; engine foundations, not a wired Diagram Studio screen. Design contract: `docs/DIAGRAMS_FEATURES.md`.
+- Diagram snapshots: IndexedDB `webssh-diagrams` version 1, store `snapshots`, key path `id`, index `byEstate` on `estate`; newest 30 snapshots per estate, without `evidence.raw`. Implementation: `diagrams/advanced/data/snapshots-store.ts`.
+- Generate tokens before lint/typecheck/tests/build using root npm scripts. Gates: `npm run lint`, `npm test`, `VITE_BASE_PATH=/ssh-web-terminal/ npm run build`, and `go test -race ./...` in `apps/gateway`; browser integration uses `npx playwright test` and requires local sockets.

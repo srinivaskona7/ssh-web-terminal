@@ -39,6 +39,10 @@ var httpCRLF = string([]byte{13, 10})
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+// maxJumpHops bounds a ProxyJump chain so a connect request cannot force an
+// unbounded number of outbound SSH handshakes.
+const maxJumpHops = 8
+
 type ServerConfig struct {
 	ListenAddr         string
 	AllowedOrigins     []string
@@ -56,6 +60,9 @@ type ServerConfig struct {
 	MaxSessionsPerUser int
 	RateLimitPerSec    float64
 	TestSSHDInfo       map[string]any
+	// AuditWriter overrides the audit sink; nil means stdout. Tests use it to
+	// assert what a session actually recorded.
+	AuditWriter io.Writer
 }
 
 func loadConfigFromEnv() ServerConfig {
@@ -344,7 +351,12 @@ func NewMux(cfg ServerConfig) (http.Handler, error) {
 	origins := auth.NewOriginValidator(cfg.AllowedOrigins)
 	limiter := auth.NewRateLimiter(cfg.RateLimitPerSec, int(cfg.RateLimitPerSec*2)+20)
 	sessions := session.NewManager(cfg.RingBufferBytes, cfg.SessionGrace, cfg.MaxSessionsPerUser)
-	auditor := audit.NewLogger(os.Stdout, 1000)
+	auditOut := cfg.AuditWriter
+	if auditOut == nil {
+		auditOut = os.Stdout
+	}
+	auditor := audit.NewLogger(auditOut, 1000)
+	var execStreamsActive atomic.Int64
 
 	var oidcVerifier *auth.OIDCVerifier
 	if cfg.OIDCIssuer != "" {
@@ -391,6 +403,7 @@ func NewMux(cfg ServerConfig) (http.Handler, error) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = fmt.Fprintln(w, "webssh_gateway_active_sessions", sessions.ActiveCount())
 		_, _ = fmt.Fprintln(w, "webssh_gateway_audit_events_total", len(auditor.Recent()))
+		_, _ = fmt.Fprintln(w, "webssh_gateway_exec_streams_active", execStreamsActive.Load())
 	})
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -458,7 +471,7 @@ func NewMux(cfg ServerConfig) (http.Handler, error) {
 		if err != nil {
 			return
 		}
-		handleWebSocketSession(r.Context(), ws, guard, sessions, auditor)
+		handleWebSocketSession(r.Context(), ws, guard, sessions, auditor, &execStreamsActive)
 	})
 
 	return mux, nil
@@ -470,6 +483,7 @@ func handleWebSocketSession(
 	guard *policy.Guard,
 	sessions *session.Manager,
 	auditor *audit.Logger,
+	execStreamsActive *atomic.Int64,
 ) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -482,15 +496,18 @@ func handleWebSocketSession(
 		sftpBridge  *sshbridge.SFTPBridge
 		tunnelMgr   *sshbridge.TunnelManager
 		gwSession   *session.Session
-		ptyChannels = make(map[uint16]*ptyChannelHandle)
+		ptyChannels        = make(map[uint16]*ptyChannelHandle)
 		nextChanID  uint16 = protocol.FirstPtyChannelID
 		hostKeyCh          = make(chan bool, 1)
 		signMu      sync.Mutex
 		signWaiters = make(map[string]chan string)
 		reqSeq      atomic.Uint64
+		connEnv     map[string]string
+		streams     = newExecStreams(execStreamsActive, ws.sendControl)
 	)
 
 	defer func() {
+		streams.closeAll()
 		stateMu.Lock()
 		for _, ch := range ptyChannels {
 			ch.Close()
@@ -518,7 +535,9 @@ func handleWebSocketSession(
 		stateMu.Unlock()
 	}()
 
-	openPtyChannel := func(client *ssh.Client, requestedID uint16, cols, rows int) (uint16, error) {
+	// openPtyChannel sends the connect env before pty-req on every PTY and
+	// reports which names the server accepted.
+	openPtyChannel := func(client *ssh.Client, requestedID uint16, cols, rows int, env map[string]string) (uint16, []string, []string, error) {
 		if cols <= 0 {
 			cols = 80
 		}
@@ -527,8 +546,9 @@ func handleWebSocketSession(
 		}
 		sess, err := client.NewSession()
 		if err != nil {
-			return 0, err
+			return 0, nil, nil, err
 		}
+		accepted, rejected := applyEnv(sess, env)
 		modes := ssh.TerminalModes{
 			ssh.ECHO:          1,
 			ssh.TTY_OP_ISPEED: 14400,
@@ -536,26 +556,26 @@ func handleWebSocketSession(
 		}
 		if err := sess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
 			_ = sess.Close()
-			return 0, err
+			return 0, nil, nil, err
 		}
 		stdin, err := sess.StdinPipe()
 		if err != nil {
 			_ = sess.Close()
-			return 0, err
+			return 0, nil, nil, err
 		}
 		stdout, err := sess.StdoutPipe()
 		if err != nil {
 			_ = sess.Close()
-			return 0, err
+			return 0, nil, nil, err
 		}
 		stderr, err := sess.StderrPipe()
 		if err != nil {
 			_ = sess.Close()
-			return 0, err
+			return 0, nil, nil, err
 		}
 		if err := sess.Shell(); err != nil {
 			_ = sess.Close()
-			return 0, err
+			return 0, nil, nil, err
 		}
 
 		stateMu.Lock()
@@ -625,7 +645,7 @@ func handleWebSocketSession(
 			})
 		}()
 
-		return chID, nil
+		return chID, accepted, rejected, nil
 	}
 
 	for {
@@ -699,6 +719,15 @@ func handleWebSocketSession(
 					if port <= 0 {
 						port = 22
 					}
+					if envErr := validateEnv(msg.Env); envErr != nil {
+						_ = ws.sendControl(protocol.ControlMessage{
+							Type:    "error",
+							Code:    "invalid_env",
+							Message: envErr.Error(),
+							Fatal:   true,
+						})
+						return
+					}
 					verifiedIP, err := guard.Check(ctx, msg.Host, port)
 					if err != nil {
 						auditor.Record(audit.Entry{
@@ -726,33 +755,32 @@ func handleWebSocketSession(
 						User:     msg.User,
 						Password: msg.Password,
 					}
-					authUsed := "password"
-
-					if strings.TrimSpace(msg.PrivateKeyPem) != "" {
-						signer, parseErr := sshbridge.ParsePrivateKeySigner(msg.PrivateKeyPem, msg.PrivateKeyPassphrase)
-						if parseErr != nil {
-							_ = ws.sendControl(protocol.ControlMessage{
+					// hopAuth builds one host's credentials. hopIndex is 1-based for
+					// ProxyJump hops and 0 for the target; label prefixes errors.
+					hopAuth := func(creds hopCredentials, hopIndex int, host string, hopPort int, label string) (ssh.Signer, string, *protocol.ControlMessage) {
+						fail := func(code, format string, err error) (ssh.Signer, string, *protocol.ControlMessage) {
+							return nil, "", &protocol.ControlMessage{
 								Type:    "error",
-								Code:    "INVALID_PRIVATE_KEY",
-								Message: fmt.Sprintf("Private key parse failed: %v", parseErr),
+								Code:    code,
+								Message: label + fmt.Sprintf(format, err),
 								Fatal:   true,
-							})
-							return
+							}
 						}
-						targetHop.Signer = signer
-						authUsed = "private_key (" + signer.PublicKey().Type() + ")"
-					} else if strings.TrimSpace(msg.PublicKey) != "" {
-						pubKey, _, _, _, parseErr := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(msg.PublicKey)))
+						if strings.TrimSpace(creds.PrivateKeyPem) != "" {
+							signer, parseErr := sshbridge.ParsePrivateKeySigner(creds.PrivateKeyPem, creds.PrivateKeyPassphrase)
+							if parseErr != nil {
+								return fail("INVALID_PRIVATE_KEY", "Private key parse failed: %v", parseErr)
+							}
+							return signer, "private_key (" + signer.PublicKey().Type() + ")", nil
+						}
+						if strings.TrimSpace(creds.PublicKey) == "" {
+							return nil, "password", nil
+						}
+						pubKey, _, _, _, parseErr := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(creds.PublicKey)))
 						if parseErr != nil {
-							_ = ws.sendControl(protocol.ControlMessage{
-								Type:    "error",
-								Code:    "INVALID_PUBLIC_KEY",
-								Message: fmt.Sprintf("Public key parse failed: %v", parseErr),
-								Fatal:   true,
-							})
-							return
+							return fail("INVALID_PUBLIC_KEY", "Public key parse failed: %v", parseErr)
 						}
-						targetHop.Signer = sshbridge.NewRemoteSigner(pubKey, func(signCtx context.Context, alg string, data []byte) ([]byte, error) {
+						signer := sshbridge.NewRemoteSigner(pubKey, func(signCtx context.Context, alg string, data []byte) ([]byte, error) {
 							reqID := fmt.Sprintf("sig_%d", reqSeq.Add(1))
 							waitCh := make(chan string, 1)
 							signMu.Lock()
@@ -769,7 +797,10 @@ func handleWebSocketSession(
 								RequestID:      reqID,
 								DataBase64:     base64.StdEncoding.EncodeToString(data),
 								Algorithm:      alg,
-								KeyFingerprint: msg.KeyFingerprint,
+								KeyFingerprint: creds.KeyFingerprint,
+								Host:           host,
+								Port:           hopPort,
+								HopIndex:       hopIndex,
 							}); err != nil {
 								return nil, err
 							}
@@ -786,7 +817,83 @@ func handleWebSocketSession(
 								return base64.StdEncoding.DecodeString(sigB64)
 							}
 						})
-						authUsed = "remote_signer (" + pubKey.Type() + ")"
+						return signer, "remote_signer (" + pubKey.Type() + ")", nil
+					}
+
+					targetSigner, authUsed, authFail := hopAuth(resolveHopCredentials(protocol.JumpHop{}, msg), 0, msg.Host, port, "")
+					if authFail != nil {
+						_ = ws.sendControl(*authFail)
+						return
+					}
+					targetHop.Signer = targetSigner
+
+					// ProxyJump hops are dialled in order before the target. A hop
+					// that names any credential authenticates with only its own; one
+					// that names none reuses the target's. Each hop is validated by
+					// the same destination policy and host-key prompt.
+					var jumpHops []sshbridge.HopConfig
+					var auditJumps []audit.Hop
+					if len(msg.Jump) > maxJumpHops {
+						_ = ws.sendControl(protocol.ControlMessage{
+							Type:    "error",
+							Code:    "INVALID_JUMP_CHAIN",
+							Message: fmt.Sprintf("ProxyJump chain of %d hops exceeds the limit of %d", len(msg.Jump), maxJumpHops),
+							Fatal:   true,
+						})
+						return
+					}
+					for i, hop := range msg.Jump {
+						hopHost := strings.TrimSpace(hop.Host)
+						hopPort := hop.Port
+						if hopPort <= 0 {
+							hopPort = 22
+						}
+						hopUser := strings.TrimSpace(hop.User)
+						if hopUser == "" {
+							hopUser = msg.User
+						}
+						hopIP, hopErr := guard.Check(ctx, hopHost, hopPort)
+						if hopErr != nil {
+							auditor.Record(audit.Entry{
+								Event:      audit.EventPolicyDenied,
+								UserID:     msg.User,
+								TargetHost: hopHost,
+								TargetPort: hopPort,
+								TargetUser: hopUser,
+								Reason:     hopErr.Error(),
+							})
+							_ = ws.sendControl(protocol.ControlMessage{
+								Type:    "error",
+								Code:    "POLICY_DENIED",
+								Message: fmt.Sprintf("ProxyJump hop %s:%d rejected: %v", hopHost, hopPort, hopErr),
+								Fatal:   true,
+							})
+							return
+						}
+						creds := resolveHopCredentials(hop, msg)
+						if !creds.Inherited && creds.Password == "" && strings.TrimSpace(creds.PrivateKeyPem) == "" && strings.TrimSpace(creds.PublicKey) == "" {
+							_ = ws.sendControl(protocol.ControlMessage{
+								Type:    "error",
+								Code:    "INVALID_JUMP_CHAIN",
+								Message: fmt.Sprintf("ProxyJump hop %d (%s:%d) sets credentials but none it can authenticate with", i+1, hopHost, hopPort),
+								Fatal:   true,
+							})
+							return
+						}
+						hopSigner, hopAuthUsed, hopFail := hopAuth(creds, i+1, hopHost, hopPort, fmt.Sprintf("ProxyJump hop %d: ", i+1))
+						if hopFail != nil {
+							_ = ws.sendControl(*hopFail)
+							return
+						}
+						jumpHops = append(jumpHops, sshbridge.HopConfig{
+							Addr:     net.JoinHostPort(hopIP.String(), strconv.Itoa(hopPort)),
+							Host:     hopHost,
+							Port:     hopPort,
+							User:     hopUser,
+							Signer:   hopSigner,
+							Password: creds.Password,
+						})
+						auditJumps = append(auditJumps, audit.Hop{Host: hopHost, Port: hopPort, User: hopUser, AuthMethod: hopAuthUsed})
 					}
 
 					hkCb := func(hkCtx context.Context, host string, p int, key ssh.PublicKey) error {
@@ -820,7 +927,7 @@ func handleWebSocketSession(
 						}
 					}
 
-					client, err := sshbridge.DialChain(ctx, nil, targetHop, hkCb)
+					client, err := sshbridge.DialChain(ctx, jumpHops, targetHop, hkCb)
 					if err != nil {
 						code := "SSH_CONNECT_FAILED"
 						if errors.Is(err, sshbridge.ErrHostKeyRejected) {
@@ -828,6 +935,7 @@ func handleWebSocketSession(
 						}
 						auditor.Record(audit.Entry{
 							Event:      audit.EventAuthFailure,
+							Jumps:      auditJumps,
 							UserID:     msg.User,
 							TargetHost: msg.Host,
 							TargetPort: port,
@@ -871,13 +979,14 @@ func handleWebSocketSession(
 
 					stateMu.Lock()
 					sshClient = client
+					connEnv = msg.Env
 					sftpClient = sfClient
 					sftpBridge = sfBridge
 					tunnelMgr = tMgr
 					gwSession = sessObj
 					stateMu.Unlock()
 
-					ptyChanID, err := openPtyChannel(client, protocol.FirstPtyChannelID, msg.Cols, msg.Rows)
+					ptyChanID, envAccepted, envRejected, err := openPtyChannel(client, protocol.FirstPtyChannelID, msg.Cols, msg.Rows, msg.Env)
 					if err != nil {
 						_ = ws.sendControl(protocol.ControlMessage{
 							Type:    "error",
@@ -888,11 +997,6 @@ func handleWebSocketSession(
 						return
 					}
 
-					serverVer := string(client.ServerVersion())
-					if serverVer == "" {
-						serverVer = "SSH-2.0-OpenSSH"
-					}
-
 					auditor.Record(audit.Entry{
 						Event:          audit.EventAuthSuccess,
 						SessionID:      sessObj.ID,
@@ -901,6 +1005,9 @@ func handleWebSocketSession(
 						TargetPort:     port,
 						TargetUser:     msg.User,
 						KeyFingerprint: msg.KeyFingerprint,
+						Jumps:          auditJumps,
+						EnvAccepted:    envAccepted,
+						EnvRejected:    envRejected,
 					})
 
 					_ = ws.sendControl(protocol.ControlMessage{
@@ -908,12 +1015,12 @@ func handleWebSocketSession(
 						SessionID:      sessObj.ID,
 						ResumeToken:    sessObj.ResumeToken,
 						PtyChannel:     ptyChanID,
-						Cipher:         "chacha20-poly1305@openssh.com",
-						Kex:            "curve25519-sha256",
-						ServerVersion:  serverVer,
+						ServerVersion:  string(client.ServerVersion()),
 						AuthMethodUsed: authUsed,
 						SftpReady:      sftpReady,
 						SftpError:      sftpErrStr,
+						EnvAccepted:    envAccepted,
+						EnvRejected:    envRejected,
 					})
 				}(ctrl)
 
@@ -921,6 +1028,7 @@ func handleWebSocketSession(
 				go func(msg protocol.ControlMessage) {
 					stateMu.Lock()
 					client := sshClient
+					env := connEnv
 					stateMu.Unlock()
 					if client == nil {
 						_ = ws.sendControl(protocol.ControlMessage{
@@ -931,7 +1039,7 @@ func handleWebSocketSession(
 						})
 						return
 					}
-					chID, err := openPtyChannel(client, msg.Channel, msg.Cols, msg.Rows)
+					chID, envAccepted, envRejected, err := openPtyChannel(client, msg.Channel, msg.Cols, msg.Rows, env)
 					if err != nil {
 						_ = ws.sendControl(protocol.ControlMessage{
 							Type:  "channel_opened",
@@ -942,10 +1050,12 @@ func handleWebSocketSession(
 						return
 					}
 					_ = ws.sendControl(protocol.ControlMessage{
-						Type:    "channel_opened",
-						OpID:    msg.OpID,
-						Channel: chID,
-						OK:      true,
+						Type:        "channel_opened",
+						OpID:        msg.OpID,
+						Channel:     chID,
+						OK:          true,
+						EnvAccepted: envAccepted,
+						EnvRejected: envRejected,
 					})
 				}(ctrl)
 
@@ -1005,6 +1115,15 @@ func handleWebSocketSession(
 						Error:      errStr,
 					})
 				}(ctrl)
+
+			case "exec_stream":
+				stateMu.Lock()
+				client := sshClient
+				stateMu.Unlock()
+				streams.start(client, ctrl)
+
+			case "exec_cancel":
+				streams.cancel(ctrl.OpID)
 
 			case "sftp_op":
 				go func(msg protocol.ControlMessage) {

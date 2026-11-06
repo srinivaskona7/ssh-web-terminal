@@ -21,3 +21,6 @@
 /apps/relay/.wrangler/
 /apps/relay/.dev.vars
 /apps/relay/.dev.vars.*
+
+# Local browser inspection artifacts
+/.claude/tmp/

@@ -152,7 +152,112 @@ func (c *chainedConn) Close() error {
 	return err2
 }
 
+// hopDialTimeout bounds the TCP connect and the SSH handshake for each hop.
+// ssh.ClientConfig.Timeout is read only by ssh.Dial, never by ssh.NewClientConn,
+// so a hop that accepts TCP and then sends no SSH banner would otherwise hang
+// the connect forever. SetDeadline cannot carry this bound: a hop reached
+// through a jump is a *ssh.chanConn, whose SetDeadline always reports "deadline
+// not supported". The watchdog therefore closes the connection instead, and
+// pauses while the host-key callback waits for a human decision.
+var hopDialTimeout = 15 * time.Second
+
+// handshakeWatchdog aborts a stalled SSH handshake by closing its connection.
+// pause/resume bracket the host-key callback, whose duration is the user's.
+type handshakeWatchdog struct {
+	mu     sync.Mutex
+	timer  *time.Timer
+	limit  time.Duration
+	conn   net.Conn
+	fired  bool
+	paused bool
+}
+
+func newHandshakeWatchdog(conn net.Conn, limit time.Duration) *handshakeWatchdog {
+	w := &handshakeWatchdog{conn: conn, limit: limit}
+	w.timer = time.AfterFunc(limit, w.onExpire)
+	return w
+}
+
+func (w *handshakeWatchdog) onExpire() {
+	w.mu.Lock()
+	if w.paused {
+		// The timer fired just as the host-key prompt opened; resume() re-arms it.
+		w.mu.Unlock()
+		return
+	}
+	w.fired = true
+	w.mu.Unlock()
+	_ = w.conn.Close()
+}
+
+func (w *handshakeWatchdog) pause() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired {
+		return
+	}
+	w.timer.Stop()
+	w.paused = true
+}
+
+func (w *handshakeWatchdog) resume() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired {
+		return
+	}
+	w.paused = false
+	w.timer.Reset(w.limit)
+}
+
+func (w *handshakeWatchdog) stop() {
+	w.timer.Stop()
+}
+
+func (w *handshakeWatchdog) expired() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.fired
+}
+
+// dialThroughChain opens a TCP connection through an established jump client
+// with a deadline. ssh.Client.Dial has none, so a blackholing jump host would
+// otherwise leave the connect pending forever.
+func dialThroughChain(client *ssh.Client, addr string) (net.Conn, error) {
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		conn, err := client.Dial("tcp", addr)
+		done <- result{conn: conn, err: err}
+	}()
+	select {
+	case r := <-done:
+		return r.conn, r.err
+	case <-time.After(hopDialTimeout):
+		// Closing the parent unblocks the dialling goroutine; the buffered
+		// channel keeps it from leaking either way.
+		_ = client.Close()
+		return nil, fmt.Errorf(
+			"sshbridge: dialling %s through the jump host timed out after %s",
+			addr,
+			hopDialTimeout,
+		)
+	}
+}
+
 // DialChain dials a target SSH server directly or through one or more ProxyJump bastion hops.
+// jumpHopError names the ProxyJump hop a failure happened on, so a bastion
+// problem is not mistaken for one on the target. Target errors pass through.
+func jumpHopError(i, jumps int, addr string, err error) error {
+	if i >= jumps {
+		return err
+	}
+	return fmt.Errorf("sshbridge: ProxyJump hop %d (%s): %w", i+1, addr, err)
+}
+
 func DialChain(ctx context.Context, hops []HopConfig, target HopConfig, hkCb HostKeyCallback) (*ssh.Client, error) {
 	var currentClient *ssh.Client
 
@@ -169,10 +274,11 @@ func DialChain(ctx context.Context, hops []HopConfig, target HopConfig, hkCb Hos
 			if currentClient != nil {
 				_ = currentClient.Close()
 			}
-			return nil, errors.New("sshbridge: no authentication method provided")
+			return nil, jumpHopError(i, len(hops), hop.Addr, errors.New("sshbridge: no authentication method provided"))
 		}
 
 		hopCopy := hop
+		var watchdog *handshakeWatchdog
 		cfg := &ssh.ClientConfig{
 			User: hopCopy.User,
 			Auth: authMethods,
@@ -180,36 +286,57 @@ func DialChain(ctx context.Context, hops []HopConfig, target HopConfig, hkCb Hos
 				if hkCb == nil {
 					return nil
 				}
+				// The accept/deny decision is the user's and has no time
+				// bound; the watchdog is re-armed afterwards so a server that
+				// stalls user authentication still cannot hang the connect.
+				if watchdog != nil {
+					watchdog.pause()
+					defer watchdog.resume()
+				}
 				return hkCb(ctx, hopCopy.Host, hopCopy.Port, key)
 			},
 			Timeout: 10 * time.Second,
 		}
 
 		if i == 0 {
-			var d net.Dialer
+			d := net.Dialer{Timeout: hopDialTimeout}
 			conn, err := d.DialContext(ctx, "tcp", hopCopy.Addr)
 			if err != nil {
-				return nil, err
+				return nil, jumpHopError(i, len(hops), hop.Addr, err)
 			}
+			watchdog = newHandshakeWatchdog(conn, hopDialTimeout)
 			c, chans, reqs, err := ssh.NewClientConn(conn, hopCopy.Addr, cfg)
 			if err != nil {
+				timedOut := watchdog.expired()
+				watchdog.stop()
 				_ = conn.Close()
-				return nil, err
+				if timedOut {
+					return nil, jumpHopError(i, len(hops), hop.Addr, fmt.Errorf("sshbridge: SSH handshake with %s timed out after %s", hopCopy.Addr, hopDialTimeout))
+				}
+				return nil, jumpHopError(i, len(hops), hop.Addr, err)
 			}
+			watchdog.stop()
 			currentClient = ssh.NewClient(c, chans, reqs)
 		} else {
 			prevClient := currentClient
-			conn, err := prevClient.Dial("tcp", hopCopy.Addr)
+			conn, err := dialThroughChain(prevClient, hopCopy.Addr)
 			if err != nil {
 				_ = prevClient.Close()
-				return nil, err
+				return nil, jumpHopError(i, len(hops), hop.Addr, err)
 			}
 			wrappedConn := &chainedConn{Conn: conn, parent: prevClient}
+			watchdog = newHandshakeWatchdog(wrappedConn, hopDialTimeout)
 			c, chans, reqs, err := ssh.NewClientConn(wrappedConn, hopCopy.Addr, cfg)
 			if err != nil {
+				timedOut := watchdog.expired()
+				watchdog.stop()
 				_ = wrappedConn.Close()
-				return nil, err
+				if timedOut {
+					return nil, jumpHopError(i, len(hops), hop.Addr, fmt.Errorf("sshbridge: SSH handshake with %s through the jump host timed out after %s", hopCopy.Addr, hopDialTimeout))
+				}
+				return nil, jumpHopError(i, len(hops), hop.Addr, err)
 			}
+			watchdog.stop()
 			currentClient = ssh.NewClient(c, chans, reqs)
 		}
 	}

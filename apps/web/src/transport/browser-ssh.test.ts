@@ -89,6 +89,16 @@ class IsolatedSsh2ServerFixture {
   private sftpServers = new Map<number, FakeSftpServer>();
   public files = new Map<string, string>([['README.md', '# WebSSH Relay Server']]);
   public closed = false;
+  /** Channel requests and env replies in the order they happened. */
+  public requestLog: string[] = [];
+  /** Text the client typed into PTY channels. */
+  public ptyInput = '';
+  /** Channels the client closed itself. */
+  public clientClosedChannels: number[] = [];
+  /** Delay before answering env requests, sent outside the inbound chain. */
+  public envReplyDelayMs = 0;
+  /** Accepted publickey algorithms seen during userauth, with the signature presence flag. */
+  public publickeyAttempts: string[] = [];
 
   private inBuffer: Uint8Array = new Uint8Array(0);
   private clientVersion = '';
@@ -352,6 +362,8 @@ class IsolatedSsh2ServerFixture {
           );
         }
       } else if (method === 'publickey') {
+        offset += 1; // has-signature flag
+        this.publickeyAttempts.push(readStr());
         await this.sendPacket(new Uint8Array([52])); // USERAUTH_SUCCESS
       }
       return;
@@ -380,6 +392,10 @@ class IsolatedSsh2ServerFixture {
       // CHANNEL_DATA (used by direct-tcpip HTTP preview or interactive PTY)
       const recipientCh = readUint32();
       const data = readBytes();
+      if (this.openedPtyChannels.includes(recipientCh)) {
+        this.ptyInput += new TextDecoder().decode(data);
+        return;
+      }
       if (this.directTcpChannels.has(recipientCh)) {
         const reqText = new TextDecoder().decode(data);
         if (reqText.startsWith('GET ')) {
@@ -415,11 +431,38 @@ class IsolatedSsh2ServerFixture {
       return;
     }
 
+    if (msgType === 97) {
+      // CHANNEL_CLOSE from the client
+      this.clientClosedChannels.push(readUint32());
+      return;
+    }
+
     if (msgType === 98) {
       // CHANNEL_REQUEST
       const recipientCh = readUint32();
       const reqType = readStr();
       const wantReply = payload[offset++]! !== 0;
+      if (reqType === 'env') {
+        // OpenSSH's default AcceptEnv: LANG and LC_* only.
+        const name = readStr();
+        readStr(); // value
+        this.requestLog.push(`env:${name}`);
+        const accepted = name === 'LANG' || name.startsWith('LC_');
+        const reply = async () => {
+          this.requestLog.push(`env-reply:${name}`);
+          await this.sendPacket(concatBytes(new Uint8Array([accepted ? 99 : 100]), writeUint32BE(recipientCh)));
+        };
+        if (!wantReply) return;
+        if (this.envReplyDelayMs > 0) {
+          setTimeout(() => {
+            this.processing = this.processing.then(reply);
+          }, this.envReplyDelayMs);
+        } else {
+          await reply();
+        }
+        return;
+      }
+      this.requestLog.push(reqType);
       if (reqType === 'pty-req') {
         this.openedPtyChannels.push(recipientCh);
       } else if (reqType === 'subsystem') {
@@ -457,6 +500,23 @@ class IsolatedSsh2ServerFixture {
           this.files.set(target, decoded);
         } else if (cmd.startsWith('chmod ')) {
           out = '';
+        } else if (cmd === 'follow') {
+          // A log follow: output, then nothing until the client closes the channel.
+          await this.sendPacket(
+            concatBytes(new Uint8Array([94]), writeUint32BE(recipientCh), sshString(`tick 1${lf}`))
+          );
+          return;
+        } else if (cmd === 'split-utf8') {
+          const bytes = new TextEncoder().encode('✓ ok');
+          await this.sendPacket(
+            concatBytes(new Uint8Array([94]), writeUint32BE(recipientCh), sshString(bytes.subarray(0, 2)))
+          );
+          await this.sendPacket(
+            concatBytes(new Uint8Array([94]), writeUint32BE(recipientCh), sshString(bytes.subarray(2)))
+          );
+        } else if (cmd === 'exit-3') {
+          errOut = `failed${lf}`;
+          exitCode = 3;
         } else if (cmd.startsWith('printf ')) {
           out = cmd.slice(7).replace(/^['"]|['"]$/g, '');
         } else {
@@ -807,6 +867,272 @@ describe('requestConnectionTicket', () => {
       ).rejects.toThrow('ERR_TURNSTILE_FAILED: Complete the human check to continue.');
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+});
+
+type RelayParams = ConstructorParameters<typeof BrowserSshRelaySessionClient>[0];
+
+/** Install a WebSocket that bridges to a fresh SSH fixture; returns the fixtures it creates. */
+async function installRelayFixture(configure: (fixture: IsolatedSsh2ServerFixture) => void = () => undefined) {
+  const hostKeyPair = (await subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify'])) as CryptoKeyPair;
+  const rawPub32 = new Uint8Array(await subtle.exportKey('raw', hostKeyPair.publicKey));
+  const hostKeyBlob = concatBytes(sshString('ssh-ed25519'), sshString(rawPub32));
+  const fixtures: IsolatedSsh2ServerFixture[] = [];
+  const previous = globalThis.WebSocket;
+
+  class BridgedWebSocket {
+    static readonly OPEN = 1;
+    public readyState = 0;
+    public binaryType = 'arraybuffer';
+    public onopen: (() => void) | null = null;
+    public onmessage: ((ev: { data: Uint8Array }) => void) | null = null;
+    public onerror: (() => void) | null = null;
+    public onclose: ((ev: { code: number; reason: string }) => void) | null = null;
+    private fixture: IsolatedSsh2ServerFixture;
+
+    constructor(public readonly url: string) {
+      this.fixture = new IsolatedSsh2ServerFixture(hostKeyPair, hostKeyBlob, (chunk) => {
+        if (this.readyState === 1) this.onmessage?.({ data: new Uint8Array(chunk) });
+      });
+      configure(this.fixture);
+      fixtures.push(this.fixture);
+      setTimeout(() => {
+        this.readyState = 1;
+        this.onopen?.();
+        this.fixture.startBanner();
+      }, 2);
+    }
+
+    send(data: Uint8Array | ArrayBuffer): void {
+      const bytes = ArrayBuffer.isView(data)
+        ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+        : new Uint8Array(data);
+      this.fixture.receiveFromClient(bytes);
+    }
+
+    close(code = 1000, reason = ''): void {
+      this.readyState = 3;
+      this.fixture.closed = true;
+      this.onclose?.({ code, reason });
+    }
+  }
+
+  Object.defineProperty(globalThis, 'WebSocket', { value: BridgedWebSocket, writable: true, configurable: true });
+  return {
+    fixtures,
+    restore: () =>
+      Object.defineProperty(globalThis, 'WebSocket', { value: previous, writable: true, configurable: true })
+  };
+}
+
+function relayParams(overrides: Partial<RelayParams> = {}): RelayParams {
+  return {
+    transportMode: 'cloudflare-relay',
+    gatewayUrl: 'wss://webssh-studio-relay.example.workers.dev/ws',
+    host: 'ec2.example.com',
+    port: 22,
+    user: 'ubuntu',
+    authMethod: 'password',
+    password: 'testpass123',
+    cols: 80,
+    rows: 24,
+    onPtyData: () => {},
+    onHostKeyPrompt: async () => true,
+    ...overrides
+  };
+}
+
+describe('relay environment requests', () => {
+  it('sends env before pty-req, waits for each reply and reports accepted and rejected names', async () => {
+    const relay = await installRelayFixture((fixture) => {
+      fixture.envReplyDelayMs = 15;
+    });
+    try {
+      const client = new BrowserSshRelaySessionClient(
+        relayParams({ env: { LANG: 'C.UTF-8', APP_ENV: 'staging', LC_ALL: 'C' } })
+      );
+      const meta = await client.connect();
+      expect(meta.envAccepted).toEqual(['LANG', 'LC_ALL']);
+      expect(meta.envRejected).toEqual(['APP_ENV']);
+      const fixture = relay.fixtures[0]!;
+      expect(fixture.requestLog).toEqual([
+        'env:LANG',
+        'env-reply:LANG',
+        'env:APP_ENV',
+        'env-reply:APP_ENV',
+        'env:LC_ALL',
+        'env-reply:LC_ALL',
+        'pty-req',
+        'shell'
+      ]);
+
+      const tab = await client.openChannel(100, 30);
+      expect(tab).toMatchObject({ ok: true, envAccepted: ['LANG', 'LC_ALL'], envRejected: ['APP_ENV'] });
+
+      // A rejected variable is reported, never smuggled in through the shell.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(fixture.ptyInput).not.toMatch(/export|APP_ENV/);
+      expect(fixture.requestLog.some((entry) => /export/.test(entry))).toBe(false);
+      client.close();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('sends no env request and reports no verdict when none is requested', async () => {
+    const relay = await installRelayFixture();
+    try {
+      const client = new BrowserSshRelaySessionClient(relayParams());
+      const meta = await client.connect();
+      expect(meta).not.toHaveProperty('envAccepted');
+      expect(meta).not.toHaveProperty('envRejected');
+      expect(relay.fixtures[0]!.requestLog).toEqual(['pty-req', 'shell']);
+      client.close();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('refuses invalid variables before dialling the relay', async () => {
+    const relay = await installRelayFixture();
+    try {
+      const client = new BrowserSshRelaySessionClient(relayParams({ env: { 'BAD NAME': 'x' } }));
+      await expect(client.connect()).rejects.toThrow(/^invalid_env: .*BAD NAME/);
+      expect(relay.fixtures).toHaveLength(0);
+    } finally {
+      relay.restore();
+    }
+  });
+});
+
+describe('relay execStream', () => {
+  it('streams output, joins split UTF-8, keeps nonzero exits as results', async () => {
+    const relay = await installRelayFixture();
+    try {
+      const client = new BrowserSshRelaySessionClient(relayParams());
+      await client.connect();
+      const chunks: string[] = [];
+      const split = await client.execStream('split-utf8', { onStdout: (text) => chunks.push(text) });
+      expect(split.stdout).toBe('✓ ok');
+      expect(chunks.join('')).toBe('✓ ok');
+      expect(chunks.some((chunk) => chunk.includes('�'))).toBe(false);
+
+      const failing = await client.execStream('exit-3');
+      expect(failing).toMatchObject({ exitCode: 3, stderr: 'failed\n' });
+      client.close();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('keeps no output with retainOutput false while callbacks still see it', async () => {
+    const relay = await installRelayFixture();
+    try {
+      const client = new BrowserSshRelaySessionClient(relayParams());
+      await client.connect();
+      const seen: string[] = [];
+      const result = await client.execStream('uname -s', { retainOutput: false, onStdout: (text) => seen.push(text) });
+      expect(result.stdout).toBe('');
+      expect(seen.join('')).toBe('Linux\n');
+      client.close();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('closes the SSH channel and rejects with AbortError when aborted', async () => {
+    const relay = await installRelayFixture();
+    try {
+      const client = new BrowserSshRelaySessionClient(relayParams());
+      await client.connect();
+      const controller = new AbortController();
+      const seen: string[] = [];
+      const result = client.execStream('follow', {
+        signal: controller.signal,
+        onStdout: (text) => seen.push(text)
+      });
+      await vi.waitFor(() => expect(seen.join('')).toBe('tick 1\n'));
+      controller.abort();
+      await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+      const fixture = relay.fixtures[0]!;
+      await vi.waitFor(() => expect(fixture.clientClosedChannels.length).toBe(1));
+
+      const pre = new AbortController();
+      pre.abort();
+      await expect(client.execStream('uname -s', { signal: pre.signal })).rejects.toMatchObject({
+        name: 'AbortError'
+      });
+      client.close();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('rejects an open stream when the session closes', async () => {
+    const relay = await installRelayFixture();
+    try {
+      const client = new BrowserSshRelaySessionClient(relayParams());
+      await client.connect();
+      const seen: string[] = [];
+      const result = client.execStream('follow', { onStdout: (text) => seen.push(text) });
+      await vi.waitFor(() => expect(seen.length).toBe(1));
+      client.close();
+      await expect(result).rejects.toThrow(/closed/);
+      await expect(client.execStream('uname -s')).rejects.toThrow(/not connected/);
+    } finally {
+      relay.restore();
+    }
+  });
+});
+
+describe('relay remote signer routing', () => {
+  const publicKey = `ssh-ed25519 ${bytesToBase64(concatBytes(sshString('ssh-ed25519'), sshString(new Uint8Array(32))))}`;
+  const signature = bytesToBase64(new Uint8Array(64).fill(7));
+
+  it('signs userauth with the key the profile names', async () => {
+    const relay = await installRelayFixture();
+    try {
+      const target = vi.fn(async (_req: { keyFingerprint: string }) => signature);
+      const other = vi.fn(async () => signature);
+      const client = new BrowserSshRelaySessionClient(
+        relayParams({
+          authMethod: 'remote_signer',
+          password: undefined,
+          publicKey,
+          keyFingerprint: 'SHA256:target',
+          signers: { 'SHA256:target': target, 'SHA256:other': other }
+        })
+      );
+      await client.connect();
+      expect(target).toHaveBeenCalledTimes(1);
+      expect(target.mock.calls[0]![0]).toMatchObject({ keyFingerprint: 'SHA256:target', host: 'ec2.example.com', port: 22 });
+      expect(other).not.toHaveBeenCalled();
+      expect(relay.fixtures[0]!.publickeyAttempts).toEqual(['ssh-ed25519']);
+      client.close();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it('refuses to sign with another key when the named key is not in the browser', async () => {
+    const relay = await installRelayFixture();
+    try {
+      const other = vi.fn(async () => signature);
+      const client = new BrowserSshRelaySessionClient(
+        relayParams({
+          authMethod: 'remote_signer',
+          password: undefined,
+          publicKey,
+          keyFingerprint: 'SHA256:missing',
+          signers: { 'SHA256:other': other }
+        })
+      );
+      await expect(client.connect()).rejects.toThrow(/SSH_SIGN_REFUSED: .*SHA256:missing/);
+      expect(other).not.toHaveBeenCalled();
+      expect(relay.fixtures[0]!.publickeyAttempts).toEqual([]);
+    } finally {
+      relay.restore();
     }
   });
 });

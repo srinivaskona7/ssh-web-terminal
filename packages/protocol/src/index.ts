@@ -21,11 +21,72 @@ export interface BinaryFrame {
   payload: Uint8Array;
 }
 
+/**
+ * One ProxyJump hop. A hop that carries any credential authenticates with
+ * only its own; a hop with none reuses the target's credentials.
+ */
 export interface JumpHop {
   host: string;
   port: number;
   user: string;
   keyFingerprint?: string;
+  authMethod?: 'password' | 'private_key' | 'remote_signer';
+  password?: string;
+  /** authorized_keys line of the remote-signer key for this hop. */
+  publicKey?: string;
+  privateKeyPem?: string;
+  privateKeyPassphrase?: string;
+}
+
+/** Names the server accepted and rejected from the requested environment. */
+export interface EnvReport {
+  envAccepted?: string[];
+  envRejected?: string[];
+}
+
+/** Limits the gateway enforces on `connect.env`; the relay client applies the same. */
+export const ENV_MAX_VARIABLES = 32;
+export const ENV_MAX_VALUE_BYTES = 4096;
+export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+export interface EnvVarError {
+  /** The offending variable; absent when the whole set breaks a limit. */
+  name?: string;
+  field: 'name' | 'value' | 'count';
+  message: string;
+}
+
+/** Check requested environment variables against the gateway's rules. Empty means valid. */
+export function validateEnvVars(env: Record<string, string>): EnvVarError[] {
+  const errors: EnvVarError[] = [];
+  const entries = Object.entries(env);
+  if (entries.length > ENV_MAX_VARIABLES) {
+    errors.push({
+      field: 'count',
+      message: `${entries.length} variables requested; at most ${ENV_MAX_VARIABLES} are allowed`
+    });
+  }
+  for (const [name, value] of entries) {
+    if (!ENV_NAME_PATTERN.test(name)) {
+      errors.push({
+        name,
+        field: 'name',
+        message: `"${name}" is not a valid variable name (letters, digits and _, not starting with a digit, at most 64 characters)`
+      });
+    }
+    if (typeof value !== 'string') {
+      errors.push({ name, field: 'value', message: `${name} must have a text value` });
+    } else if (value.includes('\u0000')) {
+      errors.push({ name, field: 'value', message: `${name} contains a NUL character` });
+    } else if (textEncoder.encode(value).byteLength > ENV_MAX_VALUE_BYTES) {
+      errors.push({
+        name,
+        field: 'value',
+        message: `${name} is longer than ${ENV_MAX_VALUE_BYTES} bytes`
+      });
+    }
+  }
+  return errors;
 }
 
 export interface SftpDirEntry {
@@ -57,6 +118,8 @@ export type ControlMessage =
       publicKey?: string;
       keyFingerprint: string;
       jump?: JumpHop[];
+      /** Requested shell environment, sent to the server as SSH `env` requests. */
+      env?: Record<string, string>;
       cols: number;
       rows: number;
       tmuxSession?: string;
@@ -80,6 +143,10 @@ export type ControlMessage =
       dataBase64: string;
       algorithm: string;
       keyFingerprint: string;
+      host?: string;
+      port?: number;
+      /** 1-based jump hop asking for the signature; absent for the final target. */
+      hopIndex?: number;
     }
   | {
       type: 'sign_response';
@@ -91,12 +158,15 @@ export type ControlMessage =
       sessionId: string;
       resumeToken: string;
       ptyChannel: number;
-      cipher: string;
+      /** Negotiated values are present only when the server side observed them. */
+      cipher?: string;
       kex?: string;
-      serverVersion: string;
+      serverVersion?: string;
       authMethodUsed?: string;
       sftpReady?: boolean;
       sftpError?: string;
+      envAccepted?: string[];
+      envRejected?: string[];
     }
   | {
       type: 'open_channel';
@@ -111,6 +181,8 @@ export type ControlMessage =
       channel: number;
       ok: boolean;
       error?: string;
+      envAccepted?: string[];
+      envRejected?: string[];
     }
   | {
       type: 'close_channel';
@@ -136,6 +208,32 @@ export type ControlMessage =
       exitCode: number;
       durationMs: number;
       error?: string;
+    }
+  | {
+      /** Run a command and stream its output; absent timeoutMs means no timeout. */
+      type: 'exec_stream';
+      opId: string;
+      command: string;
+      timeoutMs?: number;
+    }
+  | {
+      type: 'exec_output';
+      opId: string;
+      stream: 'stdout' | 'stderr';
+      dataBase64: string;
+    }
+  | {
+      /** Sent exactly once per stream. An omitted exitCode means 0. */
+      type: 'exec_stream_end';
+      opId: string;
+      ok: boolean;
+      exitCode?: number;
+      error?: string;
+      durationMs: number;
+    }
+  | {
+      type: 'exec_cancel';
+      opId: string;
     }
   | {
       type: 'resize';

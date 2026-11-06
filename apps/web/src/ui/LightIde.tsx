@@ -29,6 +29,7 @@ import {
   textStats,
   toggleLineComment
 } from './ide-editing';
+import { IDE_STORE_KEY } from './ide-storage';
 
 interface OpenFile {
   path: string;
@@ -40,12 +41,78 @@ interface OpenFile {
   saving: boolean;
   conflict: boolean;
   error: string | null;
+  /** Object URL for a read-only image tab; the text fields are unused for it. */
+  preview?: string;
 }
 
 const AUTO_SAVE_DELAY_MS = 1200;
+
+/** Image types previewed read-only. SVG is excluded: it is XML that can carry script. */
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp'
+};
+
+function imageMimeFor(path: string): string | null {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  return IMAGE_MIME_BY_EXTENSION[ext] ?? null;
+}
 const MAX_OUTPUT_LINES = 400;
 const INDENT_UNIT = '  ';
-const STORE_KEY = 'webssh.ide.v1';
+const STORE_KEY = IDE_STORE_KEY;
+
+/** What came of one save attempt; save-all counts only `saved`. */
+type SaveOutcome = 'saved' | 'conflict' | 'failed' | 'busy' | 'missing';
+
+const BRACKET_PARTNER = new Map<string, string>([
+  ['(', ')'],
+  ['[', ']'],
+  ['{', '}']
+]);
+const BRACKET_OPENER = new Map<string, string>([
+  [')', '('],
+  [']', '['],
+  ['}', '{']
+]);
+
+/**
+ * The bracket pair the caret is standing next to, preferring the character
+ * before it. Nesting is counted, but brackets inside strings or comments are
+ * not excluded — this is a hint, not a parser.
+ */
+function bracketPairAt(text: string, caret: number): { open: number; close: number } | null {
+  for (const at of [caret - 1, caret]) {
+    const ch = text[at];
+    if (ch === undefined) continue;
+    const closer = BRACKET_PARTNER.get(ch);
+    if (closer) {
+      let depth = 0;
+      for (let i = at; i < text.length; i += 1) {
+        if (text[i] === ch) depth += 1;
+        else if (text[i] === closer) {
+          depth -= 1;
+          if (depth === 0) return { open: at, close: i };
+        }
+      }
+    }
+    const opener = BRACKET_OPENER.get(ch);
+    if (opener) {
+      let depth = 0;
+      for (let i = at; i >= 0; i -= 1) {
+        if (text[i] === ch) depth += 1;
+        else if (text[i] === opener) {
+          depth -= 1;
+          if (depth === 0) return { open: i, close: at };
+        }
+      }
+    }
+  }
+  return null;
+}
 
 function loadValue<T>(key: string, fallback: T): T {
   try {
@@ -96,8 +163,11 @@ export function LightIde({
   const [activePath, setActivePath] = useState<string | null>(null);
   const [autoSave, setAutoSave] = useState<boolean>(() => loadValue<boolean>('autoSave', true));
   const [fontSize, setFontSize] = useState<number>(() => loadValue<number>('fontSize', 14));
+  const [wrap, setWrap] = useState<boolean>(() => loadValue<boolean>('wrap', false));
   const [status, setStatus] = useState<string>('');
   const [cursor, setCursor] = useState<{ line: number; column: number }>({ line: 1, column: 1 });
+  const [bracketMatch, setBracketMatch] = useState<{ open: number; close: number } | null>(null);
+  const [dragging, setDragging] = useState<boolean>(false);
   const [sftpState, setSftpState] = useState<'unknown' | 'ready' | 'unavailable'>('unknown');
 
   const [findQuery, setFindQuery] = useState<string>('');
@@ -130,9 +200,11 @@ export function LightIde({
   const filesRef = useRef(files);
   filesRef.current = files;
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const gutterRef = useRef<HTMLDivElement | null>(null);
+  const bracketLayerRef = useRef<HTMLDivElement | null>(null);
   const pendingSelection = useRef<{ start: number; end: number } | null>(null);
   const pendingGotoLine = useRef<number | null>(null);
-  const saveRef = useRef<((path: string, force?: boolean) => Promise<void>) | null>(null);
+  const saveRef = useRef<((path: string, force?: boolean) => Promise<SaveOutcome>) | null>(null);
   const uploadRef = useRef<HTMLInputElement | null>(null);
 
   const connected = Boolean(session?.isConnected());
@@ -249,22 +321,29 @@ export function LightIde({
     setFiles((prev) => prev.map((f) => (f.path === path ? { ...f, ...patch } : f)));
   };
 
-  const save = async (path: string, force = false): Promise<void> => {
+  // The caret drives both the line/column readout and the bracket highlight.
+  const syncCaret = (textarea: HTMLTextAreaElement, content: string): void => {
+    const offset = textarea.selectionStart;
+    setCursor(lineColumnAt(content, offset));
+    setBracketMatch(bracketPairAt(content, offset));
+  };
+
+  const save = async (path: string, force = false): Promise<SaveOutcome> => {
     const buffer = filesRef.current.find((f) => f.path === path);
-    if (!buffer) return;
+    if (!buffer) return 'missing';
     if (!session?.isConnected()) {
       updateFile(path, { saving: false, error: 'Disconnected — change not saved.' });
       setStatus(`Disconnected — ${path} was not saved.`);
-      return;
+      return 'failed';
     }
     if (!session.writeFile || !session.readFile) {
       updateFile(path, { saving: false, error: 'SFTP write is unavailable on this connection.' });
-      return;
+      return 'failed';
     }
     if (savingRef.current.has(path)) {
       // A save is already in flight for this buffer; re-check shortly.
       armTimer(path, 300);
-      return;
+      return 'busy';
     }
     clearTimer(path);
     savingRef.current.add(path);
@@ -276,7 +355,7 @@ export function LightIde({
         if (hasRemoteConflict(buffer.original, normalizeEol(remote, '\n'))) {
           updateFile(path, { saving: false, conflict: true });
           setStatus(`${path} changed on the server — not saved.`);
-          return;
+          return 'conflict';
         }
       }
       await session.writeFile(path, new TextEncoder().encode(normalizeEol(content, buffer.eol)));
@@ -289,16 +368,43 @@ export function LightIde({
         original: content
       });
       setStatus(unchanged ? `Saved ${path}` : `Saved ${path} — newer edits are still pending`);
+      return 'saved';
     } catch (err) {
       updateFile(path, {
         saving: false,
         error: err instanceof Error ? err.message : String(err)
       });
+      return 'failed';
     } finally {
       savingRef.current.delete(path);
     }
   };
   saveRef.current = save;
+
+  // Save-all reports what actually reached the server: a buffer that hit the
+  // read-before-write conflict check is counted as not saved.
+  const saveAll = async (): Promise<void> => {
+    const pending = filesRef.current.filter((file) => file.dirty);
+    if (pending.length === 0) {
+      setStatus('Nothing to save — no unsaved changes.');
+      return;
+    }
+    if (!session?.isConnected()) {
+      setStatus('Disconnected — no files were saved.');
+      return;
+    }
+    if (!session.writeFile || !session.readFile) {
+      setStatus('SFTP write is unavailable on this connection — no files were saved.');
+      return;
+    }
+    const outcomes = await Promise.all(pending.map((file) => save(file.path)));
+    const saved = outcomes.filter((outcome) => outcome === 'saved').length;
+    setStatus(
+      saved === pending.length
+        ? `Saved ${saved} file(s).`
+        : `Saved ${saved} of ${pending.length} file(s) — the rest were not written.`
+    );
+  };
 
   const openFile = async (path: string, line?: number): Promise<void> => {
     if (!session?.isConnected()) {
@@ -315,6 +421,24 @@ export function LightIde({
       if (line) {
         pendingGotoLine.current = line;
         setSelectionTick((tick) => tick + 1);
+      }
+      return;
+    }
+    const imageMime = imageMimeFor(path);
+    if (imageMime && session.readFileBytes) {
+      setBusy(true);
+      try {
+        const bytes = await session.readFileBytes(path);
+        const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: imageMime }));
+        setFiles((prev) => [
+          ...prev,
+          { path, content: '', original: '', eol: '\n', dirty: false, saving: false, conflict: false, error: null, preview: url }
+        ]);
+        setActivePath(path);
+      } catch (err) {
+        setStatus(`Could not open ${baseName(path)}: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        setBusy(false);
       }
       return;
     }
@@ -360,6 +484,7 @@ export function LightIde({
       return;
     }
     clearTimer(path);
+    if (buffer?.preview) URL.revokeObjectURL(buffer.preview);
     setFiles((prev) => prev.filter((f) => f.path !== path));
     if (activePath === path) {
       const next = filesRef.current.find((f) => f.path !== path);
@@ -380,11 +505,31 @@ export function LightIde({
 
   const active = activePath ? files.find((f) => f.path === activePath) ?? null : null;
 
+  // One DOM node per line: past this many rows the gutter would cost more than
+  // it helps (openFile has no size cap, and the editor still works without it).
+  const gutterLines = active ? active.content.split('\n').length : 0;
+  const showGutter = !wrap && gutterLines > 0 && gutterLines <= 5000;
+
   // A diff belongs to one file; switching tabs must not leave the old one on
   // screen looking like it describes the new file.
   useEffect(() => {
     setDiff([]);
   }, [activePath]);
+
+  // The gutter unmounts while wrapping and its offset only follows `scroll`
+  // events, so a fresh mount would restart at 1 against mid-file text.
+  useEffect(() => {
+    const gutter = gutterRef.current;
+    const editor = editorRef.current;
+    if (gutter && editor) gutter.style.transform = `translateY(${-editor.scrollTop}px)`;
+  }, [wrap, activePath, gutterLines]);
+
+  const toggleWrap = (): void => {
+    setWrap((prev) => {
+      saveValue('wrap', !prev);
+      return !prev;
+    });
+  };
 
   const changeFontSize = (next: number): void => {
     const clamped = Math.max(11, Math.min(24, next));
@@ -401,6 +546,7 @@ export function LightIde({
       editor.focus();
       editor.setSelectionRange(offset, offset);
       setCursor(lineColumnAt(active.content, offset));
+      setBracketMatch(bracketPairAt(active.content, offset));
       pendingGotoLine.current = null;
       return;
     }
@@ -410,6 +556,7 @@ export function LightIde({
     editor.focus();
     editor.setSelectionRange(pending.start, pending.end);
     setCursor(lineColumnAt(active?.content ?? '', pending.start));
+    setBracketMatch(bracketPairAt(active?.content ?? '', pending.start));
   }, [active?.content, active?.path, selectionTick]);
 
   const matches = active ? findMatches(active.content, findQuery, caseSensitive) : [];
@@ -465,6 +612,11 @@ export function LightIde({
     const key = event.key;
     const mod = event.metaKey || event.ctrlKey;
 
+    if (mod && event.altKey && key.toLowerCase() === 's') {
+      event.preventDefault();
+      void saveAll();
+      return;
+    }
     if (mod && key.toLowerCase() === 's') {
       event.preventDefault();
       void save(active.path);
@@ -497,6 +649,29 @@ export function LightIde({
       const result = moveLine(active.content, start, key === 'ArrowUp' ? -1 : 1);
       applyEdit(active.path, result.text, result.offset);
       return;
+    }
+    // Bracket pairs: type the partner along with an opening bracket, and step
+    // over a closer that is already in front of the caret. A selection is left
+    // to the browser, which replaces it as usual.
+    if (start === end && !event.isComposing && !mod && !event.altKey) {
+      const closer = BRACKET_PARTNER.get(key);
+      if (closer) {
+        event.preventDefault();
+        if (active.content[start] === closer) {
+          textarea.setSelectionRange(start + 1, start + 1);
+          syncCaret(textarea, active.content);
+          return;
+        }
+        const next = `${active.content.slice(0, start)}${key}${closer}${active.content.slice(start)}`;
+        applyEdit(active.path, next, start + 1);
+        return;
+      }
+      if (BRACKET_OPENER.has(key) && active.content[start] === key) {
+        event.preventDefault();
+        textarea.setSelectionRange(start + 1, start + 1);
+        syncCaret(textarea, active.content);
+        return;
+      }
     }
     if (
       key === 'Enter' &&
@@ -531,8 +706,7 @@ export function LightIde({
 
   const trackCursor = (event: Event): void => {
     const textarea = event.currentTarget as HTMLTextAreaElement;
-    const pos = lineColumnAt(textarea.value, textarea.selectionStart);
-    setCursor(pos);
+    syncCaret(textarea, textarea.value);
   };
 
   const newFile = async (): Promise<void> => {
@@ -636,27 +810,55 @@ export function LightIde({
     setStatus(`Downloaded ${baseName(active.path)}`);
   };
 
-  const uploadFile = async (file: File): Promise<void> => {
+  const uploadFile = async (file: File): Promise<{ ok: boolean; message: string }> => {
     if (!session?.writeFile || !canEdit) {
-      setStatus('SFTP write is unavailable on this connection.');
-      return;
+      const message = 'SFTP write is unavailable on this connection.';
+      setStatus(message);
+      return { ok: false, message };
     }
     if (file.size > 8 * 1024 * 1024) {
-      setStatus('Files over 8 MiB must be uploaded from the Files screen.');
-      return;
+      const message = 'Files over 8 MiB must be uploaded from the Files screen.';
+      setStatus(message);
+      return { ok: false, message };
     }
     const path = joinPath(root, file.name);
     if (entries.some((entry) => entry.name === file.name)) {
-      if (!window.confirm(`${path} already exists. Replace it with the uploaded file?`)) return;
+      if (!window.confirm(`${path} already exists. Replace it with the uploaded file?`)) {
+        return { ok: false, message: `${path} was not replaced.` };
+      }
     }
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       await session.writeFile(path, bytes);
       setStatus(`Uploaded ${path}`);
       await refresh(root);
+      return { ok: true, message: `Uploaded ${path}` };
     } catch (err) {
-      setStatus(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
+      const message = `Upload failed: ${err instanceof Error ? err.message : String(err)}`;
+      setStatus(message);
+      return { ok: false, message };
     }
+  };
+
+  // Dropping onto the file pane uses the same upload path as the picker, so
+  // the 8 MiB cap and the overwrite prompt still apply.
+  const dropFiles = async (event: DragEvent): Promise<void> => {
+    event.preventDefault();
+    setDragging(false);
+    if (!session?.isConnected() || !canEdit) {
+      setStatus('SFTP is unavailable on this connection — the dropped files were not uploaded.');
+      return;
+    }
+    const dropped = Array.from(event.dataTransfer?.files ?? []);
+    if (dropped.length === 0) return;
+    const results: Array<{ ok: boolean; message: string }> = [];
+    for (const file of dropped) results.push(await uploadFile(file));
+    const failed = results.filter((result) => !result.ok);
+    setStatus(
+      failed.length === 0
+        ? `Uploaded ${results.length} file(s) into ${root}`
+        : `Uploaded ${results.length - failed.length} of ${results.length} file(s) — ${failed[0]?.message ?? ''}`
+    );
   };
 
   const runExec = async (commandLine: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
@@ -861,6 +1063,15 @@ export function LightIde({
           <Button variant="ghost" onClick={() => changeFontSize(fontSize + 1)} testId="ide-font-inc">
             A+
           </Button>
+          <Button
+            variant={wrap ? 'primary' : 'ghost'}
+            onClick={toggleWrap}
+            ariaPressed={wrap}
+            title="Wrap long lines"
+            testId="ide-wrap-toggle"
+          >
+            Wrap
+          </Button>
         </div>
       </header>
 
@@ -917,7 +1128,22 @@ export function LightIde({
       ) : null}
 
       <div className="ws-mod-split ide-workspace-split">
-        <aside className="ws-mod-list" aria-label="Project files" style={{ overflowX: 'hidden' }}>
+        <aside
+          className={dragging ? 'ws-mod-list ide-drop-active' : 'ws-mod-list'}
+          aria-label="Project files"
+          data-testid="ide-drop-zone"
+          style={{ overflowX: 'hidden' }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            if (!dragging) setDragging(true);
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setDragging(false);
+            }
+          }}
+          onDrop={(event) => void dropFiles(event)}
+        >
           <h3>{root}</h3>
           <div className="ws-mod-actions">
             <Button variant="ghost" onClick={() => void newFile()} testId="ide-new-file">
@@ -1043,6 +1269,14 @@ export function LightIde({
                 <Button onClick={() => void save(active.path)} testId="ide-save">
                   Save now
                 </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => void saveAll()}
+                  title="Save every buffer with unsaved changes (Ctrl/Cmd+Alt+S)"
+                  testId="ide-save-all"
+                >
+                  Save all
+                </Button>
                 {active.conflict ? (
                   <Button
                     variant="danger"
@@ -1135,28 +1369,110 @@ export function LightIde({
                 </span>
               </div>
 
-              <textarea
-                ref={(el) => {
-                  editorRef.current = el;
-                }}
-                className="ui-input ide-editor"
-                aria-label={`Editing ${active.path}`}
-                data-testid="ide-editor"
-                value={active.content}
-                onInput={(e) => onEdit(active.path, (e.currentTarget as HTMLTextAreaElement).value)}
-                onKeyDown={onEditorKeyDown}
-                onSelect={trackCursor}
-                onClick={trackCursor}
-                onKeyUp={trackCursor}
-                spellcheck={false}
-                style={{
-                  width: '100%',
-                  fontFamily: 'var(--font-font-mono)',
-                  fontSize: `${fontSize}px`,
-                  whiteSpace: 'pre',
-                  overflow: 'auto'
-                }}
-              />
+              {active.preview ? (
+                <div className="ide-image-preview">
+                  <img src={active.preview} alt={baseName(active.path)} data-testid="ide-image-preview" />
+                </div>
+              ) : (
+              <div className="ide-editor-shell">
+                {showGutter ? (
+                <div
+                  className="ide-gutter"
+                  aria-hidden="true"
+                  // Match the editor's font size exactly: the CSS default
+                  // (--font-size-sm) made each number row 3.2px shorter than a
+                  // code line, so the gutter drifted a line every ~7 rows.
+                  style={{ fontSize: `${fontSize}px` }}
+                >
+                  <div
+                    ref={(el) => {
+                      gutterRef.current = el;
+                    }}
+                    className="ide-gutter-lines"
+                    data-testid="ide-gutter"
+                  >
+                    {Array.from({ length: gutterLines }, (_v, i) => (
+                      <span key={i}>{i + 1}</span>
+                    ))}
+                  </div>
+                </div>
+                ) : null}
+                <div className="ide-editor-pane">
+                <textarea
+                  ref={(el) => {
+                    editorRef.current = el;
+                  }}
+                  className="ui-input ide-editor"
+                  aria-label={`Editing ${active.path}`}
+                  data-testid="ide-editor"
+                  value={active.content}
+                  onInput={(e) => onEdit(active.path, (e.currentTarget as HTMLTextAreaElement).value)}
+                  onKeyDown={onEditorKeyDown}
+                  onSelect={trackCursor}
+                  onClick={trackCursor}
+                  onKeyUp={trackCursor}
+                  onScroll={(e) => {
+                    const el = e.currentTarget as HTMLTextAreaElement;
+                    if (gutterRef.current) {
+                      gutterRef.current.style.transform = `translateY(${-el.scrollTop}px)`;
+                    }
+                    if (bracketLayerRef.current) {
+                      bracketLayerRef.current.style.transform = `translate(${-el.scrollLeft}px, ${-el.scrollTop}px)`;
+                    }
+                  }}
+                  spellcheck={false}
+                  data-wrap={wrap ? 'on' : 'off'}
+                  style={{
+                    width: '100%',
+                    fontFamily: 'var(--font-font-mono)',
+                    fontSize: `${fontSize}px`,
+                    lineHeight: 'var(--font-line-height-editor)',
+                    whiteSpace: wrap ? 'pre-wrap' : 'pre',
+                    overflowWrap: wrap ? 'anywhere' : 'normal',
+                    overflow: 'auto'
+                  }}
+                />
+                {/* One monospace cell per bracket, positioned in ch/em so no
+                    measurement is needed. Withdrawn while wrapping, where a
+                    logical offset no longer maps to a fixed column. */}
+                {!wrap && bracketMatch ? (
+                  <div
+                    ref={(el) => {
+                      bracketLayerRef.current = el;
+                      // A fresh mount must start where the editor is scrolled
+                      // to, not at the top-left of the file.
+                      const editor = editorRef.current;
+                      if (el && editor) {
+                        el.style.transform = `translate(${-editor.scrollLeft}px, ${-editor.scrollTop}px)`;
+                      }
+                    }}
+                    className="ide-bracket-layer"
+                    aria-hidden="true"
+                    data-testid="ide-bracket-layer"
+                    style={{ fontSize: `${fontSize}px` }}
+                  >
+                    {[bracketMatch.open, bracketMatch.close].map((offset) => {
+                      const at = lineColumnAt(active.content, offset);
+                      return (
+                        <span
+                          key={offset}
+                          className="ide-bracket-marker"
+                          data-testid="ide-bracket-marker"
+                          data-offset={offset}
+                          style={{
+                            left: `${at.column - 1}ch`,
+                            top: `calc(${at.line - 1} * var(--font-line-height-editor) * 1em)`
+                          }}
+                        >
+                          {active.content[offset]}
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                </div>
+              </div>
+              )}
               {active.error ? (
                 <p role="alert" data-testid="ide-save-error">
                   {active.error}

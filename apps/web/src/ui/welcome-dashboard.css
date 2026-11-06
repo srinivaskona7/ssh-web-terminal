@@ -1,0 +1,100 @@
+/* Welcome dashboard: cards beneath Quick Connect. Tokens only. */
+.welcome-dash {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.welcome-dash-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.welcome-dash-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  color: var(--color-fg-primary);
+}
+
+.welcome-dash-sub {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--font-letter-spacing-tight);
+}
+
+.welcome-dash-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+
+.welcome-dash-list code {
+  font-family: var(--font-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.welcome-dash-job {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.welcome-dash-job-title {
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.welcome-dash-meta,
+.welcome-dash-note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-muted);
+}
+
+.welcome-dash-tiles {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-2);
+}
+
+.welcome-dash-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0);
+  padding: var(--space-2);
+  border: var(--border-hairline);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-surface);
+  min-width: 0;
+}
+
+.welcome-dash-tile dt {
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--font-letter-spacing-tight);
+}
+
+.welcome-dash-tile dd {
+  margin: 0;
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.welcome-dash-missing {
+  color: var(--color-fg-muted);
+  font-style: italic;
+}

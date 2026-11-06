@@ -25,8 +25,11 @@ import { XtermPaneAdapter, type TerminalRendererMode } from '../terminal/xterm-a
 import { TerminalPane, type PaneTransport } from '../terminal/TerminalPane';
 import { ChannelOutputBuffer } from '../terminal/channel-output-buffer';
 import { ConnectionRegistry, nextConnectionId } from '../session/connection-registry';
-import { LightIde } from './LightIde';
-import { ProfileCard } from './ProfileCard';
+import { lazy, Suspense } from 'preact/compat';
+import { AppHeader, type MenuId } from './shell/AppHeader';
+import { AppRail } from './shell/AppRail';
+import { SettingsScreen, type SettingsSection } from './shell/SettingsScreen';
+import { WelcomeScreen } from './shell/WelcomeScreen';
 import {
   BrowserSshRelaySessionClient,
   LiveGatewaySessionClient,
@@ -49,6 +52,7 @@ import {
   scrubAsciicastOutput
 } from './productivity';
 import { StorageGuard, sortAndFilterEntries } from '../files';
+import { readRemoteFile, writeRemoteFile, REMOTE_INLINE_WRITE_BYTES, type SftpOp } from '../files/remote-file-io';
 import {
   computeGhostAutocomplete,
   computeSideBySideDiff,
@@ -60,20 +64,30 @@ import {
   type SshCertificateInfo,
   type SshTunnelRule
 } from './advanced-features';
-import { repairApplicationAssetCaches } from './ErrorBoundary';
-import {
-  ActivityPanel,
-  DeploymentsPanel,
-  AutomationsPanel,
-  ContainersPanel,
-  KubernetesPanel,
-  OverviewPanel,
-  SoftwarePanel,
-  runDiscovery,
-  type ModuleContext
-} from './ServerModules';
-import { createRemoteSession, type WorkspaceRemoteSession } from '../session/adapters';
-import { CapabilityMatrixPanel } from './CapabilityMatrixPanel';
+import type { ModuleContext } from './ServerModules';
+import { createRemoteSession, decodeUtf8Text, type WorkspaceRemoteSession } from '../session/adapters';
+// Workspace screens are split out of the initial bundle: the IDE and the
+// server modules (Docker/Kubernetes/git) are only loaded when opened, so the
+// terminal is interactive without parsing them.
+const LightIde = lazy(() => import('./LightIde').then((m) => ({ default: m.LightIde })));
+const CapabilityMatrixPanel = lazy(() =>
+  import('./CapabilityMatrixPanel').then((m) => ({ default: m.CapabilityMatrixPanel }))
+);
+const OverviewPanel = lazy(() => import('./ServerModules').then((m) => ({ default: m.OverviewPanel })));
+const SoftwarePanel = lazy(() => import('./ServerModules').then((m) => ({ default: m.SoftwarePanel })));
+const ContainersPanel = lazy(() =>
+  import('./ServerModules').then((m) => ({ default: m.ContainersPanel }))
+);
+const KubernetesPanel = lazy(() =>
+  import('./ServerModules').then((m) => ({ default: m.KubernetesPanel }))
+);
+const DeploymentsPanel = lazy(() =>
+  import('./ServerModules').then((m) => ({ default: m.DeploymentsPanel }))
+);
+const AutomationsPanel = lazy(() =>
+  import('./ServerModules').then((m) => ({ default: m.AutomationsPanel }))
+);
+const ActivityPanel = lazy(() => import('./ServerModules').then((m) => ({ default: m.ActivityPanel })));
 import {
   MAX_RECONNECT_ATTEMPTS,
   connectionHealthRows,
@@ -116,7 +130,12 @@ export type AuthMethod = 'Password' | 'Private Key (.pem / id_rsa)' | 'Argon2id 
 
 export type KeyPermissionMode = '0400' | '0600' | '0644';
 
-export type MenuId = 'terminal' | 'edit' | 'view' | 'security' | 'features' | 'more' | null;
+export type LocalEntry = {
+  name: string;
+  kind: 'file' | 'directory';
+  size: number;
+  handle: FileSystemFileHandle | FileSystemDirectoryHandle;
+};
 
 export interface SessionTabItem {
   id: string;
@@ -128,6 +147,13 @@ export interface SessionTabItem {
   /** A pane is ready only after the server acknowledged the PTY channel. */
   status?: 'idle' | 'opening' | 'ready' | 'error';
   errorMessage?: string;
+}
+
+/** ProxyJump hops from a saved host, and the host/port they belong to. */
+export interface PendingJump {
+  targetHost: string;
+  targetPort: number;
+  hops: { host: string; port: number; user: string }[];
 }
 
 /**
@@ -148,100 +174,6 @@ function resolveTurnstileSiteKey(): string {
   }
 }
 
-/**
- * Cloudflare Turnstile widget. The challenge is validated server-side by the
- * relay; this only supplies the token. The script is the one third-party
- * resource in the product and is loaded only when a site key is configured.
- */
-interface TurnstileApi {
-  render: (el: HTMLElement, opts: Record<string, unknown>) => string | number;
-  reset: (widgetId: string | number) => void;
-  remove: (widgetId: string | number) => void;
-}
-
-function getTurnstileApi(): TurnstileApi | undefined {
-  return (globalThis as unknown as { turnstile?: TurnstileApi }).turnstile;
-}
-
-function TurnstileWidget({
-  siteKey,
-  resetNonce,
-  onToken
-}: {
-  siteKey: string;
-  resetNonce: number;
-  onToken: (token: string) => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const widgetIdRef = useRef<string | number | null>(null);
-  // Callbacks are read through a ref so a parent re-render never re-renders
-  // the widget or leaves the challenge bound to a stale callback.
-  const onTokenRef = useRef(onToken);
-  onTokenRef.current = onToken;
-
-  useEffect(() => {
-    let cancelled = false;
-    const renderWidget = (): void => {
-      const turnstile = getTurnstileApi();
-      if (cancelled || !ref.current || !turnstile || widgetIdRef.current !== null) return;
-      widgetIdRef.current = turnstile.render(ref.current, {
-        sitekey: siteKey,
-        action: 'ssh_connect',
-        callback: (token: string) => onTokenRef.current(token),
-        'expired-callback': () => onTokenRef.current(''),
-        'error-callback': () => onTokenRef.current('')
-      });
-    };
-    // The API may already be present from an earlier mount or another widget;
-    // render now rather than waiting for a load event that will not fire again.
-    if (getTurnstileApi()) {
-      renderWidget();
-      return;
-    }
-    const existing = document.querySelector<HTMLScriptElement>(
-      'script[data-webssh-turnstile]'
-    );
-    if (existing) {
-      // The tag is present but the API has not loaded yet; wait for it rather
-      // than silently rendering nothing.
-      existing.addEventListener('load', renderWidget);
-      return () => existing.removeEventListener('load', renderWidget);
-    }
-    const script = document.createElement('script');
-    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-    script.async = true;
-    script.defer = true;
-    script.dataset.websshTurnstile = '1';
-    script.addEventListener('load', renderWidget);
-    document.head.appendChild(script);
-    return () => {
-      cancelled = true;
-      script.removeEventListener('load', renderWidget);
-    };
-  }, [siteKey]);
-
-  // A Turnstile response is single-use, so the parent bumps this after every
-  // ticket attempt to put a fresh challenge in front of the user.
-  useEffect(() => {
-    if (resetNonce === 0) return;
-    const turnstile = getTurnstileApi();
-    if (turnstile && widgetIdRef.current !== null) turnstile.reset(widgetIdRef.current);
-  }, [resetNonce]);
-
-  useEffect(
-    () => () => {
-      const turnstile = getTurnstileApi();
-      if (turnstile && widgetIdRef.current !== null) {
-        turnstile.remove(widgetIdRef.current);
-      }
-      widgetIdRef.current = null;
-    },
-    []
-  );
-
-  return <div ref={ref} data-testid="turnstile-widget" />;
-}
-
 export function App(): JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const terminalViewRef = useRef<HTMLDivElement | null>(null);
@@ -259,6 +191,9 @@ export function App(): JSX.Element {
   const vault = useMemo(() => new KeyVault(), []);
   const knownHosts = useMemo(() => new KnownHostsStore(), []);
   const liveSessionRef = useRef<LiveGatewaySessionClient | BrowserSshRelaySessionClient | null>(null);
+  const hostImportInputRef = useRef<HTMLInputElement | null>(null);
+  const paletteInputRef = useRef<HTMLInputElement | null>(null);
+  const termSearchInputRef = useRef<HTMLInputElement | null>(null);
   // Every live transport, so opening a second server never closes the first.
   const connectionRegistryRef = useRef(
     new ConnectionRegistry<LiveGatewaySessionClient | BrowserSshRelaySessionClient>()
@@ -318,6 +253,62 @@ export function App(): JSX.Element {
   const [activeTabId, setActiveTabId] = useState<string>('tab-1');
   const [splitPanes, setSplitPanes] = useState<number>(1);
   const [broadcastInput, setBroadcastInput] = useState<boolean>(false);
+  // Session recording taps the active pane's bytes, not a demo: the raw
+  // asciicast text is kept so Download writes exactly what was captured.
+  const [recording, setRecording] = useState(false);
+  const [recordedCastText, setRecordedCastText] = useState<string | null>(null);
+  const [recordScrubber, setRecordScrubber] = useState(0);
+  const [recordNotice, setRecordNotice] = useState<string>('');
+  const recorderRef = useRef<AsciicastRecorder | null>(null);
+  // A recording belongs to the tab it started on: following the active tab
+  // would mix two servers' output under one title.
+  const recordTabIdRef = useRef<string | null>(null);
+  // The split pane is a second shell on the same connection; it belongs to
+  // the recording when the recorded tab owns that connection.
+  const recordConnectionRef = useRef<string | null>(null);
+  // PTY chunks can split a multi-byte character; decode as a stream so the
+  // cast matches what the terminal rendered.
+  const recordDecoderRef = useRef<TextDecoder | null>(null);
+  const recordedCast = useMemo(
+    () => (recordedCastText ? parseAsciicastV2(recordedCastText) : null),
+    [recordedCastText]
+  );
+  const [termSearchOpen, setTermSearchOpen] = useState(false);
+  const [termSearchQuery, setTermSearchQuery] = useState('');
+  const [termSearchStatus, setTermSearchStatus] = useState('');
+
+  /** Search the active pane's scrollback through xterm's search addon. */
+  const runTerminalSearch = (direction: 1 | -1): void => {
+    const term = termSearchQuery.trim();
+    if (term.length === 0) {
+      setTermSearchStatus('');
+      return;
+    }
+    const adapter = paneAdaptersRef.current.get(activeTabIdRef.current);
+    if (!adapter || connectionState !== 'connected') {
+      setTermSearchStatus('No terminal to search — connect first.');
+      return;
+    }
+    const found = direction === 1 ? adapter.findNext(term) : adapter.findPrevious(term);
+    setTermSearchStatus(found ? '' : 'No match');
+  };
+
+  const openTerminalSearch = (): void => {
+    setTermSearchOpen(true);
+    setTermSearchStatus('');
+  };
+
+  const closeTerminalSearch = (): void => {
+    setTermSearchOpen(false);
+    setTermSearchStatus('');
+    const adapter = paneAdaptersRef.current.get(activeTabIdRef.current);
+    if (adapter) {
+      adapter.focus();
+    } else {
+      terminalViewRef.current?.focus();
+    }
+  };
+
   const [splitPaneChannel, setSplitPaneChannel] = useState<number | null>(null);
   const [showCommandInspector, setShowCommandInspector] = useState<boolean>(false);
   const [rendererNotice, setRendererNotice] = useState<string>('');
@@ -356,6 +347,10 @@ export function App(): JSX.Element {
   const [reconnectNotice, setReconnectNotice] = useState<string | null>(null);
   const [reconnectMessage, setReconnectMessage] = useState<string | null>(null);
   const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
+  // Jump hops belong to the saved host they came from. They are only sent when
+  // the form still targets that host, so editing the host cannot silently
+  // route a new connection through an unrelated bastion.
+  const [pendingJump, setPendingJump] = useState<PendingJump | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
   // Connections the user closed explicitly must never be resurrected by the
@@ -376,6 +371,73 @@ export function App(): JSX.Element {
   useEffect(() => () => clearReconnectTimer(), []);
   const [sessionTabLabel, setSessionTabLabel] = useState<string>('Terminal 1');
   const [connectedUser, setConnectedUser] = useState<string>('');
+
+  const startRecording = (): void => {
+    // Only a live session has bytes worth recording; starting on a
+    // disconnected pane would produce an empty file that looks like a bug.
+    if (connectionState !== 'connected') {
+      setRecordedCastText(null);
+      return;
+    }
+    recorderRef.current = new AsciicastRecorder(cols, rows, sessionTabLabel);
+    recordTabIdRef.current = activeTabIdRef.current;
+    recordConnectionRef.current =
+      tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId ?? null;
+    recordDecoderRef.current = new TextDecoder('utf-8');
+    setRecordNotice('');
+    setRecording(true);
+  };
+
+  const stopRecording = (): number => {
+    const rec = recorderRef.current;
+    recorderRef.current = null;
+    setRecording(false);
+    const tail = recordDecoderRef.current?.decode() ?? '';
+    recordDecoderRef.current = null;
+    recordTabIdRef.current = null;
+    recordConnectionRef.current = null;
+    if (!rec) return 0;
+    if (tail) rec.recordOutput(tail);
+    if (rec.isCapped()) {
+      setRecordNotice(`Recording stopped at its size cap; later output from this session was not captured.`);
+    }
+    const cast = rec.exportCast();
+    const parsed = parseAsciicastV2(cast);
+    setRecordedCastText(cast);
+    setRecordScrubber(parsed.events.length > 0 ? parsed.events[parsed.events.length - 1]![0] : 0);
+    return parsed.events.length;
+  };
+
+  const downloadRecording = (): void => {
+    if (!recordedCastText) return;
+    const blob = new Blob([recordedCastText], { type: 'application/x-asciicast' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `webssh-session-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.cast`;
+    a.click();
+    // Firefox cancels the download when the URL is revoked in the same task.
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  };
+
+  // A dropped session cannot keep recording; stop and keep what was captured.
+  useEffect(() => {
+    if (connectionState !== 'connected' && recorderRef.current) {
+      stopRecording();
+    }
+    // stopRecording closes over nothing mutable beyond refs and setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionState]);
+
+  // Switching tabs stops the recording instead of silently mixing servers.
+  useEffect(() => {
+    if (recorderRef.current && recordTabIdRef.current !== activeTabIdRef.current) {
+      const events = stopRecording();
+      setRecordNotice(`Recording stopped when you switched tabs; ${events} events were kept.`);
+    }
+    // stopRecording closes over nothing mutable beyond refs and setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId]);
   const [connectedHost, setConnectedHost] = useState<string>('');
   const [remoteSession, setRemoteSession] = useState<WorkspaceRemoteSession | null>(null);
   const [capabilities, setCapabilities] = useState<ServerCapabilities | null>(null);
@@ -389,6 +451,7 @@ export function App(): JSX.Element {
     setDiscoveryBusy(true);
     setDiscoveryError(null);
     try {
+      const { runDiscovery } = await import('./ServerModules');
       const result = await runDiscovery(session);
       setCapabilities(result);
       return result;
@@ -409,14 +472,15 @@ export function App(): JSX.Element {
   };
   const [pendingInputBytes, setPendingInputBytes] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteIndex, setPaletteIndex] = useState(0);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState('');
   const [hostKeyModal, setHostKeyModal] = useState<'none' | 'tofu' | 'mismatch'>('none');
   const [hosts, setHosts] = useState<HostProfile[]>(() => hostRegistry.list());
   const [cacheRepairStatus, setCacheRepairStatus] = useState<string>('');
-  const [settingsSection, setSettingsSection] = useState<'appearance' | 'keyboard' | 'maintenance'>(
-    'appearance'
-  );
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance');
   const [hostSearch, setHostSearch] = useState('');
+  const [hostTransferStatus, setHostTransferStatus] = useState('');
   const [sshConfigInput, setSshConfigInput] = useState('');
   const [generatedPubKey, setGeneratedPubKey] = useState(
     'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWebSSHStudioBrowserNonExtractableKey webssh@browser'
@@ -429,6 +493,14 @@ export function App(): JSX.Element {
     { name: string; path: string; size: number; mode: string; modTime: number; isDir: boolean }[]
   >([]);
   const [sftpCurrentPath, setSftpCurrentPath] = useState<string>('~');
+  // Local pane. Chromium exposes the File System Access API; anywhere else we
+  // say so instead of rendering a fake directory listing.
+  const [localDirHandle, setLocalDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [localDirName, setLocalDirName] = useState<string>('');
+  const [localEntries, setLocalEntries] = useState<LocalEntry[]>([]);
+  const [localStatus, setLocalStatus] = useState<string>(
+    'No local folder selected. Upload and download still work without one.'
+  );
   const [editorFilePath, setEditorFilePath] = useState<string>('README.md');
   const [editorOriginalContent, setEditorOriginalContent] = useState('');
   const [editorContent, setEditorContent] = useState('');
@@ -603,6 +675,21 @@ export function App(): JSX.Element {
   const [connectModalOpen, setConnectModalOpen] = useState<boolean>(false);
   const [connectHost, setConnectHost] = useState<string>('');
   const [connectPort, setConnectPort] = useState<string>('22');
+  // A chain outlives a failed attempt so Retry keeps the bastion, but it must
+  // not leak into the next connection the user opens.
+  useEffect(() => {
+    if (!connectModalOpen) setPendingJump(null);
+  }, [connectModalOpen]);
+  // Hops from a saved host apply only while the form still targets that host.
+  const activeJumpHops = useMemo(() => {
+    const portNum = Number.parseInt(connectPort, 10);
+    return pendingJump &&
+      pendingJump.targetHost === connectHost.trim() &&
+      pendingJump.targetPort === portNum &&
+      pendingJump.hops.length > 0
+      ? pendingJump.hops
+      : undefined;
+  }, [pendingJump, connectHost, connectPort]);
   const [connectUser, setConnectUser] = useState<string>('ubuntu');
   const [authMethod, setAuthMethod] = useState<AuthMethod>('Password');
   const [connectPassword, setConnectPassword] = useState<string>('');
@@ -617,6 +704,10 @@ export function App(): JSX.Element {
   );
 
   const terminalPalette = THEMES[activeTheme] ?? THEMES.dark;
+  const recentHosts = [...hosts]
+    .filter((h) => typeof h.lastConnectedAt === 'number')
+    .sort((a, b) => (b.lastConnectedAt ?? 0) - (a.lastConnectedAt ?? 0))
+    .slice(0, 5);
   const activeConnection = connectionRegistryRef.current.get(
     tabs.find((t) => t.id === activeTabId)?.connectionId
   );
@@ -690,6 +781,23 @@ export function App(): JSX.Element {
     }
   };
 
+  const readRemoteFileComplete = async (
+    remotePath: string,
+    sessionClient: LiveGatewaySessionClient | BrowserSshRelaySessionClient
+  ): Promise<{ bytes: Uint8Array } | { error: string }> =>
+    sessionClient.sftpOp
+      ? readRemoteFile(sessionClient.sftpOp.bind(sessionClient) as unknown as SftpOp, remotePath)
+      : { error: 'This transport has no SFTP support.' };
+
+  const writeRemoteFileBytes = async (
+    remotePath: string,
+    bytes: Uint8Array,
+    sessionClient: LiveGatewaySessionClient | BrowserSshRelaySessionClient
+  ): Promise<string | null> =>
+    sessionClient.sftpOp
+      ? writeRemoteFile(sessionClient.sftpOp.bind(sessionClient) as unknown as SftpOp, remotePath, bytes)
+      : 'This transport has no SFTP support.';
+
   const loadRemoteFileIntoEditor = async (
     remotePath = editorFilePath,
     sessionClient = liveSessionRef.current
@@ -700,17 +808,17 @@ export function App(): JSX.Element {
     setEditorError(null);
     setEditorConflict(null);
     try {
-      const res = await sessionClient.sftpOp({ op: 'read_file', path: remotePath });
-      if (res.ok && res.dataBase64 !== undefined) {
-        const text = new TextDecoder().decode(base64ToBytes(res.dataBase64));
-        setEditorLoadedPath(remotePath);
-        setEditorFilePath(remotePath);
-        setEditorOriginalContent(text);
-        setEditorContent(text);
-        setEditorSaved(true);
-      } else {
-        setEditorError(res.error ?? `Could not read ${remotePath}`);
+      const read = await readRemoteFileComplete(remotePath, sessionClient);
+      if ('error' in read) {
+        setEditorError(read.error);
+        return;
       }
+      const text = decodeUtf8Text(read.bytes, remotePath);
+      setEditorLoadedPath(remotePath);
+      setEditorFilePath(remotePath);
+      setEditorOriginalContent(text);
+      setEditorContent(text);
+      setEditorSaved(true);
     } catch (err) {
       setEditorError(err instanceof Error ? err.message : String(err));
     }
@@ -802,14 +910,57 @@ export function App(): JSX.Element {
       }
       const target = `${sftpCurrentPath.replace(/\/$/, '')}/${file.name}`;
       setTransferStatus(`Uploading ${file.name} (${bytes.byteLength} bytes)…`);
-      const res = await activeClient.sftpOp({
-        op: 'write_file',
-        path: target,
-        dataBase64: btoa(binary)
-      });
-      if (!res.ok) {
-        setTransferStatus(`Upload failed: ${res.error ?? 'Unknown error'}`);
-        return;
+      // A single write_file frame carries base64 plus JSON; above ~3 MiB it
+      // exceeds the gateway's 4 MiB frame ceiling and kills the session. Use
+      // the chunked ops the same way the IDE does.
+      if (bytes.byteLength > REMOTE_INLINE_WRITE_BYTES) {
+        await activeClient.sftpOp({ op: 'remove', path: `${target}.part` }).catch(() => undefined);
+        await activeClient.sftpOp({ op: 'remove', path: `${target}.webssh-part` }).catch(() => undefined);
+        const init = await activeClient.sftpOp({ op: 'upload_init', path: target });
+        if (!init.ok) {
+          setTransferStatus(`Upload failed: ${init.error ?? 'Could not start the upload'}`);
+          return;
+        }
+        let offset = typeof init.offset === 'number' ? init.offset : 0;
+        if (offset !== 0) {
+          setTransferStatus(
+            `Upload failed: ${target} already has a ${offset}-byte part file; refusing to write a corrupt file.`
+          );
+          return;
+        }
+        while (offset < bytes.byteLength) {
+          const slice = bytes.subarray(offset, Math.min(offset + 256 * 1024, bytes.byteLength));
+          const chunk = await activeClient.sftpOp({
+            op: 'upload_chunk',
+            path: target,
+            offset,
+            size: slice.byteLength,
+            dataBase64: bytesToBase64(slice)
+          });
+          if (!chunk.ok) {
+            setTransferStatus(`Upload failed: ${chunk.error ?? 'Chunk rejected'}`);
+            return;
+          }
+          offset =
+            typeof chunk.offset === 'number' && chunk.offset > offset
+              ? chunk.offset
+              : offset + slice.byteLength;
+        }
+        const commit = await activeClient.sftpOp({ op: 'upload_commit', path: target });
+        if (!commit.ok) {
+          setTransferStatus(`Upload failed: ${commit.error ?? 'Could not finish the upload'}`);
+          return;
+        }
+      } else {
+        const res = await activeClient.sftpOp({
+          op: 'write_file',
+          path: target,
+          dataBase64: btoa(binary)
+        });
+        if (!res.ok) {
+          setTransferStatus(`Upload failed: ${res.error ?? 'Unknown error'}`);
+          return;
+        }
       }
       setTransferStatus(`Uploaded ${file.name} to ${target} (${bytes.byteLength} bytes)`);
       void refreshSftpDirectory(sftpCurrentPath, activeClient, true);
@@ -818,30 +969,144 @@ export function App(): JSX.Element {
     }
   };
 
-  const downloadRemoteFile = async (remotePath: string): Promise<void> => {
+  const readRemoteFileBytes = async (remotePath: string): Promise<Uint8Array | null> => {
     const activeClient = liveSessionRef.current;
     if (!activeClient || !activeClient.isConnected) {
       setTransferStatus('Download not started: the SSH session is disconnected.');
+      return null;
+    }
+    try {
+      const read = await readRemoteFileComplete(remotePath, activeClient);
+      if ('error' in read) {
+        setTransferStatus(`Download failed: ${read.error}`);
+        return null;
+      }
+      return read.bytes;
+    } catch (err) {
+      setTransferStatus(`Download failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  };
+
+  const downloadRemoteFile = async (remotePath: string): Promise<void> => {
+    const bytes = await readRemoteFileBytes(remotePath);
+    if (!bytes) return;
+    const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = remotePath.split('/').pop() || 'download.bin';
+    a.click();
+    // Firefox cancels the download if the object URL is revoked in the same
+    // task as the click; let the browser start reading first.
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    setTransferStatus(`Downloaded ${remotePath} (${bytes.byteLength} bytes)`);
+  };
+
+  const localFsAccessSupported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+
+  const refreshLocalDirectory = async (dir: FileSystemDirectoryHandle): Promise<void> => {
+    const entries: LocalEntry[] = [];
+    try {
+      const handles = (dir as unknown as { values(): AsyncIterable<FileSystemHandle> }).values();
+      for await (const handle of handles) {
+        let size = 0;
+        if (handle.kind === 'file') {
+          try {
+            size = (await (handle as FileSystemFileHandle).getFile()).size;
+          } catch {
+            size = 0;
+          }
+        }
+        entries.push({
+          name: handle.name,
+          kind: handle.kind,
+          size,
+          handle: handle as FileSystemFileHandle | FileSystemDirectoryHandle
+        });
+      }
+    } catch (err) {
+      setLocalStatus(`Could not list the local folder: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    entries.sort((a, b) =>
+      a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'directory' ? -1 : 1
+    );
+    setLocalEntries(entries);
+    setLocalStatus(`${entries.length} local entr${entries.length === 1 ? 'y' : 'ies'} in ${dir.name}`);
+  };
+
+  const pickLocalDirectory = async (): Promise<void> => {
+    if (!localFsAccessSupported) {
+      setLocalStatus('This browser has no File System Access API (Firefox, Safari). Use Upload and Download instead.');
       return;
     }
     try {
-      const res = await activeClient.sftpOp({ op: 'read_file', path: remotePath });
-      if (!res.ok || res.dataBase64 === undefined) {
-        setTransferStatus(`Download failed: ${res.error ?? 'No data returned'}`);
+      const dir = await (
+        window as unknown as { showDirectoryPicker: (o?: { mode?: string }) => Promise<FileSystemDirectoryHandle> }
+      ).showDirectoryPicker({ mode: 'readwrite' });
+      setLocalDirHandle(dir);
+      setLocalDirName(dir.name);
+      await refreshLocalDirectory(dir);
+    } catch (err) {
+      // A cancelled picker is not an error worth shouting about.
+      if (err instanceof Error && err.name === 'AbortError') return;
+      setLocalStatus(`Could not open the local folder: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const uploadLocalEntry = async (entry: LocalEntry): Promise<void> => {
+    if (entry.kind !== 'file') {
+      setTransferStatus(`${entry.name} is a folder; only files are uploaded from the local pane.`);
+      return;
+    }
+    try {
+      const file = await (entry.handle as FileSystemFileHandle).getFile();
+      await uploadLocalFile(file);
+      if (localDirHandle) void refreshLocalDirectory(localDirHandle);
+    } catch (err) {
+      setTransferStatus(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const downloadToLocalDirectory = async (remotePath: string): Promise<void> => {
+    if (!localDirHandle) {
+      setLocalStatus('Choose a local folder before downloading into it.');
+      return;
+    }
+    const bytes = await readRemoteFileBytes(remotePath);
+    if (!bytes) return;
+    const name = remotePath.split('/').pop() || 'download.bin';
+    try {
+      const existing = await localDirHandle.getFileHandle(name).catch(() => null);
+      if (existing && !window.confirm(`${localDirName}/${name} already exists. Overwrite it?`)) {
+        setTransferStatus(`Download cancelled: ${localDirName}/${name} was left unchanged.`);
         return;
       }
-      const bytes = base64ToBytes(res.dataBase64);
-      const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = remotePath.split('/').pop() || 'download.bin';
-      a.click();
-      URL.revokeObjectURL(url);
-      setTransferStatus(`Downloaded ${remotePath} (${bytes.byteLength} bytes)`);
+      const handle = existing ?? (await localDirHandle.getFileHandle(name, { create: true }));
+      const writable = await handle.createWritable();
+      // Copy into a freshly allocated buffer: TS 5.7 widens a sliced
+      // Uint8Array to ArrayBufferLike, which FileSystemWriteChunkType rejects.
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      await writable.write(copy.buffer);
+      await writable.close();
+      setTransferStatus(`Downloaded ${remotePath} into ${localDirName}/${name} (${bytes.byteLength} bytes)`);
+      void refreshLocalDirectory(localDirHandle);
     } catch (err) {
       setTransferStatus(`Download failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  };
+
+  const handleRemoteDrop = (event: DragEvent): void => {
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (files.length === 0) return;
+    void (async () => {
+      for (const file of files) {
+        await uploadLocalFile(file);
+      }
+    })();
   };
 
   const readRemoteLog = async (): Promise<void> => {
@@ -880,30 +1145,37 @@ export function App(): JSX.Element {
     setEditorError(null);
     try {
       if (!overwrite) {
-        const current = await activeClient.sftpOp({ op: 'read_file', path: editorFilePath });
+        const current = await readRemoteFileComplete(editorFilePath, activeClient);
         // Fail closed: if the file cannot be re-read, a blind write could
         // silently destroy another operator's change.
-        if (!current.ok || current.dataBase64 === undefined) {
+        if ('error' in current) {
           setEditorError(
-            `Not saved: could not re-read ${editorFilePath} to check for conflicts (${current.error ?? 'unknown error'}). Retry, or use "Overwrite with my version" if you accept the risk.`
+            `Not saved: could not re-read ${editorFilePath} to check for conflicts (${current.error}). Retry, or use "Overwrite with my version" if you accept the risk.`
           );
           return;
         }
-        if (new TextDecoder().decode(base64ToBytes(current.dataBase64)) !== editorOriginalContent) {
+        // A file that turned non-UTF-8 under us counts as changed: the text
+        // comparison below cannot speak for it, so do not write over it.
+        let currentText: string | null = null;
+        try {
+          currentText = decodeUtf8Text(current.bytes, editorFilePath);
+        } catch {
+          currentText = null;
+        }
+        if (currentText === null || currentText !== editorOriginalContent) {
           setEditorConflict(
             `${editorFilePath} changed on the server since you opened it. Saving now would overwrite those changes.`
           );
           return;
         }
       }
-      const encoded = bytesToBase64(new TextEncoder().encode(editorContent));
-      const res = await activeClient.sftpOp({
-        op: 'write_file',
-        path: editorFilePath,
-        dataBase64: encoded
-      });
-      if (!res.ok) {
-        setEditorError(`Save failed: ${res.error ?? 'Unknown error'}`);
+      const writeError = await writeRemoteFileBytes(
+        editorFilePath,
+        new TextEncoder().encode(editorContent),
+        activeClient
+      );
+      if (writeError) {
+        setEditorError(`Save failed: ${writeError}`);
         return;
       }
       setEditorLoadedPath(editorFilePath);
@@ -1366,8 +1638,10 @@ export function App(): JSX.Element {
 
       const connectionId = nextConnectionId();
 
+      const jumpHops = activeJumpHops;
       const sessionParams = {
         transportMode,
+        jumpHops,
         gatewayUrl: gwValidation.normalizedUrl,
         gatewayAuthToken: effectiveGatewayToken,
         host: hostVal,
@@ -1387,6 +1661,19 @@ export function App(): JSX.Element {
           const tab = tabsRef.current.find(
             (t) => t.connectionId === connectionId && t.channelId === channel
           );
+          const recorder = recorderRef.current;
+          const recordedConnection = recordConnectionRef.current;
+          const isRecordedTab = tab?.id === recordTabIdRef.current;
+          // The split pane has no tab of its own; record it when it shares the
+          // recorded tab's connection, so the cast is not silently partial.
+          const isRecordedSplit =
+            recordedConnection !== null &&
+            splitOwnerRef.current === recordedConnection &&
+            splitChannelRef.current === channel;
+          if (recorder && (isRecordedTab || isRecordedSplit)) {
+            const decoded = recordDecoderRef.current?.decode(data, { stream: true });
+            if (decoded) recorder.recordOutput(decoded);
+          }
           const paneId =
             tab?.id ??
             (splitOwnerRef.current === connectionId && splitChannelRef.current === channel
@@ -1520,17 +1807,26 @@ export function App(): JSX.Element {
       try {
         const meta = await client.connect();
         liveSessionRef.current = client;
-        hostRegistry.upsert({
-          id: `host-${hostVal}-${portVal}`,
-          alias: hostVal,
-          host: hostVal,
-          port: portNum,
-          user: userVal,
-          folder: 'Connected',
-          tags: [authMethod === 'Password' ? 'password' : 'key-400'],
-          favorite: true,
-          jumpHops: []
-        });
+        // Reuse the profile the user connected from (an SSH-config import
+        // uses `host-<alias>` and may carry ProxyJump hops). Writing a fresh
+        // `host-<host>-<port>` record here creates a hop-less twin that
+        // Recent hosts can offer, routing around the bastion.
+        const sourceHost = hostRegistry
+          .list()
+          .find((h) => h.host === hostVal && h.port === portNum && h.user === userVal);
+        hostRegistry.upsert(
+          sourceHost ?? {
+            id: `host-${userVal}-${hostVal}-${portNum}`,
+            alias: hostVal,
+            host: hostVal,
+            port: portNum,
+            user: userVal,
+            folder: 'Connected',
+            tags: [authMethod === 'Password' ? 'password' : 'key-400'],
+            favorite: true,
+            jumpHops: []
+          }
+        );
         setHosts(hostRegistry.list());
         setConnectedUser(userVal);
         setConnectedHost(hostVal);
@@ -1589,6 +1885,13 @@ export function App(): JSX.Element {
         setReconnectMessage(null);
         reconnectAttemptRef.current = 0;
         suppressedReconnectRef.current.delete(connectionId);
+        const matchedHost = hostRegistry
+          .list()
+          .find((h) => h.host === hostVal && h.user === userVal && h.port === portNum);
+        if (matchedHost) {
+          hostRegistry.upsert({ ...matchedHost, lastConnectedAt: Date.now() });
+          setHosts(hostRegistry.list());
+        }
         setConnectModalOpen(false);
         setActiveScreen('workspace');
         const workspaceSession = createRemoteSession(client, {
@@ -1745,6 +2048,7 @@ export function App(): JSX.Element {
       const msg = `Opening SSH connection credentials modal${arg ? ` for ${arg}` : ''}...`;
       setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
       appendCommandBlock(trimmed, [msg], 0);
+      setPendingJump(null);
       setConnectModalOpen(true);
       return;
     }
@@ -1828,6 +2132,16 @@ export function App(): JSX.Element {
       e.preventDefault();
       setZenMode(false);
       setActiveScreen('welcome');
+      return;
+    }
+    if (
+      (e.metaKey || e.ctrlKey) &&
+      !e.shiftKey &&
+      e.key.toLowerCase() === 'f' &&
+      activeScreen === 'workspace'
+    ) {
+      e.preventDefault();
+      openTerminalSearch();
       return;
     }
     const eventTarget = e.target as HTMLElement | null;
@@ -2038,10 +2352,41 @@ export function App(): JSX.Element {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPaletteOpen((prev) => !prev);
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === 'f' &&
+        activeScreen === 'workspace'
+      ) {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName?.toLowerCase();
+        if (tag !== 'input' && tag !== 'textarea' && !target?.isContentEditable) {
+          e.preventDefault();
+          openTerminalSearch();
+        }
       } else if (e.key === 'F11' || ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'f')) {
         e.preventDefault();
         toggleFullscreen();
+      } else if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName?.toLowerCase();
+        // The terminal's own line editor is a div, so `?` is a real command
+        // character there; only the surrounding shell should open help.
+        const inTerminal =
+          typeof target?.closest === 'function' &&
+          Boolean(target.closest('.webssh-terminal-viewport'));
+        if (tag !== 'input' && tag !== 'textarea' && !target?.isContentEditable && !inTerminal) {
+          e.preventDefault();
+          setShortcutsOpen(true);
+        }
       } else if (e.key === 'Escape') {
+        // Escape closes an open dialog wherever focus sits; the palette's own
+        // input handles it too, but not after the list is clicked.
+        if (paletteOpen || shortcutsOpen) {
+          setPaletteOpen(false);
+          setShortcutsOpen(false);
+          return;
+        }
         setZenMode((wasZen) => {
           if (wasZen) {
             setActiveScreen('welcome');
@@ -2057,13 +2402,23 @@ export function App(): JSX.Element {
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
     document.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keydown', onKeyDown);
     return () => {
       document.removeEventListener('fullscreenchange', onFullscreenChange);
       document.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keydown', onKeyDown);
     };
   });
+
+  // Modal content is mounted whether or not it is open, so `autoFocus` alone
+  // does not move the caret; focus explicitly each time the palette opens.
+  useEffect(() => {
+    if (paletteOpen) paletteInputRef.current?.focus();
+  }, [paletteOpen]);
+
+  // `autoFocus` alone is unreliable once xterm holds focus, so the find bar
+  // claims the caret explicitly each time it opens.
+  useEffect(() => {
+    if (termSearchOpen) termSearchInputRef.current?.focus();
+  }, [termSearchOpen]);
 
   const handleGenerateKey = async (): Promise<void> => {
     try {
@@ -2076,7 +2431,11 @@ export function App(): JSX.Element {
     }
   };
 
-  const paletteRegistry = useMemo(() => {
+  // Rebuilt each render: the commands close over tabs, activeTabId, split
+  // panes and full-screen state, and a memo over [isFullscreen] handed them a
+  // first-render snapshot (e.g. "Close current tab" reset the workspace but
+  // never closed the transport).
+  const paletteRegistry = (() => {
     const reg = new CommandPaletteRegistry();
     reg.register({
       id: 'view.fullscreen',
@@ -2134,6 +2493,62 @@ export function App(): JSX.Element {
       }
     });
     reg.register({
+      id: 'terminal.find',
+      title: 'Find in terminal output',
+      category: 'Terminal',
+      shortcut: 'Cmd+F',
+      run: () => {
+        setPaletteOpen(false);
+        setActiveScreen('workspace');
+        openTerminalSearch();
+      }
+    });
+    reg.register({
+      id: 'terminal.broadcast',
+      title: 'Broadcast input to split panes',
+      category: 'Terminal',
+      run: () => {
+        // Opening the split turns broadcast on; only an already-split pane
+        // toggles it. Toggling blind turned it OFF when it had been left on
+        // with a single pane.
+        if (splitPanes === 1) {
+          setSplitPanes(2);
+          setBroadcastInput(true);
+        } else {
+          setBroadcastInput((v) => !v);
+        }
+        setPaletteOpen(false);
+      }
+    });
+    reg.register({
+      id: 'terminal.close',
+      title: 'Close current tab',
+      category: 'Terminal',
+      run: () => {
+        handleCloseTab(activeTabIdRef.current);
+        setPaletteOpen(false);
+      }
+    });
+    reg.register({
+      id: 'ide.toggle',
+      title: 'Toggle IDE mode',
+      category: 'View',
+      run: () => {
+        setIdeMode((m) => !m);
+        setPaletteOpen(false);
+      }
+    });
+    reg.register({
+      id: 'help.shortcuts',
+      title: 'Show keyboard shortcuts',
+      category: 'Help',
+      shortcut: '?',
+      run: () => {
+        setPaletteOpen(false);
+        setShortcutsOpen(true);
+      }
+    });
+    reg.register({
       id: 'nav.settings',
       title: 'Open Preferences & Theme Editor',
       category: 'Preferences',
@@ -2143,7 +2558,7 @@ export function App(): JSX.Element {
       }
     });
     return reg;
-  }, [isFullscreen]);
+  })();
 
   const sftpEntries = useMemo(
     () => sortAndFilterEntries(sftpRawEntries, fileFilter),
@@ -2226,560 +2641,56 @@ export function App(): JSX.Element {
         </div>
       ) : null}
 
-      {/* 1. macOS Window Title Bar & Native Menu Bar */}
       {!isFullscreen && !zenMode ? (
-        <div className="webssh-titlebar" data-testid="macos-titlebar">
-          <div className="webssh-titlebar-left">
-            <div className="webssh-traffic-lights" role="group" aria-label="Window controls">
-              <button
-                type="button"
-                className="webssh-traffic-light webssh-traffic-light--close"
-                aria-label="Close session or reset"
-                title="Close session / Reset"
-                data-testid="traffic-light-close"
-                onClick={handleDisconnect}
-              />
-              <button
-                type="button"
-                className="webssh-traffic-light webssh-traffic-light--minimize"
-                aria-label="Minimize or toggle Zen mode"
-                title="Minimize / Toggle Zen Mode"
-                data-testid="traffic-light-minimize"
-                onClick={() => setZenMode((z) => !z)}
-              />
-              <button
-                type="button"
-                className="webssh-traffic-light webssh-traffic-light--fullscreen"
-                aria-label="Toggle full screen"
-                title="Full Screen"
-                data-testid="traffic-light-fullscreen"
-                onClick={toggleFullscreen}
-              />
-            </div>
-
-            <nav className="webssh-menubar" aria-label="Application menu bar" data-testid="macos-menubar">
-              <div className="webssh-menu-group" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  className={`webssh-menu-trigger ${openMenu === 'terminal' ? 'webssh-menu-trigger--open' : ''}`.trim()}
-                  onClick={() => setOpenMenu((m) => (m === 'terminal' ? null : 'terminal'))}
-                  data-testid="menu-terminal-btn"
-                >
-                  Terminal
-                </button>
-                {openMenu === 'terminal' ? (
-                  <div className="webssh-menu-dropdown" role="menu" data-testid="menu-terminal-dropdown">
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        handleAddTab();
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>New Tab</span>
-                      <span>Cmd+T</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setSplitPanes((n) => (n === 1 ? 2 : 1));
-                        setActiveScreen('workspace');
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Split Terminal</span>
-                      <span>Cmd+D</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        handleDisconnect();
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Disconnect</span>
-                      <span>Cmd+W</span>
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="webssh-menu-group" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  className={`webssh-menu-trigger ${openMenu === 'edit' ? 'webssh-menu-trigger--open' : ''}`.trim()}
-                  onClick={() => setOpenMenu((m) => (m === 'edit' ? null : 'edit'))}
-                  data-testid="menu-edit-btn"
-                >
-                  Edit
-                </button>
-                {openMenu === 'edit' ? (
-                  <div className="webssh-menu-dropdown" role="menu" data-testid="menu-edit-dropdown">
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        copyToClipboard(terminalLines.join(String.fromCharCode(10)));
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Copy</span>
-                      <span>Cmd+C</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        updateCurrentInput((prev) => `${prev}ls -la`);
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Paste</span>
-                      <span>Cmd+V</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setTerminalLines([]);
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Clear Buffer</span>
-                      <span>Cmd+K</span>
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="webssh-menu-group" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  className={`webssh-menu-trigger ${openMenu === 'view' ? 'webssh-menu-trigger--open' : ''}`.trim()}
-                  onClick={() => setOpenMenu((m) => (m === 'view' ? null : 'view'))}
-                  data-testid="menu-view-btn"
-                >
-                  View
-                </button>
-                {openMenu === 'view' ? (
-                  <div className="webssh-menu-dropdown" role="menu" data-testid="menu-view-dropdown">
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setZenMode((z) => !z);
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Toggle Zen Mode</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        toggleFullscreen();
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Fullscreen</span>
-                      <span>F11</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setFontSize((s) => Math.min(32, s + 1));
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Increase Font Size</span>
-                      <span>Cmd++</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setFontSize((s) => Math.max(11, s - 1));
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Decrease Font Size</span>
-                      <span>Cmd+-</span>
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="webssh-menu-group" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  className={`webssh-menu-trigger ${openMenu === 'security' ? 'webssh-menu-trigger--open' : ''}`.trim()}
-                  onClick={() => setOpenMenu((m) => (m === 'security' ? null : 'security'))}
-                  data-testid="menu-security-btn"
-                >
-                  Security
-                </button>
-                {openMenu === 'security' ? (
-                  <div className="webssh-menu-dropdown" role="menu" data-testid="menu-security-dropdown">
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setActiveScreen('vault');
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Argon2id Key Vault</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setActiveScreen('hosts');
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Known Hosts</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="webssh-menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        copyToClipboard(authorizedKeysSnippet);
-                        setTerminalLines((prev) => [
-                          ...prev,
-                          `Deployed Public Key Snippet: ${authorizedKeysSnippet}`
-                        ]);
-                        setOpenMenu(null);
-                      }}
-                    >
-                      <span>Deploy Public Key</span>
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="webssh-menu-group" onClick={(e) => e.stopPropagation()}>
-                <button
-                  type="button"
-                  className={`webssh-menu-trigger ${openMenu === 'features' ? 'webssh-menu-trigger--open' : ''}`.trim()}
-                  onClick={() => {
-                    setActiveScreen('features');
-                    setOpenMenu(null);
-                  }}
-                  data-testid="menu-features-btn"
-                >
-                  Features
-                </button>
-              </div>
-            </nav>
-          </div>
-
-        </div>
-      ) : null}
-
-      {/* 2 & 3. Studio Session Tab Bar & Right-Side Controls (Stop Square, Fullscreen, Pop-out, More Menu & Custom Options) */}
-      {!isFullscreen && !zenMode ? (
-        <header className="webssh-topbar webssh-studio-toolbar" role="banner">
-          <div className="webssh-studio-tabs">
-            <div className="webssh-studio-tabs" role="tablist" aria-label="Active SSH sessions">
-              {tabs.map((tab, idx) => {
-                const isActive = tab.id === activeTabId;
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={isActive && activeScreen === 'workspace'}
-                    className={`webssh-studio-tab ${isActive && activeScreen === 'workspace' ? 'webssh-studio-tab--active' : ''}`.trim()}
-                    onClick={() => {
-                      setActiveTabId(tab.id);
-                      setSessionTabLabel(tab.title);
-                      setActiveScreen('workspace');
-                      liveSessionRef.current =
-                        connectionRegistryRef.current.get(tab.connectionId)?.client ?? null;
-                    }}
-                    data-testid={idx === 0 ? 'tab-session-1' : `tab-session-${idx + 1}`}
-                  >
-                    <span
-                      className={`webssh-status-dot ${
-                        tab.status === 'error'
-                          ? 'webssh-status-dot--offline'
-                          : tab.status === 'opening'
-                            ? 'webssh-status-dot--reconnecting'
-                            : tab.status === 'idle'
-                              ? 'webssh-status-dot--disconnected'
-                              : statusDotClass
-                      }`.trim()}
-                      aria-label={`Status: ${tab.status ?? (tab.connected ? 'ready' : 'idle')}`}
-                    />
-                    <span>{idx === 0 ? sessionTabLabel : tab.title}</span>
-                    {tab.status === 'opening' ? <span aria-live="polite">opening…</span> : null}
-                    {tab.status === 'error' ? (
-                      <span role="status" title={tab.errorMessage}>
-                        failed
-                      </span>
-                    ) : null}
-                    <span
-                      aria-hidden="true"
-                      className="webssh-tab-close"
-                      data-testid={`close-tab-${tab.id}`}
-                      onClick={(e) => handleCloseTab(tab.id, e)}
-                    >
-                      ×
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            <span className="webssh-studio-tab-separator" data-testid="tab-separator" aria-hidden="true" />
-            <button
-              type="button"
-              className="webssh-studio-add-btn"
-              aria-label="New terminal tab"
-              title="Add Terminal Session"
-              data-testid="add-tab-btn"
-              onClick={handleAddTab}
-            >
-              +
-            </button>
-          </div>
-
-          <div
-            data-testid="topbar-quick-controls"
-            className="webssh-studio-controls"
-          >
-            <Button
-              variant={showCommandInspector ? 'primary' : 'ghost'}
-              ariaLabel={showCommandInspector ? 'Hide command inspector' : 'Show command inspector'}
-              onClick={() => setShowCommandInspector((v) => !v)}
-              testId="toggle-command-inspector"
-            >
-              <Icon name="terminal" />
-            </Button>
-            <select
-              className="ui-select"
-              aria-label="Terminal font family"
-              data-testid="font-family-select"
-              value={fontFamily}
-              onChange={(e) => setFontFamily((e.currentTarget as HTMLSelectElement).value)}
-              style={{ width: 'auto' }}
-            >
-              <option value="'DejaVu Sans Mono', Menlo, monospace">DejaVu Sans Mono</option>
-              <option value="SF Mono">SF Mono</option>
-              <option value="'JetBrains Mono', 'Fira Code', monospace">JetBrains Mono</option>
-              <option value="Fira Code">Fira Code</option>
-              <option value="Menlo">Menlo</option>
-              <option value="Monaco">Monaco</option>
-              <option value="Courier New">Courier New</option>
-            </select>
-
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-1)' }}>
-              <Button
-                variant="ghost"
-                ariaLabel="Decrease font size"
-                testId="font-size-dec-btn"
-                onClick={() => setFontSize((s) => Math.max(11, s - 1))}
-              >
-                A-
-              </Button>
-              <span className="font-size-badge" data-testid="font-size-badge">
-                {fontSize}px
-              </span>
-              <Button
-                variant="ghost"
-                ariaLabel="Increase font size"
-                testId="font-size-inc-btn"
-                onClick={() => setFontSize((s) => Math.min(36, s + 1))}
-              >
-                A+
-              </Button>
-            </div>
-
-            <span
-              className={`webssh-status-dot ${statusDotClass}`.trim()}
-              title={`Connection state: ${connectionState}`}
-              data-testid="connection-status-dot"
-            />
-
-            {connectionState === 'disconnected' ? (
-              <Button variant="primary" onClick={() => setConnectModalOpen(true)} testId="new-connection-btn">
-                New Connection
-              </Button>
-            ) : null}
-
-            {/* Stop Session / Disconnect Control with Coral-Red Square */}
-            <button
-              type="button"
-              className="webssh-studio-stop-btn"
-              onClick={handleDisconnect}
-              disabled={connectionState !== 'connected'}
-              data-testid={connectionState === 'connected' ? 'disconnect-btn' : 'stop-session-btn'}
-              title="Stop Session / Disconnect"
-            >
-              <span className="webssh-studio-stop-square" data-testid="stop-red-square" aria-hidden="true" />
-              <span>{connectionState === 'connected' ? 'Stop' : 'Disconnect'}</span>
-            </button>
-
-            <Button
-              variant={ideMode ? 'primary' : 'default'}
-              onClick={() => setIdeMode((m) => !m)}
-              testId="toggle-ide-mode-btn"
-            >
-              {ideMode ? 'IDE Mode: ON' : 'Open IDE'}
-            </Button>
-            {ideMode ? (
-              <Button
-                variant={redactionMode ? 'primary' : 'ghost'}
-                onClick={() => setRedactionMode((r) => !r)}
-                testId="toggle-redaction-btn"
-              >
-                {redactionMode ? 'Redaction: ON' : 'Redact Secrets'}
-              </Button>
-            ) : null}
-            <Button
-              variant="ghost"
-              ariaLabel="Command palette (Cmd+K)"
-              onClick={() => setPaletteOpen(true)}
-              testId="open-palette-btn"
-            >
-              <Icon name="search" />
-            </Button>
-            <Button
-              variant="ghost"
-              ariaLabel="Toggle Zen mode"
-              onClick={() => setZenMode((z) => !z)}
-              testId="toggle-zen-btn"
-            >
-              <Icon name="minimize" />
-            </Button>
-
-            {/* Fullscreen Corner-Shaped Control */}
-            <button
-              type="button"
-              className="webssh-studio-icon-btn"
-              onClick={toggleFullscreen}
-              aria-label="Expand terminal fullscreen"
-              title="Full Screen (F11)"
-              data-testid="toggle-fullscreen-btn"
-            >
-              <Icon name="maximize" />
-              <span className="webssh-label-collapsible">Full Screen</span>
-            </button>
-
-            {/* Pop-Out Terminal Control (Square with upper-right arrow) */}
-            <button
-              type="button"
-              className="webssh-studio-icon-btn"
-              aria-label="Pop out terminal view"
-              title="Open Terminal Workspace View"
-              data-testid="popout-terminal-btn"
-              onClick={() => {
-                setActiveScreen('workspace');
-                terminalViewRef.current?.focus();
-              }}
-            >
-              <span aria-hidden="true">↗</span>
-              <span className="webssh-label-collapsible">Pop-out</span>
-            </button>
-
-          </div>
-
-          {/* More Menu (Three Horizontal Gray Dots ⋯) */}
-            <div className="webssh-menu-group" onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                className="webssh-studio-icon-btn"
-                aria-label="More terminal options"
-                title="More Custom Options"
-                data-testid="more-options-menu-btn"
-                onClick={() => setOpenMenu((m) => (m === 'more' ? null : 'more'))}
-              >
-                <span aria-hidden="true">•••</span>
-              </button>
-              {openMenu === 'more' ? (
-                <div
-                  className="webssh-menu-dropdown"
-                  role="menu"
-                  data-testid="more-options-dropdown"
-                  style={{ right: 0, left: 'auto' }}
-                >
-                  <button
-                    type="button"
-                    className="webssh-menu-item"
-                    role="menuitem"
-                    onClick={() => {
-                      setIdeMode((m) => !m);
-                      setOpenMenu(null);
-                    }}
-                  >
-                    <span>{ideMode ? 'Disable IDE Mode' : 'Enable IDE Mode'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="webssh-menu-item"
-                    role="menuitem"
-                    onClick={() => {
-                      setSplitPanes((n) => (n === 1 ? 2 : 1));
-                      setActiveScreen('workspace');
-                      setOpenMenu(null);
-                    }}
-                  >
-                    <span>Toggle Split Pane</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="webssh-menu-item"
-                    role="menuitem"
-                    onClick={() => {
-                      setRedactionMode((r) => !r);
-                      setOpenMenu(null);
-                    }}
-                  >
-                    <span>{redactionMode ? 'Disable Secret Redaction' : 'Enable Secret Redaction'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="webssh-menu-item"
-                    role="menuitem"
-                    onClick={() => {
-                      setActiveScreen('settings');
-                      setOpenMenu(null);
-                    }}
-                  >
-                    <span>Themes & Typography Settings</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="webssh-menu-item"
-                    role="menuitem"
-                    onClick={() => {
-                      setActiveScreen('welcome');
-                      setOpenMenu(null);
-                    }}
-                  >
-                    <span>Quick Connect Welcome Screen</span>
-                  </button>
-                </div>
-              ) : null}
-          </div>
-        </header>
+        <AppHeader
+          activeScreen={activeScreen}
+          setActiveScreen={setActiveScreen}
+          openMenu={openMenu}
+          setOpenMenu={setOpenMenu}
+          authorizedKeysSnippet={authorizedKeysSnippet}
+          view={{
+            zenMode,
+            setZenMode,
+            isFullscreen,
+            toggleFullscreen,
+            activeTheme,
+            setActiveTheme,
+            setFontSize
+          }}
+          sessionTabs={{
+            tabs,
+            setTabs,
+            activeTabId,
+            setActiveTabId,
+            activeTabIdRef,
+            setSessionTabLabel,
+            statusDotClass,
+            handleAddTab,
+            handleCloseTab
+          }}
+          connection={{
+            connectionState,
+            handleDisconnect,
+            setPendingJump,
+            setConnectModalOpen,
+            liveSessionRef,
+            connectionRegistryRef
+          }}
+          terminal={{
+            terminalLines,
+            setTerminalLines,
+            copyToClipboard,
+            updateCurrentInput,
+            splitPanes,
+            setSplitPanes,
+            broadcastInput,
+            setBroadcastInput,
+            showCommandInspector,
+            setShowCommandInspector
+          }}
+          recorder={{ recording, startRecording, stopRecording, setReconnectNotice }}
+          ide={{ ideMode, setIdeMode, redactionMode, setRedactionMode }}
+        />
       ) : null}
 
       {zenMode ? (
@@ -2809,238 +2720,81 @@ export function App(): JSX.Element {
         }`.trim()}
       >
         {!isFullscreen && !zenMode ? (
-          <>
-          <nav
-            className="webssh-rail"
-            aria-label="Workspace navigation"
-            style={{ width: `${railWidth}px` }}
-          >
-            <div className="webssh-rail-scroll">
-              <Button
-                variant={activeScreen === 'welcome' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('welcome')}
-                testId="nav-welcome"
-              >
-                <Icon name="home" /> Home
-              </Button>
-              <div className="webssh-rail-presets-group">
-                <span className="webssh-rail-group-title">Workspace</span>
-                <div className="webssh-rail-presets" role="group" aria-label="Workspace preset">
-                  {(['terminal', 'develop', 'operate'] as const).map((preset) => (
-                    <Button
-                      key={preset}
-                      variant={workspacePreset === preset ? 'default' : 'ghost'}
-                      ariaPressed={workspacePreset === preset}
-                      onClick={() => applyPreset(preset)}
-                      testId={`preset-${preset}`}
-                    >
-                      {preset[0]!.toUpperCase() + preset.slice(1)}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="webssh-rail-group" role="group" aria-label="Sessions">
-                <span className="webssh-rail-group-title">Sessions</span>
-                <Button
-                  variant={activeScreen === 'workspace' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('workspace')}
-                  testId="nav-workspace"
-                >
-                  <Icon name="terminal" /> Terminal
-                </Button>
-                <Button
-                  variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('overview')}
-                  testId="nav-overview"
-                >
-                  <Icon name="server" /> Servers
-                </Button>
-                <Button
-                  variant={activeScreen === 'files' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('files')}
-                  testId="nav-files"
-                >
-                  <Icon name="folder" /> Files
-                </Button>
-                <Button
-                  variant={activeScreen === 'activity' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('activity')}
-                  testId="nav-activity"
-                >
-                  Activity
-                </Button>
-              </div>
-
-              <div className="webssh-rail-group" role="group" aria-label="Operations">
-                <span className="webssh-rail-group-title">Operations</span>
-                <Button
-                  variant={activeScreen === 'software' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('software')}
-                  testId="nav-software"
-                >
-                  Software
-                </Button>
-                <Button
-                  variant={activeScreen === 'containers' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('containers')}
-                  testId="nav-containers"
-                >
-                  Containers
-                </Button>
-                <Button
-                  variant={activeScreen === 'kubernetes' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('kubernetes')}
-                  testId="nav-kubernetes"
-                >
-                  Kubernetes
-                </Button>
-                <Button
-                  variant={activeScreen === 'automations' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('automations')}
-                  testId="nav-automations"
-                >
-                  Automations
-                </Button>
-                <Button
-                  variant={activeScreen === 'deployments' ? 'primary' : 'ghost'}
-                  onClick={() => setActiveScreen('deployments')}
-                  testId="nav-deployments"
-                >
-                  Deployments
-                </Button>
-              </div>
-
-              {ideMode ? (
-                <div className="webssh-rail-group" role="group" aria-label="Workspace tools" data-testid="sidebar-nav">
-                  <span className="webssh-rail-group-title">Workspace tools</span>
-                  <Button
-                    variant={activeScreen === 'features' ? 'primary' : 'ghost'}
-                    onClick={() => setActiveScreen('features')}
-                    testId="nav-features"
-                  >
-                    Features
-                  </Button>
-                  <Button
-                    variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}
-                    onClick={() => setActiveScreen('tunnels')}
-                    testId="nav-tunnels"
-                  >
-                    Port Tunnels
-                  </Button>
-                  <Button
-                    variant={activeScreen === 'vault' ? 'primary' : 'ghost'}
-                    onClick={() => setActiveScreen('vault')}
-                    testId="nav-vault"
-                  >
-                    <Icon name="key" /> Key Vault
-                  </Button>
-                  <Button
-                    variant={activeScreen === 'hosts' ? 'primary' : 'ghost'}
-                    onClick={() => setActiveScreen('hosts')}
-                    testId="nav-hosts"
-                  >
-                    <Icon name="server" /> Hosts
-                  </Button>
-                  <Button
-                    variant={activeScreen === 'editor' ? 'primary' : 'ghost'}
-                    onClick={() => setActiveScreen('editor')}
-                    testId="nav-editor"
-                  >
-                    Editor
-                  </Button>
-                  <Button
-                    variant={activeScreen === 'ide' ? 'primary' : 'ghost'}
-                    onClick={() => setActiveScreen('ide')}
-                    testId="nav-ide"
-                  >
-                    Workspace IDE
-                  </Button>
-                  <Button
-                    variant={activeScreen === 'snippets' ? 'primary' : 'ghost'}
-                    onClick={() => setActiveScreen('snippets')}
-                    testId="nav-snippets"
-                  >
-                    Snippets &amp; Replay
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="webssh-rail-footer">
-              <Button
-                variant={ideMode ? 'primary' : 'default'}
-                ariaPressed={ideMode}
-                onClick={() => {
-                  setIdeMode((prev) => {
-                    const next = !prev;
-                    if (next && activeScreen === 'welcome') {
-                      setActiveScreen('features');
-                    }
-                    return next;
-                  });
-                }}
-                testId="enable-ide-mode-btn"
-              >
-                {ideMode ? 'IDE mode on' : 'Open IDE'}
-              </Button>
-              <Button
-                variant={activeScreen === 'settings' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('settings')}
-                testId="nav-settings"
-              >
-                <Icon name="settings" /> Settings
-              </Button>
-            </div>
-          </nav>
-          <div
-            className="webssh-rail-resizer"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize navigation rail"
-            aria-valuenow={railWidth}
-            aria-valuemin={120}
-            aria-valuemax={360}
-            tabIndex={0}
-            onKeyDown={(e) => {
-              const step = e.key === 'ArrowLeft' ? -8 : e.key === 'ArrowRight' ? 8 : 0;
-              if (!step) return;
-              e.preventDefault();
-              setRailWidth((w) => {
-                const next = Math.min(360, Math.max(120, w + step));
-                prefsStore.update({ railWidthPx: next });
-                return next;
-              });
-            }}
-            onPointerDown={(e) => {
-              const startX = e.clientX;
-              const startWidth = railWidth;
-              const target = e.currentTarget as HTMLElement;
-              target.setPointerCapture(e.pointerId);
-              const onMove = (move: PointerEvent): void => {
-                const delta =
-                  layoutPreset === 'sidebar-right' ? startX - move.clientX : move.clientX - startX;
-                setRailWidth(Math.min(360, Math.max(120, startWidth + delta)));
-              };
-              const onUp = (): void => {
-                target.removeEventListener('pointermove', onMove);
-                target.removeEventListener('pointerup', onUp);
-                setRailWidth((w) => {
-                  prefsStore.update({ railWidthPx: w });
-                  return w;
-                });
-              };
-              target.addEventListener('pointermove', onMove);
-              target.addEventListener('pointerup', onUp);
-            }}
+          <AppRail
+            activeScreen={activeScreen}
+            setActiveScreen={setActiveScreen}
+            workspacePreset={workspacePreset}
+            applyPreset={applyPreset}
+            ideMode={ideMode}
+            setIdeMode={setIdeMode}
+            railWidth={railWidth}
+            setRailWidth={setRailWidth}
+            layoutPreset={layoutPreset}
+            prefsStore={prefsStore}
           />
-          </>
         ) : null}
 
         <main className="webssh-main">
           {activeScreen === 'workspace' ? (
             <div className="webssh-studio-outer" data-testid="terminal-studio-outer">
               <div className="webssh-studio-container" data-testid="terminal-studio-container">
+                {termSearchOpen ? (
+                  <div className="webssh-term-search" role="search" data-testid="terminal-search-bar">
+                    <Icon name="search" />
+                    <input
+                      ref={(el) => {
+                        termSearchInputRef.current = el;
+                      }}
+                      className="ui-input"
+                      type="search"
+                      autoFocus
+                      aria-label="Search terminal output"
+                      placeholder="Find in terminal…"
+                      data-testid="terminal-search-input"
+                      value={termSearchQuery}
+                      onInput={(e) => setTermSearchQuery((e.currentTarget as HTMLInputElement).value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          runTerminalSearch(e.shiftKey ? -1 : 1);
+                        }
+                        if (e.key === 'Escape') {
+                          e.preventDefault();
+                          closeTerminalSearch();
+                        }
+                      }}
+                    />
+                    <Button
+                      variant="ghost"
+                      ariaLabel="Previous match"
+                      onClick={() => runTerminalSearch(-1)}
+                      testId="terminal-search-prev"
+                    >
+                      Prev
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      ariaLabel="Next match"
+                      onClick={() => runTerminalSearch(1)}
+                      testId="terminal-search-next"
+                    >
+                      Next
+                    </Button>
+                    {termSearchStatus ? (
+                      <span className="webssh-term-search-status" role="status" data-testid="terminal-search-status">
+                        {termSearchStatus}
+                      </span>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      ariaLabel="Close terminal search"
+                      onClick={closeTerminalSearch}
+                      testId="terminal-search-close"
+                    >
+                      ×
+                    </Button>
+                  </div>
+                ) : null}
                 <div className="webssh-split-container">
                   <div
                     ref={terminalViewRef}
@@ -3095,6 +2849,12 @@ export function App(): JSX.Element {
                                 foreground: terminalPalette.terminalFg,
                                 cursor: terminalPalette.terminalCursor
                               }}
+                              broadcastTo={broadcastInput && splitPanes > 1 ? splitPaneChannel : null}
+                              onUserInput={(data) => {
+                                if (recordTabIdRef.current === activeTabIdRef.current) {
+                                  recorderRef.current?.recordInput(data);
+                                }
+                              }}
                               onAdapter={registerPaneAdapter}
                               onRendererChange={handleRendererChange}
                               testId="xterm-engine-mount"
@@ -3130,6 +2890,21 @@ export function App(): JSX.Element {
                               foreground: terminalPalette.terminalFg,
                               cursor: terminalPalette.terminalCursor
                             }}
+                            broadcastTo={
+                              broadcastInput && splitPanes > 1
+                                ? (tabs.find((t) => t.id === activeTabIdRef.current)?.channelId ?? null)
+                                : null
+                            }
+                            onUserInput={(data) => {
+                              const recordedConnection = recordConnectionRef.current;
+                              if (
+                                recorderRef.current &&
+                                recordedConnection !== null &&
+                                splitOwnerRef.current === recordedConnection
+                              ) {
+                                recorderRef.current.recordInput(data);
+                              }
+                            }}
                             onAdapter={registerPaneAdapter}
                             onRendererChange={handleRendererChange}
                             testId="xterm-engine-mount-2"
@@ -3145,7 +2920,10 @@ export function App(): JSX.Element {
                           <p>Enter a host, user and port, then press Connect.</p>
                           <Button
                             variant="primary"
-                            onClick={() => setConnectModalOpen(true)}
+                            onClick={() => {
+                              setPendingJump(null);
+                              setConnectModalOpen(true);
+                            }}
                             testId="empty-state-connect-btn"
                           >
                             Connect
@@ -3199,20 +2977,28 @@ export function App(): JSX.Element {
           ) : null}
 
           {activeScreen === 'ide' ? (
-            <LightIde
-              session={remoteSession}
-              connectedLabel={connectedHost ? `${connectedUser}@${connectedHost}` : ''}
-            />
+            <Suspense fallback={<p className="ws-mod-muted">Loading workspace IDE…</p>}>
+              <LightIde
+                session={remoteSession}
+                connectedLabel={connectedHost ? `${connectedUser}@${connectedHost}` : ''}
+              />
+            </Suspense>
           ) : null}
-          {activeScreen === 'overview' ? <OverviewPanel ctx={moduleContext} /> : null}
-          {activeScreen === 'software' ? <SoftwarePanel ctx={moduleContext} /> : null}
-          {activeScreen === 'containers' ? <ContainersPanel ctx={moduleContext} /> : null}
-          {activeScreen === 'kubernetes' ? <KubernetesPanel ctx={moduleContext} /> : null}
-          {activeScreen === 'automations' ? <AutomationsPanel ctx={moduleContext} /> : null}
-          {activeScreen === 'deployments' ? <DeploymentsPanel ctx={moduleContext} /> : null}
-          {activeScreen === 'activity' ? <ActivityPanel ctx={moduleContext} /> : null}
+          <Suspense fallback={<p className="ws-mod-muted">Loading server modules…</p>}>
+            {activeScreen === 'overview' ? <OverviewPanel ctx={moduleContext} /> : null}
+            {activeScreen === 'software' ? <SoftwarePanel ctx={moduleContext} /> : null}
+            {activeScreen === 'containers' ? <ContainersPanel ctx={moduleContext} /> : null}
+            {activeScreen === 'kubernetes' ? <KubernetesPanel ctx={moduleContext} /> : null}
+            {activeScreen === 'automations' ? <AutomationsPanel ctx={moduleContext} /> : null}
+            {activeScreen === 'deployments' ? <DeploymentsPanel ctx={moduleContext} /> : null}
+            {activeScreen === 'activity' ? <ActivityPanel ctx={moduleContext} /> : null}
+          </Suspense>
 
-          {activeScreen === 'features' ? <CapabilityMatrixPanel /> : null}
+          {activeScreen === 'features' ? (
+            <Suspense fallback={<p className="ws-mod-muted">Loading capability matrix…</p>}>
+              <CapabilityMatrixPanel />
+            </Suspense>
+          ) : null}
 
           {activeScreen === 'tunnels' ? (
             <div className="webssh-panel-content" data-testid="screen-tunnels">
@@ -3419,397 +3205,55 @@ export function App(): JSX.Element {
           ) : null}
 
           {activeScreen === 'welcome' ? (
-            <div className="webssh-panel-content webssh-welcome" data-testid="screen-welcome">
-              <div className="webssh-aurora" aria-hidden="true" />
-              <div className="webssh-welcome-hero">
-                <div className="webssh-welcome-copy">
-                  <span className="webssh-welcome-eyebrow">Browser SSH workspace</span>
-                  <h1>Welcome to WebSSH Studio</h1>
-                  <p style={{ color: 'var(--color-fg-secondary)' }}>
-                    Clean, minimal SSH workspace — connect with Username & Password or upload a Private Key (<code>chmod 0400</code>).
-                  </p>
-                </div>
-                <ProfileCard />
-              </div>
-              <div className="webssh-welcome-actions">
-                <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                  <Button
-                    variant="default"
-                    testId="welcome-open-terminal-btn"
-                    onClick={() => setActiveScreen('workspace')}
-                  >
-                    <Icon name="terminal" /> Open Terminal
-                  </Button>
-                  <Button
-                    variant={ideMode ? 'primary' : 'default'}
-                    testId="welcome-open-ide-btn"
-                    onClick={() => {
-                      setIdeMode(true);
-                      setActiveScreen('features');
-                    }}
-                  >
-                    Open IDE
-                  </Button>
-                </div>
-              </div>
-
-              <Card testId="welcome-quick-connect-card">
-                <h2>Quick SSH Connect</h2>
-                <form
-                  onSubmit={handleConnectSubmit}
-                  style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}
-                >
-                  {transportMode === 'cloudflare-relay' && turnstileSiteKey ? (
-                    <div data-testid="guest-challenge">
-                      <p className="ws-mod-muted" style={{ margin: 0 }}>
-                        No account needed: complete the human check, then connect. A short-lived
-                        ticket is issued for this host and port only.
-                      </p>
-                      <TurnstileWidget
-                        siteKey={turnstileSiteKey}
-                        resetNonce={turnstileResetNonce}
-                        onToken={setTurnstileToken}
-                      />
-                    </div>
-                  ) : null}
-                  {relaySessionUser ? (
-                    <Badge tone="success" testId="product-signed-in">
-                      Signed in as {relaySessionUser}
-                    </Badge>
-                  ) : null}
-                  <details data-testid="admin-transport-settings">
-                    <summary>Administrator settings</summary>
-                    <div
-                      style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}
-                    >
-                      <div data-testid="admin-sign-in">
-                        <h4>Account sign-in (optional)</h4>
-                        <p className="ws-mod-muted" style={{ margin: 0 }}>
-                          Accounts are for administrators. Guest connections use the human check
-                          and need no account.
-                        </p>
-                        {relaySessionUser ? (
-                          <div
-                            style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}
-                            data-testid="product-signed-in-actions"
-                          >
-                            <Badge tone="success">Signed in as {relaySessionUser}</Badge>
-                            <Button
-                              variant="ghost"
-                              type="button"
-                              testId="product-sign-out-btn"
-                              onClick={() => handleRelaySignOut()}
-                            >
-                              Sign out
-                            </Button>
-                          </div>
-                        ) : (
-                          <div
-                            style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}
-                            data-testid="product-sign-in"
-                          >
-                            <div style={{ flex: 1, minWidth: '160px' }}>
-                              <label htmlFor="product-sign-in-user">Username</label>
-                              <input
-                                id="product-sign-in-user"
-                                type="text"
-                                autoComplete="username"
-                                className="ui-input"
-                                placeholder="Your account"
-                                value={relayLoginUser}
-                                onInput={(e) => setRelayLoginUser((e.target as HTMLInputElement).value)}
-                                data-testid="product-sign-in-user"
-                              />
-                            </div>
-                            <div style={{ flex: 1, minWidth: '160px' }}>
-                              <label htmlFor="product-sign-in-pass">Password</label>
-                              <input
-                                id="product-sign-in-pass"
-                                type="password"
-                                autoComplete="current-password"
-                                className="ui-input"
-                                placeholder="Account password"
-                                value={relayLoginPass}
-                                onInput={(e) => setRelayLoginPass((e.target as HTMLInputElement).value)}
-                                data-testid="product-sign-in-pass"
-                              />
-                            </div>
-                            <Button
-                              variant="default"
-                              type="button"
-                              testId="product-sign-in-submit"
-                              onClick={() => void handleRelayLogin()}
-                            >
-                              Sign in
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                      <div>
-                        <label htmlFor="welcome-transport-mode-select">SSH Transport Mode</label>
-                        <select
-                          id="welcome-transport-mode-select"
-                          className="ui-input"
-                          value={transportMode}
-                          onChange={(e) => {
-                            const mode = (e.target as HTMLSelectElement).value as TransportBackendMode;
-                            setTransportMode(mode);
-                            try {
-                              globalThis.localStorage?.setItem('webssh.transport.mode', mode);
-                            } catch {
-                              // ignore
-                            }
-                          }}
-                          data-testid="welcome-transport-mode-select"
-                        >
-                          <option value="go-gateway">
-                            Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)
-                          </option>
-                          <option value="cloudflare-relay">
-                            Cloudflare Worker SSH Relay (Browser SSH-2.0 over cloudflare:sockets — Zero Target Agent)
-                          </option>
-                        </select>
-                      </div>
-                      <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }}>
-                        <div style={{ flex: 2, minWidth: '220px' }}>
-                          <label htmlFor="welcome-gateway-url-input">
-                            {transportMode === 'cloudflare-relay'
-                              ? 'Cloudflare Worker Relay Endpoint (wss://<worker>.workers.dev/ws)'
-                              : 'SSH Gateway WebSocket Endpoint (WSS / WS)'}
-                          </label>
-                          <input
-                            id="welcome-gateway-url-input"
-                            type="text"
-                            className="ui-input"
-                            placeholder="wss://ssh-gateway.yourdomain.com/ws or ws://127.0.0.1:8080/ws"
-                            value={gatewayUrl}
-                            onInput={(e) => {
-                              const val = (e.target as HTMLInputElement).value;
-                              setGatewayUrl(val);
-                              setGatewayProbeStatus(null);
-                              try {
-                                globalThis.localStorage?.setItem('webssh.gateway.wsUrl', val);
-                              } catch {
-                                // ignore
-                              }
-                            }}
-                            data-testid="welcome-gateway-url-input"
-                          />
-                        </div>
-                        <div style={{ flex: 1, minWidth: '160px' }}>
-                          <label htmlFor="welcome-gateway-token-input">Gateway Auth Token (Optional)</label>
-                          <input
-                            id="welcome-gateway-token-input"
-                            type="password"
-                            className="ui-input"
-                            placeholder="Bearer / EC2 gateway token"
-                            value={gatewayAuthToken}
-                            onInput={(e) => {
-                              const val = (e.target as HTMLInputElement).value;
-                              setGatewayAuthToken(val);
-                              try {
-                                globalThis.sessionStorage?.setItem('webssh.gateway.authToken', val);
-                              } catch {
-                                // ignore
-                              }
-                            }}
-                            data-testid="welcome-gateway-token-input"
-                          />
-                        </div>
-                        <Button
-                          variant="default"
-                          type="button"
-                          testId="test-gateway-btn"
-                          onClick={() => void handleTestGateway(gatewayUrl)}
-                        >
-                          Test Gateway
-                        </Button>
-                      </div>
-                    </div>
-                  </details>
-                  {gatewayProbeStatus ? (
-                    <Badge
-                      tone={gatewayProbeStatus.ok ? 'success' : 'danger'}
-                      testId="gateway-probe-badge"
-                    >
-                      {gatewayProbeStatus.message}
-                    </Badge>
-                  ) : null}
-                  <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-                    <div style={{ flex: 2, minWidth: '180px' }}>
-                      <label htmlFor="welcome-host-input">Host / IP</label>
-                      <input
-                        id="welcome-host-input"
-                        type="text"
-                        className="ui-input"
-                        placeholder="e.g. 192.168.1.10 or server.example.com"
-                        value={connectHost}
-                        onInput={(e) => setConnectHost((e.target as HTMLInputElement).value)}
-                        data-testid="welcome-host-input"
-                      />
-                    </div>
-                    <div style={{ flex: 1, minWidth: '130px' }}>
-                      <label htmlFor="welcome-user-input">Username</label>
-                      <input
-                        id="welcome-user-input"
-                        type="text"
-                        className="ui-input"
-                        placeholder="ubuntu / root"
-                        value={connectUser}
-                        onInput={(e) => setConnectUser((e.target as HTMLInputElement).value)}
-                        data-testid="welcome-user-input"
-                      />
-                    </div>
-                    <div style={{ width: '100px' }}>
-                      <label htmlFor="welcome-port-input">Port</label>
-                      <input
-                        id="welcome-port-input"
-                        type="number"
-                        className="ui-input"
-                        value={connectPort}
-                        onInput={(e) => setConnectPort((e.target as HTMLInputElement).value)}
-                        data-testid="welcome-port-input"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label>Authentication Method</label>
-                    <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-1)', flexWrap: 'wrap' }}>
-                      <Button
-                        variant={authMethod === 'Password' ? 'primary' : 'default'}
-                        onClick={() => {
-                          setAuthMethod('Password');
-                          setConnectErrorMsg('');
-                        }}
-                        testId="welcome-auth-password-btn"
-                      >
-                        Username & Password
-                      </Button>
-                      <Button
-                        variant={authMethod === 'Private Key (.pem / id_rsa)' ? 'primary' : 'default'}
-                        onClick={() => {
-                          setAuthMethod('Private Key (.pem / id_rsa)');
-                          setConnectErrorMsg('');
-                        }}
-                        testId="welcome-auth-keyfile-btn"
-                      >
-                        Upload Private Key (.pem / chmod 400)
-                      </Button>
-                      <Button
-                        variant={authMethod === 'Argon2id Ed25519 Key' ? 'primary' : 'default'}
-                        onClick={() => {
-                          setAuthMethod('Argon2id Ed25519 Key');
-                          setConnectErrorMsg('');
-                        }}
-                        testId="welcome-auth-argon-btn"
-                      >
-                        Browser Ed25519 Key
-                      </Button>
-                    </div>
-                  </div>
-
-                  {authMethod === 'Password' ? (
-                    <div>
-                      <label htmlFor="welcome-password-input">Password</label>
-                      <input
-                        id="welcome-password-input"
-                        type="password"
-                        className="ui-input"
-                        placeholder="Enter SSH password…"
-                        value={connectPassword}
-                        onInput={(e) => setConnectPassword((e.target as HTMLInputElement).value)}
-                        data-testid="welcome-password-input"
-                      />
-                    </div>
-                  ) : null}
-
-                  {authMethod === 'Private Key (.pem / id_rsa)' ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                        <label htmlFor="welcome-key-file-input">
-                          Upload Private Key (<code>.pem</code>, <code>.key</code>, <code>id_ed25519</code>, <code>id_rsa</code>)
-                        </label>
-                        <Badge
-                          tone={keyPermissionMode === '0644' ? 'danger' : 'success'}
-                          testId="private-key-chmod-badge"
-                        >
-                          {keyPermissionMode === '0400'
-                            ? 'chmod 0400 (-r--------) Enforced'
-                            : keyPermissionMode === '0600'
-                              ? 'chmod 0600 (-rw-------) Enforced'
-                              : 'UNPROTECTED KEY (0644) — Set chmod 400'}
-                        </Badge>
-                      </div>
-                      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-                        <input
-                          id="welcome-key-file-input"
-                          type="file"
-                          className="ui-input"
-                          accept=".pem,.key,.pub,*"
-                          onChange={(e) => void handlePrivateKeyFileUpload(e)}
-                          data-testid="private-key-file-input"
-                          style={{ flex: 1 }}
-                        />
-                        <select
-                          aria-label="Private key chmod permission"
-                          className="ui-select"
-                          value={keyPermissionMode}
-                          onChange={(e) => {
-                            setKeyPermissionMode((e.currentTarget as HTMLSelectElement).value as KeyPermissionMode);
-                            setConnectErrorMsg('');
-                          }}
-                          data-testid="private-key-chmod-select"
-                          style={{ width: 'auto' }}
-                        >
-                          <option value="0400">chmod 0400 (-r--------) Read-Only</option>
-                          <option value="0600">chmod 0600 (-rw-------) Owner R/W</option>
-                          <option value="0644">chmod 0644 (-rw-r--r--) Too Open</option>
-                        </select>
-                        <Button
-                          variant="default"
-                          testId="apply-key-chmod-400-btn"
-                          onClick={() => {
-                            setKeyPermissionMode('0400');
-                            setConnectErrorMsg('');
-                          }}
-                        >
-                          Set chmod 400
-                        </Button>
-                      </div>
-                      <textarea
-                        className="ui-input"
-                        rows={3}
-                        placeholder="Or paste -----BEGIN OPENSSH PRIVATE KEY----- / .pem content here…"
-                        aria-label="Private key content"
-                        value={uploadedKeyContent}
-                        onInput={(e) => setUploadedKeyContent((e.target as HTMLTextAreaElement).value)}
-                        data-testid="private-key-textarea"
-                      />
-                    </div>
-                  ) : null}
-
-                  {connectErrorMsg ? (
-                    <Badge tone="danger" testId="connect-error-badge">
-                      {connectErrorMsg}
-                    </Badge>
-                  ) : null}
-
-                  <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-                    <Button variant="primary" type="submit" testId="welcome-connect-submit-btn">
-                      Connect to Server
-                    </Button>
-                    <Button
-                      variant="default"
-                      onClick={() => void handleGenerateKey()}
-                      testId="welcome-generate-key-btn"
-                    >
-                      Generate SSH key
-                    </Button>
-                  </div>
-                </form>
-              </Card>
-            </div>
+            <WelcomeScreen
+              recentHosts={recentHosts}
+              setPendingJump={setPendingJump}
+              setConnectModalOpen={setConnectModalOpen}
+              quickConnect={{
+                connectHost,
+                setConnectHost,
+                connectUser,
+                setConnectUser,
+                connectPort,
+                setConnectPort,
+                authMethod,
+                setAuthMethod,
+                connectPassword,
+                setConnectPassword,
+                keyPermissionMode,
+                setKeyPermissionMode,
+                uploadedKeyContent,
+                setUploadedKeyContent,
+                connectErrorMsg,
+                setConnectErrorMsg,
+                handleConnectSubmit,
+                handlePrivateKeyFileUpload,
+                handleGenerateKey
+              }}
+              transport={{
+                transportMode,
+                setTransportMode,
+                gatewayUrl,
+                setGatewayUrl,
+                gatewayAuthToken,
+                setGatewayAuthToken,
+                gatewayProbeStatus,
+                setGatewayProbeStatus,
+                handleTestGateway
+              }}
+              account={{
+                relaySessionUser,
+                relayLoginUser,
+                setRelayLoginUser,
+                relayLoginPass,
+                setRelayLoginPass,
+                handleRelayLogin,
+                handleRelaySignOut
+              }}
+              guest={{ turnstileSiteKey, turnstileResetNonce, setTurnstileToken }}
+              session={remoteSession}
+              onNavigate={setActiveScreen}
+            />
           ) : null}
 
           {activeScreen === 'vault' ? (
@@ -3906,8 +3350,79 @@ export function App(): JSX.Element {
                   <Button variant="danger" onClick={() => setHostKeyModal('mismatch')} testId="trigger-mismatch-modal-btn">
                     Preview mismatch dialog
                   </Button>
+                  <Button
+                    variant="default"
+                    testId="export-hosts-btn"
+                    onClick={() => {
+                      const blob = new Blob([hostRegistry.exportJson()], { type: 'application/json' });
+                      const url = URL.createObjectURL(blob);
+                      const anchor = document.createElement('a');
+                      anchor.href = url;
+                      anchor.download = 'webssh-hosts.json';
+                      anchor.click();
+                      // Firefox cancels the download if the blob URL is
+                      // revoked in the same task; the IDE export already waits.
+                      setTimeout(() => URL.revokeObjectURL(url), 5000);
+                      setHostTransferStatus(`Exported ${hosts.length} host(s). No keys or passwords are included.`);
+                    }}
+                  >
+                    Export JSON
+                  </Button>
+                  <Button
+                    variant="default"
+                    testId="import-hosts-btn"
+                    onClick={() => hostImportInputRef.current?.click()}
+                  >
+                    Import JSON
+                  </Button>
+                  <input
+                    ref={(el) => {
+                      hostImportInputRef.current = el;
+                    }}
+                    type="file"
+                    accept="application/json,.json"
+                    hidden
+                    data-testid="import-hosts-file"
+                    onChange={(e) => {
+                      const input = e.currentTarget as HTMLInputElement;
+                      const file = input.files?.[0];
+                      if (!file) return;
+                      void file.text().then((text) => {
+                        try {
+                          const result = hostRegistry.importJson(text);
+                          setHosts(hostRegistry.list());
+                          const detail =
+                            result.skipped > 0
+                              ? `, skipped ${result.skipped} malformed entr${result.skipped === 1 ? 'y' : 'ies'}.`
+                              : '.';
+                          setHostTransferStatus(
+                            result.persisted
+                              ? `Imported ${result.imported.length} host(s)${detail}`
+                              : `Imported ${result.imported.length} host(s) for this session only${detail} ` +
+                                  'Browser storage refused the write, so they will not survive a reload.'
+                          );
+                        } catch (err) {
+                          setHostTransferStatus(
+                            `Import failed: ${err instanceof Error ? err.message : String(err)}`
+                          );
+                        } finally {
+                          input.value = '';
+                        }
+                      }).catch((err) => {
+                        input.value = '';
+                        setHostTransferStatus(
+                          `Import failed: could not read the file (${err instanceof Error ? err.message : String(err)}).`
+                        );
+                      });
+                    }}
+                  />
                 </div>
               </div>
+              {hostTransferStatus ? (
+                <p role="status" data-testid="host-transfer-status">
+                  {hostTransferStatus}
+                </p>
+              ) : null}
               <input
                 type="search"
                 className="ui-input"
@@ -3937,6 +3452,11 @@ export function App(): JSX.Element {
                           setConnectUser(h.user);
                           setConnectHost(h.host);
                           setConnectPort(String(h.port));
+                          setPendingJump({
+                            targetHost: h.host,
+                            targetPort: h.port,
+                            hops: h.jumpHops.map((j) => ({ host: j.host, port: j.port, user: j.user }))
+                          });
                           setConnectModalOpen(true);
                         }}
                       >
@@ -3987,6 +3507,64 @@ export function App(): JSX.Element {
                 onInput={(e) => setFileFilter((e.target as HTMLInputElement).value)}
                 aria-label="Filter remote directory entries"
               />
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(18rem, 1fr))',
+                  gap: 'var(--space-3)'
+                }}
+                data-testid="sftp-dual-pane"
+              >
+                <Card testId="sftp-local-pane">
+                  <h2>Local folder</h2>
+                  <p className="ws-mod-muted">
+                    {localFsAccessSupported
+                      ? 'Pick a folder to move files between this computer and the server. Reads and writes happen in the browser; nothing is uploaded anywhere else.'
+                      : 'This browser has no File System Access API (Firefox, Safari), so the local pane cannot list folders. Upload and Download below still work.'}
+                  </p>
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                    <Button
+                      variant="default"
+                      onClick={() => void pickLocalDirectory()}
+                      disabled={!localFsAccessSupported}
+                      testId="sftp-pick-local-dir"
+                    >
+                      {localDirHandle ? 'Change folder' : 'Choose folder'}
+                    </Button>
+                    {localDirHandle ? (
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          setLocalDirHandle(null);
+                          setLocalDirName('');
+                          setLocalEntries([]);
+                          setLocalStatus('No local folder selected. Upload and download still work without one.');
+                        }}
+                        testId="sftp-clear-local-dir"
+                      >
+                        Forget folder
+                      </Button>
+                    ) : null}
+                  </div>
+                  <p role="status" data-testid="sftp-local-status">
+                    {localStatus}
+                  </p>
+                  {localDirHandle ? (
+                    <ul data-testid="sftp-local-list">
+                      {localEntries.map((entry) => (
+                        <li key={entry.name} data-testid={`sftp-local-row-${entry.name}`}>
+                          <strong>{entry.kind === 'directory' ? `[DIR] ${entry.name}` : entry.name}</strong>
+                          {entry.kind === 'file' ? ` — ${entry.size} bytes ` : ' '}
+                          {entry.kind === 'file' ? (
+                            <Button variant="ghost" onClick={() => void uploadLocalEntry(entry)}>
+                              Upload
+                            </Button>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </Card>
               <Card>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
                   <p>Upload a file into {sftpCurrentPath}. Writes go through SFTP, never through the shell.</p>
@@ -4017,14 +3595,31 @@ export function App(): JSX.Element {
                     Create folder
                   </Button>
                 </div>
+                <div
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => handleRemoteDrop(e as unknown as DragEvent)}
+                  data-testid="sftp-remote-dropzone"
+                >
+                <p className="ws-mod-muted">Drop files here to upload them into {sftpCurrentPath}.</p>
                 <ul>
                   {sftpEntries.map((entry) => (
                     <li key={entry.path} data-testid={`sftp-row-${entry.name}`}>
                       <strong>{entry.isDir ? `[DIR] ${entry.name}` : entry.name}</strong> — {entry.size} bytes ({entry.mode}){' '}
                       {entry.isDir ? null : (
-                        <Button variant="ghost" onClick={() => void downloadRemoteFile(entry.path)}>
-                          Download
-                        </Button>
+                        <>
+                          <Button variant="ghost" onClick={() => void downloadRemoteFile(entry.path)}>
+                            Download
+                          </Button>
+                          {localDirHandle ? (
+                            <Button
+                              variant="ghost"
+                              onClick={() => void downloadToLocalDirectory(entry.path)}
+                              testId={`sftp-to-local-${entry.name}`}
+                            >
+                              Download to local
+                            </Button>
+                          ) : null}
+                        </>
                       )}
                       <Button
                         variant="ghost"
@@ -4041,6 +3636,7 @@ export function App(): JSX.Element {
                     </li>
                   ))}
                 </ul>
+                </div>
                 {renameTarget ? (
                   <div className="ws-mod-plan" role="group" aria-label="Rename entry">
                     <strong>Rename {renameTarget.path}</strong>
@@ -4082,6 +3678,7 @@ export function App(): JSX.Element {
                   </div>
                 ) : null}
               </Card>
+              </div>
 
               <div className="webssh-grid">
                 <Card testId="chmod-matrix-card">
@@ -4374,6 +3971,55 @@ export function App(): JSX.Element {
                 })}
               </div>
               <Card>
+                <h2>Your recording</h2>
+                {recordedCast ? (
+                  <>
+                    <p>
+                      {recordedCast.events.length} event(s) captured from{' '}
+                      <strong>{recordedCast.header.title ?? sessionTabLabel}</strong>. Only the
+                      active pane's output and the keystrokes typed into it are stored in this
+                      tab; nothing is uploaded.
+                    </p>
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(
+                        0,
+                        ...recordedCast.events.map((event) => event[0])
+                      )}
+                      step={0.1}
+                      value={recordScrubber}
+                      aria-label="Your recording timeline scrubber"
+                      onInput={(e) => setRecordScrubber(Number((e.target as HTMLInputElement).value))}
+                    />
+                    <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
+                      <Button variant="primary" onClick={downloadRecording} testId="download-recording-btn">
+                        Download .cast
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          setRecordedCastText(null);
+                          setRecordScrubber(0);
+                        }}
+                        testId="clear-recording-btn"
+                      >
+                        Clear
+                      </Button>
+                    </div>
+                    <pre data-testid="recording-preview">
+                      {scrubAsciicastOutput(recordedCast.events, recordScrubber)}
+                    </pre>
+                  </>
+                ) : (
+                  <p className="ws-mod-muted">
+                    No recording yet. Press <strong>Record</strong> in the terminal toolbar while a
+                    session is connected; output and typed input are captured locally, and the file
+                    stays in this tab until you download or clear it.
+                  </p>
+                )}
+              </Card>
+              <Card>
                 <h2>Demo recording preview ({scrubberSec.toFixed(1)}s)</h2>
                 <p>Sample recording — not output from your server.</p>
                 <input
@@ -4391,124 +4037,26 @@ export function App(): JSX.Element {
           ) : null}
 
           {activeScreen === 'settings' ? (
-            <div className="webssh-panel-content" data-testid="screen-settings">
-              <h1>Settings</h1>
-              <p className="ws-mod-muted">
-                Appearance, shortcuts and maintenance. Connection and terminal behaviour live in
-                their own screens.
-              </p>
-              <div className="ws-mod-filters" role="group" aria-label="Settings sections">
-                {([
-                  ['appearance', 'Appearance'],
-                  ['keyboard', 'Keyboard'],
-                  ['maintenance', 'Maintenance']
-                ] as const).map(([id, label]) => (
-                  <Button
-                    key={id}
-                    variant={settingsSection === id ? 'primary' : 'default'}
-                    ariaPressed={settingsSection === id}
-                    testId={`settings-tab-${id}`}
-                    onClick={() => setSettingsSection(id)}
-                  >
-                    {label}
-                  </Button>
-                ))}
-              </div>
-              {settingsSection === 'appearance' ? (
-                <>
-              <Card>
-                <h2>Theme Selector</h2>
-                <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-                  {THEME_IDS.map((id) => (
-                    <Button
-                      key={id}
-                      variant={id === activeTheme ? 'primary' : 'default'}
-                      onClick={() => setActiveTheme(id)}
-                      testId={`theme-btn-${id}`}
-                    >
-                      {id}
-                    </Button>
-                  ))}
-                </div>
-              </Card>
-              <Card>
-                <h2>Workspace Layout & Cursor Geometry</h2>
-                <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-                  <Button
-                    variant={layoutPreset === 'sidebar-left' ? 'primary' : 'default'}
-                    onClick={() => { setLayoutPreset('sidebar-left'); prefsStore.update({ layoutPreset: 'sidebar-left' }); }}
-                  >
-                    Sidebar Left
-                  </Button>
-                  <Button
-                    variant={layoutPreset === 'sidebar-right' ? 'primary' : 'default'}
-                    onClick={() => { setLayoutPreset('sidebar-right'); prefsStore.update({ layoutPreset: 'sidebar-right' }); }}
-                  >
-                    Sidebar Right
-                  </Button>
-                  <Button
-                    variant={cursorShape === 'block' ? 'primary' : 'default'}
-                    onClick={() => setCursorShape('block')}
-                  >
-                    Cursor: Block
-                  </Button>
-                  <Button
-                    variant={cursorShape === 'bar' ? 'primary' : 'default'}
-                    onClick={() => setCursorShape('bar')}
-                  >
-                    Cursor: Bar
-                  </Button>
-                  <Button
-                    variant={cursorShape === 'underline' ? 'primary' : 'default'}
-                    onClick={() => setCursorShape('underline')}
-                  >
-                    Cursor: Underline
-                  </Button>
-                </div>
-              </Card>
-                </>
-              ) : null}
-              {settingsSection === 'keyboard' ? (
-              <Card>
-                <h2>Keybindings</h2>
-                <ul>
-                  {keybindings.list().map((kb) => (
-                    <li key={kb.actionId}>
-                      <strong>{kb.description}:</strong> <code>{kb.shortcut}</code>
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-              ) : null}
-              {settingsSection === 'maintenance' ? (
-              <Card testId="settings-asset-cache-card">
-                <h2>Application Asset Cache Recovery</h2>
-                <p>
-                  Purge Service Worker and static bundle caches without clearing your saved SSH hosts, non-extractable Key Vault keys, or user preferences.
-                </p>
-                <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Button
-                    variant="default"
-                    testId="settings-repair-cache-btn"
-                    onClick={() => {
-                      void repairApplicationAssetCaches().then((res) => {
-                        setCacheRepairStatus(
-                          `Cleared ${res.deletedCaches.length} asset cache(s) and unregistered ${res.unregisteredServiceWorkers} service worker(s). Saved hosts, keys, and settings preserved.`
-                        );
-                      });
-                    }}
-                  >
-                    Repair Application Asset Cache
-                  </Button>
-                  {cacheRepairStatus ? (
-                    <Badge tone="success" testId="settings-repair-cache-status">
-                      {cacheRepairStatus}
-                    </Badge>
-                  ) : null}
-                </div>
-              </Card>
-              ) : null}
-            </div>
+            <SettingsScreen
+              settingsSection={settingsSection}
+              setSettingsSection={setSettingsSection}
+              appearance={{
+                fontFamily,
+                setFontFamily,
+                fontSize,
+                setFontSize,
+                activeTheme,
+                setActiveTheme,
+                layoutPreset,
+                setLayoutPreset,
+                cursorShape,
+                setCursorShape,
+                prefsStore
+              }}
+              keybindings={keybindings}
+              cacheRepairStatus={cacheRepairStatus}
+              setCacheRepairStatus={setCacheRepairStatus}
+            />
           ) : null}
 
           {!isFullscreen && !zenMode ? (
@@ -4653,6 +4201,13 @@ export function App(): JSX.Element {
         testId="connect-modal"
       >
         <form onSubmit={handleConnectSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          {activeJumpHops ? (
+            <p className="ws-mod-muted" role="note" data-testid="connect-jump-chain">
+              ProxyJump: {activeJumpHops.map((j) => `${j.user}@${j.host}:${j.port}`).join(' → ')} →{' '}
+              {connectHost}:{connectPort}. The same credentials are used for every hop;
+              the Go gateway dials the chain, the Cloudflare relay refuses it.
+            </p>
+          ) : null}
           <div>
             <label htmlFor="modal-transport-mode-select">SSH Transport Mode</label>
             <select
@@ -4898,20 +4453,44 @@ export function App(): JSX.Element {
         testId="command-palette-modal"
       >
         <input
+          ref={(el) => {
+            paletteInputRef.current = el;
+          }}
           type="search"
           className="ui-input"
           placeholder="Type a command or search actions…"
           value={paletteQuery}
-          onInput={(e) => setPaletteQuery((e.target as HTMLInputElement).value)}
+          onInput={(e) => {
+            setPaletteQuery((e.target as HTMLInputElement).value);
+            setPaletteIndex(0);
+          }}
+          onKeyDown={(e) => {
+            const items = paletteRegistry.search(paletteQuery);
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              setPaletteIndex((i) => Math.min(items.length - 1, i + 1));
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              setPaletteIndex((i) => Math.max(0, i - 1));
+            } else if (e.key === 'Enter') {
+              e.preventDefault();
+              const cmd = items[paletteIndex];
+              if (cmd) void cmd.run();
+            } else if (e.key === 'Escape') {
+              setPaletteOpen(false);
+            }
+          }}
           aria-label="Command palette search"
           data-testid="command-palette-input"
+          autoFocus
         />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', marginTop: 'var(--space-3)' }}>
-          {paletteRegistry.search(paletteQuery).map((cmd) => (
+          {paletteRegistry.search(paletteQuery).map((cmd, idx) => (
             <Button
               key={cmd.id}
-              variant="ghost"
+              variant={idx === paletteIndex ? 'primary' : 'ghost'}
               onClick={() => void cmd.run()}
+              onMouseEnter={() => setPaletteIndex(idx)}
               testId={`palette-cmd-${cmd.id}`}
             >
               <span>{cmd.title}</span>
@@ -4919,6 +4498,38 @@ export function App(): JSX.Element {
             </Button>
           ))}
         </div>
+      </Modal>
+
+      <Modal
+        open={shortcutsOpen}
+        title="Keyboard Shortcuts"
+        onClose={() => setShortcutsOpen(false)}
+        testId="shortcuts-modal"
+      >
+        <dl className="webssh-shortcuts" data-testid="shortcuts-list">
+          <dt>
+            <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>K</kbd>
+          </dt>
+          <dd>Open or close the command palette. Inside it: ↑ ↓ to move, Enter to run, Esc to close.</dd>
+          <dt>
+            <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>F</kbd>
+          </dt>
+          <dd>Find text in the active terminal. Enter finds the next match, Shift+Enter the previous, Esc closes.</dd>
+          <dt>
+            <kbd>?</kbd>
+          </dt>
+          <dd>Show this list (not while typing in a text field).</dd>
+          <dt>
+            <kbd>F11</kbd>
+          </dt>
+          <dd>Toggle full-screen terminal.</dd>
+          <dt>
+            <kbd>Esc</kbd>
+          </dt>
+          <dd>Leave Zen mode or full screen.</dd>
+          <dt>Double-click</dt>
+          <dd>Rename a session tab.</dd>
+        </dl>
       </Modal>
 
       <Modal

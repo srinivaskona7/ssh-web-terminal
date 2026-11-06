@@ -26,11 +26,33 @@ export interface TerminalPaneProps {
   cursorBlink: boolean;
   scrollback: number;
   theme: ITheme;
+  /** Mirror typed input to this second channel (split-pane broadcast). */
+  broadcastTo?: number | null;
   /** Registers the live adapter so App can route incoming PTY bytes to it. */
   onAdapter: (paneId: string, adapter: XtermPaneAdapter | null) => void;
+  /** Optional tap for session recording; runs before the bytes are sent. */
+  onUserInput?: (data: string) => void;
   onRendererChange?: (paneId: string, mode: TerminalRendererMode) => void;
   onFocusChange?: (paneId: string) => void;
   testId?: string;
+}
+
+/**
+ * Route one keystroke: always to the pane's own channel, and — when broadcast
+ * is on — to the paired split channel as well. Never double-sends to the same
+ * channel, and never sends anywhere while the transport is down.
+ */
+export function sendPaneInput(
+  transport: PaneTransport | null,
+  channelId: number | null,
+  data: string,
+  broadcastTo?: number | null
+): void {
+  if (channelId === null || !transport || !transport.isConnected) return;
+  transport.sendPtyText(channelId, data);
+  if (broadcastTo !== null && broadcastTo !== undefined && broadcastTo !== channelId) {
+    transport.sendPtyText(broadcastTo, data);
+  }
 }
 
 /**
@@ -64,9 +86,13 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
       scrollback: current.scrollback,
       theme: current.theme,
       onData: (data) => {
-        const { channelId, transport } = propsRef.current;
-        if (channelId === null || !transport || !transport.isConnected) return;
-        transport.sendPtyText(channelId, data);
+        const { channelId, transport, broadcastTo } = propsRef.current;
+        // Record only input that actually reached a live channel; a
+        // disconnected pane still emits onData in xterm.
+        if (channelId !== null && transport?.isConnected) {
+          propsRef.current.onUserInput?.(data);
+        }
+        sendPaneInput(transport, channelId, data, broadcastTo);
       },
       onResize: (cols, rows) => {
         const { channelId, transport } = propsRef.current;
@@ -80,6 +106,12 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
     });
     adapterRef.current = adapter;
     propsRef.current.onAdapter(current.paneId, adapter);
+    // E2E probe: the canvas/WebGL renderers keep no text in the DOM, so browser
+    // tests read the emulator buffer through this registry instead.
+    const probes =
+      (globalThis as unknown as { __WEBSSH_TERMINAL_PROBES__?: Record<string, XtermPaneAdapter> })
+        .__WEBSSH_TERMINAL_PROBES__ ??= {};
+    probes[current.paneId] = adapter;
 
     const fit = (): void => {
       if (disposed || host.clientWidth === 0 || host.clientHeight === 0) return;
@@ -111,6 +143,7 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
 
     return () => {
       disposed = true;
+      delete probes[current.paneId];
       try {
         propsRef.current.onAdapter(current.paneId, null);
       } catch {

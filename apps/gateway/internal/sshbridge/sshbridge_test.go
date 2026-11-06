@@ -10,8 +10,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"net"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/pkg/sftp"
 	"github.com/webssh-studio/gateway/internal/protocol"
@@ -200,5 +204,185 @@ func TestRemoteSignerEd25519AndECDSAP256WithOpenSSHServer(t *testing.T) {
 	})
 	if !dlRes.OK || dlRes.Size != int64(len(chunk1)+len(chunk2)) {
 		t.Fatalf("download_read failed: %+v", dlRes)
+	}
+}
+
+// A hop that accepts the TCP connection and then never sends an SSH banner used
+// to hang the connect forever: ssh.NewClientConn ignores
+// ssh.ClientConfig.Timeout. The per-hop deadline must turn that into an error.
+func TestDialChainTimesOutOnSilentHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			// Hold the connection open, silently, until the test ends.
+			go func() {
+				<-stop
+				_ = conn.Close()
+			}()
+		}
+	}()
+
+	previous := hopDialTimeout
+	hopDialTimeout = 150 * time.Millisecond
+	defer func() { hopDialTimeout = previous }()
+
+	addr := listener.Addr().String()
+	target := HopConfig{
+		Addr:     addr,
+		Host:     "127.0.0.1",
+		Port:     listener.Addr().(*net.TCPAddr).Port,
+		User:     "ubuntu",
+		Password: "secret-pass",
+	}
+
+	type outcome struct {
+		client *ssh.Client
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		client, err := DialChain(context.Background(), nil, target, nil)
+		done <- outcome{client: client, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.client != nil {
+			_ = got.client.Close()
+			t.Fatal("expected the silent handshake to fail, got a connected client")
+		}
+		if got.err == nil {
+			t.Fatal("expected an error for a silent SSH handshake")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DialChain hung on a hop that never sent an SSH banner")
+	}
+}
+
+// A host-key decision is the user's and has no time bound: the handshake
+// deadline must be cleared before the callback runs, and must not survive into
+// the session afterwards.
+func TestDialChainClearsHandshakeDeadline(t *testing.T) {
+	sshd, err := testsshd.NewServer(t.TempDir(), "secret-pass", nil)
+	if err != nil {
+		t.Fatalf("testsshd.NewServer failed: %v", err)
+	}
+	defer sshd.Close()
+	host, port := sshd.HostPort()
+
+	previous := hopDialTimeout
+	hopDialTimeout = 300 * time.Millisecond
+	defer func() { hopDialTimeout = previous }()
+
+	target := HopConfig{
+		Addr:     net.JoinHostPort(host, strconv.Itoa(port)),
+		Host:     host,
+		Port:     port,
+		User:     "ubuntu",
+		Password: "secret-pass",
+	}
+	slowDecision := func(ctx context.Context, host string, port int, key ssh.PublicKey) error {
+		time.Sleep(3 * hopDialTimeout)
+		return nil
+	}
+	client, err := DialChain(context.Background(), nil, target, slowDecision)
+	if err != nil {
+		t.Fatalf("DialChain failed while the host-key decision was still pending: %v", err)
+	}
+	defer client.Close()
+
+	// Wait past the deadline the handshake set; a leaked deadline fails here.
+	time.Sleep(3 * hopDialTimeout)
+	stdout, stderr, exitCode, _, err := ExecCommand(context.Background(), client, "printf 'still-alive'", 5*time.Second)
+	if err != nil {
+		t.Fatalf("command after the handshake deadline elapsed failed: %v", err)
+	}
+	if exitCode != 0 || !strings.Contains(stdout, "still-alive") {
+		t.Fatalf("unexpected command result: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+}
+
+// A hop reached through a jump is an *ssh.chanConn, whose SetDeadline always
+// reports "deadline not supported". The watchdog must still close it, or a
+// ProxyJump target that never sends a banner hangs the connect forever.
+func TestDialChainTimesOutOnSilentTargetThroughJump(t *testing.T) {
+	bastion, err := testsshd.NewServer(t.TempDir(), "secret-pass", nil)
+	if err != nil {
+		t.Fatalf("bastion testsshd.NewServer failed: %v", err)
+	}
+	defer bastion.Close()
+	bastionHost, bastionPort := bastion.HostPort()
+
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer silent.Close()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				<-stop
+				_ = conn.Close()
+			}()
+		}
+	}()
+
+	previous := hopDialTimeout
+	hopDialTimeout = 300 * time.Millisecond
+	defer func() { hopDialTimeout = previous }()
+
+	hops := []HopConfig{{
+		Addr:     net.JoinHostPort(bastionHost, strconv.Itoa(bastionPort)),
+		Host:     bastionHost,
+		Port:     bastionPort,
+		User:     "ubuntu",
+		Password: "secret-pass",
+	}}
+	targetAddr := silent.Addr().(*net.TCPAddr)
+	target := HopConfig{
+		Addr:     targetAddr.String(),
+		Host:     "127.0.0.1",
+		Port:     targetAddr.Port,
+		User:     "ubuntu",
+		Password: "secret-pass",
+	}
+
+	type outcome struct {
+		client *ssh.Client
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		client, err := DialChain(context.Background(), hops, target, nil)
+		done <- outcome{client: client, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.client != nil {
+			_ = got.client.Close()
+			t.Fatal("expected the silent target through a jump to fail, got a connected client")
+		}
+		if got.err == nil {
+			t.Fatal("expected an error for a silent target behind a jump")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DialChain hung on a target behind a jump that never sent an SSH banner")
 	}
 }

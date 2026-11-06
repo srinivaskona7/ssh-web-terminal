@@ -68,21 +68,36 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     // 6. Execute real commands over SSH: uname -s -> Linux, pwd -> /home/ubuntu, printf, non-zero exit code
     const viewport = page.getByTestId('terminal-viewport');
     await viewport.focus();
+    // The WebGL/canvas renderer draws no text into the DOM, so assert against
+    // the emulator's own buffer through the pane probe rather than textContent.
+    const screenText = (): Promise<string> =>
+      page.evaluate(() =>
+        Object.values(
+          (window as unknown as { __WEBSSH_TERMINAL_PROBES__?: Record<string, { readScreenText(): string }> })
+            .__WEBSSH_TERMINAL_PROBES__ ?? {}
+        )
+          .map((probe) => probe.readScreenText())
+          .join('\n')
+      );
+    const expectScreen = async (needle: string): Promise<void> => {
+      await expect.poll(screenText, { timeout: 5000 }).toContain(needle);
+    };
+
     await page.keyboard.type('uname -s');
     await page.keyboard.press('Enter');
-    await expect(viewport).toContainText('Linux');
+    await expectScreen('Linux');
 
     await page.keyboard.type('pwd');
     await page.keyboard.press('Enter');
-    await expect(viewport).toContainText('/home/ubuntu');
+    await expectScreen('/home/ubuntu');
 
     await page.keyboard.type("printf 'real-ssh-verified'");
     await page.keyboard.press('Enter');
-    await expect(viewport).toContainText('real-ssh-verified');
+    await expectScreen('real-ssh-verified');
 
     await page.keyboard.type('nonexistent_cmd_404');
     await page.keyboard.press('Enter');
-    await expect(viewport).toContainText('command not found');
+    await expectScreen('command not found');
 
     // 7. Enable Full Studio IDE Mode and verify real SFTP directory listing & Remote File Editor
     await page.getByTestId('enable-ide-mode-btn').click();
@@ -133,5 +148,51 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('workspace-root')).toBeVisible();
     await expect(page.getByTestId('screen-welcome')).toBeVisible();
     expect(consoleErrors).toEqual([]);
+  });
+
+  test('opens the find bar with Ctrl+F, searches, and closes it with Escape', async ({ page }) => {
+    await page.goto('./');
+    await expect(page.getByTestId('workspace-root')).toBeVisible();
+
+    await page.getByTestId('nav-workspace').click();
+    await expect(page.getByTestId('terminal-viewport')).toBeVisible();
+
+    // Ctrl+F from outside a text field opens the bar and takes the caret.
+    await page.keyboard.press('Control+f');
+    const searchBar = page.getByTestId('terminal-search-bar');
+    await expect(searchBar).toBeVisible();
+    await expect(page.getByTestId('terminal-search-input')).toBeFocused();
+
+    // No SSH session in this test, so the honest answer is that there is
+    // nothing to search rather than a fake "No match".
+    await page.getByTestId('terminal-search-input').fill('Linux');
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('terminal-search-status')).toContainText('No terminal to search');
+
+    await page.keyboard.press('Escape');
+    await expect(searchBar).toBeHidden();
+  });
+
+  test('opens the split pane and toggles broadcast from the command palette', async ({ page }) => {
+    await page.goto('./');
+    await expect(page.getByTestId('workspace-root')).toBeVisible();
+
+    await page.getByTestId('nav-workspace').click();
+    await expect(page.getByTestId('terminal-viewport')).toBeVisible();
+
+    // The broadcast command opens the split and turns broadcast on in one step.
+    await page.keyboard.press('Control+k');
+    const paletteInput = page.getByTestId('command-palette-input');
+    await expect(paletteInput).toBeVisible();
+    await paletteInput.fill('broadcast');
+    await page.keyboard.press('Enter');
+
+    const broadcastBtn = page.getByTestId('toggle-broadcast-btn');
+    await expect(broadcastBtn).toBeVisible();
+    await expect(broadcastBtn).toHaveAttribute('aria-pressed', 'true');
+
+    // Clicking the button toggles it back off without closing the split.
+    await broadcastBtn.click();
+    await expect(broadcastBtn).toHaveAttribute('aria-pressed', 'false');
   });
 });

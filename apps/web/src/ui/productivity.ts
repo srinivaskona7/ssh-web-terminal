@@ -8,7 +8,7 @@ const BEL = String.fromCharCode(7);
 export interface CommandItem {
   id: string;
   title: string;
-  category: 'Connection' | 'Terminal' | 'Files' | 'View' | 'Security' | 'Preferences';
+  category: 'Connection' | 'Terminal' | 'Files' | 'View' | 'Security' | 'Preferences' | 'Help';
   shortcut?: string;
   keywords?: string[];
   run: () => void | Promise<void>;

@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import fc from 'fast-check';
 import { FrameType, decodeControlPayload, decodeFrame, encodeControlFrame, encodeFrame } from '@webssh/protocol';
 import {
+  BrowserSshRelaySessionClient,
   GatewaySessionTransport,
+  LiveGatewaySessionClient,
   MAX_PENDING_INPUT_BYTES,
   PendingInputQueue,
   buildTmuxAttachCommand,
@@ -11,7 +13,8 @@ import {
   isStaticPagesHost,
   resolveGatewayWsUrl,
   resolveTransportBackendMode,
-  validateGatewayWsUrl
+  validateGatewayWsUrl,
+  type LiveConnectParams
 } from './index.js';
 
 describe('Transport Resilience & Sequence Replay (M4)', () => {
@@ -149,5 +152,138 @@ describe('Transport Resilience & Sequence Replay (M4)', () => {
   it('formats tmux auto-attach commands safely', () => {
     expect(buildTmuxAttachCommand('prod_ops-1')).toBe('tmux new-session -A -s prod_ops-1');
     expect(buildTmuxAttachCommand('bad;rm -rf /')).toBe('tmux new-session -A -s badrm-rf');
+  });
+});
+
+/**
+ * WebSocket double for the connect handshake: the test needs to read the
+ * control messages the client sends, which the shared loopback socket does not
+ * expose.
+ */
+class ConnectRecordingSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 3;
+  static instances: ConnectRecordingSocket[] = [];
+
+  readyState = ConnectRecordingSocket.CONNECTING;
+  binaryType = 'arraybuffer';
+  sent: ArrayBuffer[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((ev: { data: ArrayBuffer }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+
+  constructor(public readonly url: string) {
+    ConnectRecordingSocket.instances.push(this);
+  }
+
+  send(data: ArrayBuffer | Uint8Array): void {
+    this.sent.push(data instanceof Uint8Array ? (data.slice().buffer as ArrayBuffer) : data);
+  }
+
+  close(): void {
+    this.readyState = ConnectRecordingSocket.CLOSED;
+    this.onclose?.();
+  }
+
+  fireOpen(): void {
+    this.readyState = ConnectRecordingSocket.OPEN;
+    this.onopen?.();
+  }
+
+  receiveControl(msg: Parameters<typeof encodeControlFrame>[1], seq: bigint): void {
+    const frame = encodeControlFrame(seq, msg);
+    this.onmessage?.({
+      data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer
+    });
+  }
+
+  controls(): Array<{ type: string; [key: string]: unknown }> {
+    const messages: Array<{ type: string; [key: string]: unknown }> = [];
+    for (const buffer of this.sent) {
+      const frame = decodeFrame(new Uint8Array(buffer));
+      if (frame.type !== FrameType.Control) continue;
+      messages.push(decodeControlPayload(frame.payload) as unknown as { type: string });
+    }
+    return messages;
+  }
+}
+
+function gatewayParams(overrides: Partial<LiveConnectParams> = {}): LiveConnectParams {
+  return {
+    gatewayUrl: 'wss://gateway.example.com/ws',
+    host: '10.0.0.9',
+    port: 22,
+    user: 'ubuntu',
+    authMethod: 'password',
+    password: 'secret',
+    cols: 80,
+    rows: 24,
+    onPtyData: () => undefined,
+    onHostKeyPrompt: async () => true,
+    ...overrides
+  };
+}
+
+const originalWebSocket = globalThis.WebSocket;
+
+afterEach(() => {
+  globalThis.WebSocket = originalWebSocket;
+  ConnectRecordingSocket.instances = [];
+});
+
+const connectedFrame = {
+  type: 'connected' as const,
+  sessionId: 'sess-jump',
+  resumeToken: 'tok-jump',
+  ptyChannel: 1,
+  cipher: 'aes128-ctr',
+  serverVersion: 'SSH-2.0-Test'
+};
+
+describe('ProxyJump transport wiring', () => {  it('sends the saved jump hops in the gateway connect message', async () => {
+    globalThis.WebSocket = ConnectRecordingSocket as unknown as typeof WebSocket;
+    const jumpHops = [
+      { host: 'bastion.example.com', port: 2222, user: 'jumpuser' },
+      { host: '10.1.0.5', port: 22, user: 'ubuntu' }
+    ];
+    const client = new LiveGatewaySessionClient(gatewayParams({ jumpHops }));
+
+    const pending = client.connect();
+    const socket = ConnectRecordingSocket.instances[0]!;
+    socket.fireOpen();
+
+    const connect = socket.controls().find((msg) => msg.type === 'connect');
+    expect(connect?.jump).toEqual(jumpHops);
+    socket.receiveControl(connectedFrame, 1n);
+    await expect(pending).resolves.toMatchObject({ sessionId: 'sess-jump' });
+  });
+
+  it('omits jump entirely for a direct connection', async () => {
+    globalThis.WebSocket = ConnectRecordingSocket as unknown as typeof WebSocket;
+    const client = new LiveGatewaySessionClient(gatewayParams());
+
+    const pending = client.connect();
+    const socket = ConnectRecordingSocket.instances[0]!;
+    socket.fireOpen();
+
+    const connect = socket.controls().find((msg) => msg.type === 'connect');
+    expect(connect).toBeDefined();
+    expect(connect && 'jump' in connect).toBe(false);
+    socket.receiveControl(connectedFrame, 1n);
+    await expect(pending).resolves.toMatchObject({ sessionId: 'sess-jump' });
+  });
+
+  it('fails the relay connect instead of silently dropping jump hops', async () => {
+    const client = new BrowserSshRelaySessionClient(
+      gatewayParams({
+        transportMode: 'cloudflare-relay',
+        gatewayUrl: 'wss://webssh-studio-relay.life-magic.workers.dev/ws',
+        jumpHops: [{ host: 'bastion.example.com', port: 22, user: 'jumpuser' }]
+      })
+    );
+
+    await expect(client.connect()).rejects.toThrow(/ProxyJump requires the Go gateway/i);
   });
 });

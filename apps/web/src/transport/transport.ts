@@ -6,8 +6,12 @@ import {
   encodeControlFrame,
   encodeFrame,
   type BinaryFrame,
-  type ControlMessage
+  type ControlMessage,
+  type JumpHop
 } from '@webssh/protocol';
+import { ExecOutputSink, abortError } from './exec-output.js';
+import { routeSignRequest, toWireJumpHop, type RemoteSignFn } from './remote-signer.js';
+import { classifyEnvReport, prepareSessionEnv, type EnvOutcome } from './session-env.js';
 
 export const MAX_PENDING_INPUT_BYTES = 64 * 1024; // 64 KiB
 
@@ -566,6 +570,12 @@ export interface LiveConnectParams {
   privateKeyPassphrase?: string;
   publicKey?: string;
   keyFingerprint?: string;
+  /** ProxyJump hops, dialled in order before the target host. Go gateway only. */
+  jumpHops?: JumpHop[];
+  /** Variables requested with SSH `env` requests; the server reports which it accepted. */
+  env?: Record<string, string>;
+  /** Browser keys by fingerprint; each sign_request is signed only by the key it names. */
+  signers?: Record<string, RemoteSignFn>;
   cols: number;
   rows: number;
   onPtyData: (channel: number, data: Uint8Array) => void;
@@ -577,6 +587,31 @@ export interface LiveConnectParams {
 }
 
 export type ConnectedSessionMetadata = Extract<ControlMessage, { type: 'connected' }>;
+
+export interface ExecStreamOptions {
+  onStdout?: (text: string) => void;
+  onStderr?: (text: string) => void;
+  signal?: AbortSignal;
+  /** Absent means the command runs until it exits or is cancelled. */
+  timeoutMs?: number;
+  /** Keep output for the resolved result (default true); callbacks see it either way. */
+  retainOutput?: boolean;
+}
+
+export interface ExecStreamResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+}
+
+interface PendingStream {
+  stdout: ExecOutputSink;
+  stderr: ExecOutputSink;
+  resolve: (result: ExecStreamResult) => void;
+  reject: (err: Error) => void;
+  detachAbort: () => void;
+}
 
 export class LiveGatewaySessionClient {
   public readonly transport: GatewaySessionTransport;
@@ -613,6 +648,8 @@ export class LiveGatewaySessionClient {
       reject: (err: Error) => void;
     }
   >();
+  private pendingStreams = new Map<string, PendingStream>();
+  private signRefusal: string | null = null;
 
   private connectResolve: ((meta: ConnectedSessionMetadata) => void) | null = null;
   private connectReject: ((err: Error) => void) | null = null;
@@ -622,7 +659,7 @@ export class LiveGatewaySessionClient {
     this.transport = new GatewaySessionTransport({
       onPtyData: params.onPtyData,
       onHostKeyPrompt: params.onHostKeyPrompt,
-      onSignRequest: params.onSignRequest,
+      onSignRequest: (msg) => this.answerSignRequest(msg),
       onStateChange: params.onStateChange,
       onControlMessage: (msg) => this.handleControlMessage(msg)
     });
@@ -636,6 +673,19 @@ export class LiveGatewaySessionClient {
     return this.transport.connectionState === 'connected' && this.metadata !== null;
   }
 
+  /** Accepted/rejected/not-reported split of the requested env for the current session. */
+  get envOutcome(): EnvOutcome {
+    return classifyEnvReport(this.params.env, this.metadata);
+  }
+
+  private async answerSignRequest(msg: Extract<ControlMessage, { type: 'sign_request' }>): Promise<string> {
+    const verdict = await routeSignRequest(this.params, msg);
+    if (verdict.ok) return verdict.signatureBase64;
+    // An empty signature tells the gateway to fail this key; the reason explains the connect error.
+    this.signRefusal = verdict.reason;
+    return '';
+  }
+
   private nextOpId(prefix: string): string {
     this.opCounter += 1;
     return `${prefix}_${Date.now()}_${this.opCounter}`;
@@ -643,22 +693,31 @@ export class LiveGatewaySessionClient {
 
   private handleControlMessage(msg: ControlMessage): void {
     switch (msg.type) {
-      case 'connected':
-        this.metadata = msg;
+      case 'connected': {
+        const previous = this.metadata;
+        // A resumed session keeps the env verdict of its first connect unless the gateway resends it.
+        this.metadata =
+          previous && previous.sessionId === msg.sessionId && !msg.envAccepted && !msg.envRejected
+            ? { ...msg, envAccepted: previous.envAccepted, envRejected: previous.envRejected }
+            : msg;
+        if (this.metadata.envAccepted === undefined) delete this.metadata.envAccepted;
+        if (this.metadata.envRejected === undefined) delete this.metadata.envRejected;
         this.transport.confirmConnected();
         if (this.connectResolve) {
           const resolve = this.connectResolve;
           this.connectResolve = null;
           this.connectReject = null;
-          resolve(msg);
+          resolve(this.metadata);
         }
         break;
+      }
       case 'error':
         if (this.connectReject) {
           const reject = this.connectReject;
           this.connectResolve = null;
           this.connectReject = null;
-          reject(new Error(`${msg.code}: ${msg.message}`));
+          const refusal = this.signRefusal ? ` (browser refused to sign: ${this.signRefusal})` : '';
+          reject(new Error(`${msg.code}: ${msg.message}${refusal}`));
         } else if (msg.fatal) {
           this.params.onFatalError?.(msg.code, msg.message);
         }
@@ -695,6 +754,27 @@ export class LiveGatewaySessionClient {
         }
         break;
       }
+      case 'exec_output': {
+        const stream = this.pendingStreams.get(msg.opId);
+        if (!stream) break;
+        let bytes: Uint8Array;
+        try {
+          bytes = Uint8Array.from(atob(msg.dataBase64), (ch) => ch.charCodeAt(0));
+        } catch {
+          this.finishStream(msg.opId, null, new Error('Gateway sent unreadable command output.'));
+          this.transport.sendControl({ type: 'exec_cancel', opId: msg.opId });
+          break;
+        }
+        (msg.stream === 'stderr' ? stream.stderr : stream.stdout).push(bytes);
+        break;
+      }
+      case 'exec_stream_end':
+        if (typeof msg.exitCode === 'number' || msg.ok) {
+          this.finishStream(msg.opId, { exitCode: msg.exitCode ?? 0, durationMs: msg.durationMs });
+        } else {
+          this.finishStream(msg.opId, null, new Error(msg.error || 'Remote command stream failed.'));
+        }
+        break;
       case 'channel_closed':
         this.params.onChannelClosed?.(msg.channel, msg.exitCode ?? 0);
         break;
@@ -725,7 +805,9 @@ export class LiveGatewaySessionClient {
   }
 
   async connect(): Promise<ConnectedSessionMetadata> {
+    const env = prepareSessionEnv(this.params.env);
     const { wsUrl, authToken } = this.resolveEndpoint();
+    this.signRefusal = null;
     return this.openSocket(wsUrl, () => {
       this.transport.sendControl({
         type: 'hello',
@@ -744,6 +826,8 @@ export class LiveGatewaySessionClient {
         privateKeyPassphrase: this.params.privateKeyPassphrase,
         publicKey: this.params.publicKey,
         keyFingerprint: this.params.keyFingerprint ?? '',
+        jump: this.params.jumpHops?.length ? this.params.jumpHops.map(toWireJumpHop) : undefined,
+        ...(env ? { env } : {}),
         cols: this.params.cols,
         rows: this.params.rows
       });
@@ -898,6 +982,55 @@ export class LiveGatewaySessionClient {
     this.pendingTunnel.clear();
     for (const [, w] of this.pendingChannelOpen) w.reject(err);
     this.pendingChannelOpen.clear();
+    for (const opId of [...this.pendingStreams.keys()]) this.finishStream(opId, null, err);
+  }
+
+  private finishStream(
+    opId: string,
+    end: { exitCode: number; durationMs: number } | null,
+    err?: Error
+  ): void {
+    const stream = this.pendingStreams.get(opId);
+    if (!stream) return;
+    this.pendingStreams.delete(opId);
+    stream.detachAbort();
+    const stdout = stream.stdout.finish();
+    const stderr = stream.stderr.finish();
+    if (end) stream.resolve({ stdout, stderr, ...end });
+    else stream.reject(err ?? new Error('Remote command stream failed.'));
+  }
+
+  /**
+   * Run a command whose output arrives as it is produced. A nonzero exit resolves; a stream the
+   * gateway could not run rejects; aborting cancels it on the gateway and rejects with AbortError.
+   */
+  execStream(command: string, options: ExecStreamOptions = {}): Promise<ExecStreamResult> {
+    const { signal } = options;
+    if (signal?.aborted) return Promise.reject(abortError());
+    if (!this.isConnected) return Promise.reject(new Error('SSH session is not connected.'));
+    const opId = this.nextOpId('stream');
+    const retain = options.retainOutput ?? true;
+    return new Promise<ExecStreamResult>((resolve, reject) => {
+      const onAbort = () => {
+        if (!this.pendingStreams.has(opId)) return;
+        this.transport.sendControl({ type: 'exec_cancel', opId });
+        this.finishStream(opId, null, abortError());
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.pendingStreams.set(opId, {
+        stdout: new ExecOutputSink(options.onStdout, retain),
+        stderr: new ExecOutputSink(options.onStderr, retain),
+        resolve,
+        reject,
+        detachAbort: () => signal?.removeEventListener('abort', onAbort)
+      });
+      this.transport.sendControl({
+        type: 'exec_stream',
+        opId,
+        command,
+        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {})
+      });
+    });
   }
 
   sendPtyText(channel: number, text: string): boolean {
@@ -987,18 +1120,23 @@ export class LiveGatewaySessionClient {
   }
 
   close(): void {
+    for (const opId of this.pendingStreams.keys()) {
+      this.transport.sendControl({ type: 'exec_cancel', opId });
+    }
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
     }
     this.transport.detachSender(false);
-    if (this.ws) {
+    const socket = this.ws;
+    // Detach first so the socket's own close event does not report a disconnect.
+    this.ws = null;
+    if (socket) {
       try {
-        this.ws.close();
+        socket.close();
       } catch {
         // ignore
       }
-      this.ws = null;
     }
     this.metadata = null;
     this.rejectAllPending(new Error('Session closed by user.'));

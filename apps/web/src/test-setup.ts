@@ -225,8 +225,7 @@ class LoopbackProtocolWebSocket {
               sessionId: 'sess_jsdom_1',
               resumeToken: 'tok_jsdom_1',
               ptyChannel: 1,
-              cipher: 'chacha20-poly1305@openssh.com',
-              kex: 'curve25519-sha256',
+              // The gateway does not report cipher or key exchange; neither does this double.
               serverVersion: 'SSH-2.0-OpenSSH_9.6_testsshd',
               authMethodUsed: ctrl.authMethod ?? 'password',
               sftpReady: true

@@ -50,3 +50,44 @@ describe('TerminalPane', () => {
     render(null, container);
   });
 });
+
+describe('sendPaneInput broadcast routing', () => {
+  const makeTransport = () => ({
+    isConnected: true,
+    sendPtyText: vi.fn(() => true),
+    resizeChannel: vi.fn()
+  });
+
+  it('sends only to the pane channel when broadcast is off', async () => {
+    const { sendPaneInput } = await import('./TerminalPane');
+    const transport = makeTransport();
+    sendPaneInput(transport, 3, 'ls', null);
+    expect(transport.sendPtyText.mock.calls).toEqual([[3, 'ls']]);
+  });
+
+  it('mirrors the same bytes to the paired channel when broadcast is on', async () => {
+    const { sendPaneInput } = await import('./TerminalPane');
+    const transport = makeTransport();
+    sendPaneInput(transport, 3, 'a', 7);
+    expect(transport.sendPtyText.mock.calls).toEqual([
+      [3, 'a'],
+      [7, 'a']
+    ]);
+  });
+
+  it('never double-sends when the pane is paired with itself', async () => {
+    const { sendPaneInput } = await import('./TerminalPane');
+    const transport = makeTransport();
+    sendPaneInput(transport, 3, 'x', 3);
+    expect(transport.sendPtyText).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops input when there is no live transport or channel', async () => {
+    const { sendPaneInput } = await import('./TerminalPane');
+    const transport = makeTransport();
+    sendPaneInput(null, 3, 'x', 7);
+    sendPaneInput({ ...transport, isConnected: false }, 3, 'x', 7);
+    sendPaneInput(transport, null, 'x', 7);
+    expect(transport.sendPtyText).not.toHaveBeenCalled();
+  });
+});

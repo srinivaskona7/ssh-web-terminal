@@ -36,7 +36,12 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(welcomeScreen?.textContent).toContain('Welcome to WebSSH Studio');
     expect(container.querySelector('[data-testid="nav-features"]')).toBeNull();
 
-    // 2. Enter Zen Mode and press Escape -> returns to Welcome screen with chrome restored
+    // 2. Enter Zen Mode from the menubar View menu and press Escape -> returns to Welcome screen with chrome restored
+    // Nothing to disconnect yet, so the header offers no Disconnect control.
+    expect(container.querySelector('[data-testid="disconnect-btn"]')).toBeNull();
+    expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeNull();
+    (container.querySelector('[data-testid="menu-view-btn"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
     const zenBtn = container.querySelector('[data-testid="toggle-zen-btn"]') as HTMLButtonElement;
     zenBtn.click();
     await new Promise((r) => setTimeout(r, 10));
@@ -83,7 +88,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     navWorkspace.click();
     await new Promise((r) => setTimeout(r, 10));
 
-    const termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
+    let termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
     expect(termViewport.style.fontSize).toBe('17px');
     expect(termViewport.style.fontFamily).toContain('JetBrains Mono');
 
@@ -95,15 +100,6 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     const commandInspector = container.querySelector('[data-testid="command-inspector"]') as HTMLElement;
     expect(commandInspector).toBeTruthy();
 
-    const incBtn = container.querySelector('[data-testid="font-size-inc-btn"]') as HTMLButtonElement;
-    incBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
-    expect(termViewport.style.fontSize).toBe('18px');
-
-    const decBtn = container.querySelector('[data-testid="font-size-dec-btn"]') as HTMLButtonElement;
-    decBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
-    expect(termViewport.style.fontSize).toBe('17px');
 
     // Type 'help' + Enter
     for (const ch of 'help') {
@@ -112,6 +108,27 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     expect(commandInspector.textContent).toContain('Available local commands: connect <user@host>');
+
+    // Font size lives in Settings → Appearance, not the workspace header.
+    (container.querySelector('[data-testid="nav-settings"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    const incBtn = container.querySelector('[data-testid="font-size-inc-btn"]') as HTMLButtonElement;
+    incBtn.click();
+    await new Promise((r) => setTimeout(r, 10));
+    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
+    expect(termViewport.style.fontSize).toBe('18px');
+
+    (container.querySelector('[data-testid="nav-settings"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    const decBtn = container.querySelector('[data-testid="font-size-dec-btn"]') as HTMLButtonElement;
+    decBtn.click();
+    await new Promise((r) => setTimeout(r, 10));
+    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
+    expect(termViewport.style.fontSize).toBe('17px');
 
     // 5. Test 'connect root@10.0.0.5' command opening simple Connection modal
     for (const ch of 'connect root@10.0.0.5') {
@@ -137,7 +154,10 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(container.querySelector('[data-testid="terminal-studio-container"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="tab-separator"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="stop-red-square"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="popout-terminal-btn"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="disconnect-btn"]')?.textContent).toContain('Disconnect');
+    // The pop-out shortcut and the header status dot are gone; the status bar reports state.
+    expect(container.querySelector('[data-testid="popout-terminal-btn"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connection-status-dot"]')).toBeNull();
     expect(container.querySelector('[data-testid="more-options-menu-btn"]')).toBeTruthy();
 
     // The terminal surface is the emulator alone: no ASCII banner, no
@@ -157,17 +177,19 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     const disconnectBtn = container.querySelector('[data-testid="disconnect-btn"]') as HTMLButtonElement;
     disconnectBtn.click();
     await new Promise((r) => setTimeout(r, 10));
+    expect(container.querySelector('[data-testid="disconnect-btn"]')).toBeNull();
 
     // 6. Enable IDE Mode to unlock the full navigation rail
-    const enableIdeBtn = container.querySelector('[data-testid="toggle-ide-mode-btn"]') as HTMLButtonElement;
+    const enableIdeBtn = container.querySelector('[data-testid="enable-ide-mode-btn"]') as HTMLButtonElement;
     enableIdeBtn.click();
     await new Promise((r) => setTimeout(r, 10));
-    expect(enableIdeBtn.textContent).toContain('IDE Mode: ON');
+    expect(enableIdeBtn.textContent).toContain('IDE mode on');
 
     const navFeatures = container.querySelector('[data-testid="nav-features"]') as HTMLButtonElement;
     expect(navFeatures).toBeTruthy();
     navFeatures.click();
-    await new Promise((r) => setTimeout(r, 10));
+    // The capability matrix is a lazy chunk; jsdom needs a longer settle.
+    await new Promise((r) => setTimeout(r, 150));
     expect(container.querySelector('[data-testid="screen-features"]')?.textContent).toContain(
       'Capability matrix'
     );
@@ -182,7 +204,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     render(<App />, container);
 
     // Enable IDE Mode and switch to Terminal
-    const toggleIdeBtn = container.querySelector('[data-testid="toggle-ide-mode-btn"]') as HTMLButtonElement;
+    const toggleIdeBtn = container.querySelector('[data-testid="enable-ide-mode-btn"]') as HTMLButtonElement;
     toggleIdeBtn.click();
     const navWorkspace = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
     navWorkspace.click();
@@ -202,7 +224,8 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     for (const ch of 'tele') sendKey(ch);
     sendKey('Tab');
     sendKey('Enter');
-    await new Promise((r) => setTimeout(r, 10));
+    // Server modules are a lazy chunk; jsdom needs a longer settle.
+    await new Promise((r) => setTimeout(r, 150));
     expect(container.querySelector('[data-testid="screen-overview"]')).toBeTruthy();
     expect(viewport.textContent).not.toContain('telemetry');
     navWorkspace.click();
@@ -348,7 +371,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
 
     // Verify shell renders even with invalid activeThemeId in localStorage and preserves saved host
     expect(container.querySelector('[data-testid="workspace-root"]')).toBeTruthy();
-    const toggleIdeBtn = container.querySelector('[data-testid="toggle-ide-mode-btn"]') as HTMLButtonElement;
+    const toggleIdeBtn = container.querySelector('[data-testid="enable-ide-mode-btn"]') as HTMLButtonElement;
     toggleIdeBtn.click();
     await new Promise((r) => setTimeout(r, 10));
     const navHosts = container.querySelector('[data-testid="nav-hosts"]') as HTMLButtonElement;
@@ -410,7 +433,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     render(<App />, container);
 
     // 1. Switch to terminal while disconnected and run uname -s -> must NOT fake success
-    const openTermBtn = container.querySelector('[data-testid="welcome-open-terminal-btn"]') as HTMLButtonElement;
+    const openTermBtn = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
     openTermBtn.click();
     await new Promise((r) => setTimeout(r, 10));
 
@@ -489,6 +512,289 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(container.querySelector('[data-testid="tab-session-2"]')?.textContent).toContain(
       'Terminal 2 (ubuntu@127.0.0.1)'
     );
+
+    document.body.removeChild(container);
+  });
+
+  it('opens the find bar on Ctrl/Cmd+F and turns on the split broadcast from the palette', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<App />, container);
+
+    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Ctrl+F works from anywhere outside a text field, not only with the
+    // emulator focused, and the bar takes the caret rather than leaving it on
+    // the terminal's helper textarea.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const searchInput = container.querySelector('[data-testid="terminal-search-input"]') as HTMLInputElement;
+    expect(searchInput).toBeTruthy();
+    expect(document.activeElement).toBe(searchInput);
+
+    searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(container.querySelector('[data-testid="terminal-search-bar"]')).toBeNull();
+
+    // The broadcast command opens the split and switches broadcast on in one
+    // step; running it again only toggles, it never leaves the split closed.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const paletteInput = container.querySelector('[data-testid="command-palette-input"]') as HTMLInputElement;
+    expect(paletteInput).toBeTruthy();
+    paletteInput.value = 'broadcast';
+    paletteInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+
+    const broadcastBtn = container.querySelector('[data-testid="toggle-broadcast-btn"]');
+    expect(broadcastBtn).toBeTruthy();
+    expect(broadcastBtn?.getAttribute('aria-pressed')).toBe('true');
+
+    document.body.removeChild(container);
+  });
+
+  it('moves the command palette highlight with arrows, runs the highlighted command on Enter, and closes on Escape', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<App />, container);
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Ctrl/Cmd+K opens the palette from anywhere and puts the caret in it.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+
+    const paletteInput = container.querySelector('[data-testid="command-palette-input"]') as HTMLInputElement;
+    expect(paletteInput).toBeTruthy();
+    expect(document.activeElement).toBe(paletteInput);
+
+    // The highlighted row is the primary-variant button; an empty query keeps
+    // registration order, so full-screen is first and Zen second.
+    const isHighlighted = (id: string): boolean =>
+      Boolean(container.querySelector(`[data-testid="palette-cmd-${id}"]`)?.classList.contains('ui-btn--primary'));
+
+    expect(isHighlighted('view.fullscreen')).toBe(true);
+    expect(isHighlighted('view.zen')).toBe(false);
+
+    paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(isHighlighted('view.fullscreen')).toBe(false);
+    expect(isHighlighted('view.zen')).toBe(true);
+
+    paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(isHighlighted('view.fullscreen')).toBe(true);
+
+    // Arrow down twice onto "Open capability matrix", then Enter runs it.
+    paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(isHighlighted('nav.features')).toBe(true);
+
+    paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(container.querySelector('[data-testid="command-palette-modal"]')).toBeNull();
+    expect(container.querySelector('[data-testid="screen-features"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="capability-table"]')).toBeTruthy();
+
+    // Reopened, Escape closes it.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const reopenedInput = container.querySelector('[data-testid="command-palette-input"]') as HTMLInputElement;
+    expect(reopenedInput).toBeTruthy();
+
+    reopenedInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(container.querySelector('[data-testid="command-palette-modal"]')).toBeNull();
+
+    document.body.removeChild(container);
+  });
+
+  it('renames the active session tab on double-click and leaves the old name when the prompt is cancelled', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<App />, container);
+
+    // Renaming has to show in the tab strip and the active-session label, and
+    // that label is rendered by the status bar only while connected.
+    const newConnBtn = container.querySelector('[data-testid="new-connection-btn"]') as HTMLButtonElement;
+    newConnBtn.click();
+    await new Promise((r) => setTimeout(r, 150));
+
+    const gwInput = container.querySelector('[data-testid="gateway-url-input"]') as HTMLInputElement;
+    gwInput.value = 'ws://127.0.0.1:8080/ws';
+    gwInput.dispatchEvent(new Event('input', { bubbles: true }));
+    const passInput = container.querySelector('[data-testid="connect-password-input"]') as HTMLInputElement;
+    passInput.value = 'testpass123';
+    passInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    (container.querySelector('[data-testid="connect-modal-submit-btn"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 150));
+
+    const tab = (): HTMLElement => container.querySelector('[data-testid="tab-session-1"]') as HTMLElement;
+    const statusBar = (): HTMLElement => container.querySelector('[data-testid="status-bar"]') as HTMLElement;
+    expect(tab().textContent).toContain('Terminal 1 (ubuntu@127.0.0.1)');
+    expect(statusBar().textContent).toContain('Connected · Terminal 1 (ubuntu@127.0.0.1)');
+
+    // A typed name is trimmed before it becomes the label.
+    vi.stubGlobal('prompt', vi.fn(() => '  Build box  '));
+    tab().dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(tab().textContent).toContain('Build box');
+    expect(statusBar().textContent).toContain('Connected · Build box');
+
+    // Cancelling the prompt keeps the current name everywhere.
+    vi.stubGlobal('prompt', vi.fn(() => null));
+    tab().dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(tab().textContent).toContain('Build box');
+    expect(statusBar().textContent).toContain('Connected · Build box');
+
+    document.body.removeChild(container);
+  });
+
+  it('opens the shortcut cheatsheet with ? outside the terminal, refuses it inside the terminal viewport, and closes on Escape', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<App />, container);
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(container.querySelector('[data-testid="shortcuts-modal"]')).toBeNull();
+
+    // `?` dispatched from the surrounding shell (not a text field) opens it.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(container.querySelector('[data-testid="shortcuts-modal"]')).toBeTruthy();
+    const list = container.querySelector('[data-testid="shortcuts-list"]');
+    expect(list?.textContent).toContain('Open or close the command palette');
+    expect(list?.textContent).toContain('Find text in the active terminal');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(container.querySelector('[data-testid="shortcuts-modal"]')).toBeNull();
+
+    // Inside the terminal `?` is a real command character, so the shell must
+    // not steal it for the cheatsheet.
+    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 150));
+    const viewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
+    expect(viewport.classList.contains('webssh-terminal-viewport')).toBe(true);
+
+    viewport.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(container.querySelector('[data-testid="shortcuts-modal"]')).toBeNull();
+
+    document.body.removeChild(container);
+  });
+
+  it('applies a theme chosen in the menubar View menu to the document root and persists the choice', async () => {
+    const initialTheme = document.documentElement.getAttribute('data-theme');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<App />, container);
+    await new Promise((r) => setTimeout(r, 150));
+
+    (container.querySelector('[data-testid="menu-view-btn"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    const select = container.querySelector('[data-testid="theme-quick-switch"]') as HTMLSelectElement;
+    expect(select).toBeTruthy();
+    expect(select.value).toBe('dark');
+
+    select.value = 'dracula';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(select.value).toBe('dracula');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dracula');
+    const stored = JSON.parse(localStorage.getItem('webssh.preferences.v2') ?? '{}') as {
+      activeThemeId?: string;
+    };
+    expect(stored.activeThemeId).toBe('dracula');
+
+    // The root attribute outlives the container; put it back for later tests.
+    if (initialTheme === null) {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', initialTheme);
+    }
+    document.body.removeChild(container);
+  });
+
+  it('lists recent hosts on Welcome newest-first, skips never-connected hosts, and prefills Quick Connect from one', async () => {
+    localStorage.setItem(
+      'webssh.hosts.v1',
+      JSON.stringify([
+        {
+          id: 'h-old',
+          alias: 'old-box',
+          host: '10.0.0.1',
+          port: 22,
+          user: 'ubuntu',
+          tags: [],
+          favorite: false,
+          jumpHops: [],
+          lastConnectedAt: 1000
+        },
+        {
+          id: 'h-new',
+          alias: 'new-box',
+          host: '10.0.0.9',
+          port: 2222,
+          user: 'deploy',
+          tags: [],
+          favorite: true,
+          jumpHops: [],
+          lastConnectedAt: 5000
+        },
+        {
+          id: 'h-mid',
+          alias: 'mid-box',
+          host: '10.0.0.5',
+          port: 22,
+          user: 'root',
+          tags: [],
+          favorite: false,
+          jumpHops: [],
+          lastConnectedAt: 3000
+        },
+        {
+          id: 'h-never',
+          alias: 'never-box',
+          host: '10.0.0.7',
+          port: 22,
+          user: 'ubuntu',
+          tags: [],
+          favorite: false,
+          jumpHops: []
+        }
+      ])
+    );
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<App />, container);
+    await new Promise((r) => setTimeout(r, 150));
+
+    const recentCard = container.querySelector('[data-testid="welcome-recent-hosts"]');
+    expect(recentCard).toBeTruthy();
+
+    const order = Array.from(recentCard?.querySelectorAll('[data-testid^="recent-host-"]') ?? []).map((el) =>
+      el.getAttribute('data-testid')
+    );
+    expect(order).toEqual(['recent-host-new-box', 'recent-host-mid-box', 'recent-host-old-box']);
+    expect(recentCard?.textContent).not.toContain('never-box');
+
+    // Clicking a recent host opens the connection modal with its values filled in.
+    (container.querySelector('[data-testid="recent-host-new-box"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(container.querySelector('[data-testid="connect-modal"]')).toBeTruthy();
+    expect((container.querySelector('[data-testid="connect-host-input"]') as HTMLInputElement).value).toBe('10.0.0.9');
+    expect((container.querySelector('[data-testid="connect-user-input"]') as HTMLInputElement).value).toBe('deploy');
+    expect((container.querySelector('[data-testid="connect-port-input"]') as HTMLInputElement).value).toBe('2222');
 
     document.body.removeChild(container);
   });

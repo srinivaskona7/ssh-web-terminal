@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 )
 
@@ -82,6 +83,58 @@ func TestFlowController(t *testing.T) {
 	}
 	if !fc.Consume(1, 1000) {
 		t.Fatal("expected Consume(1000) to succeed")
+	}
+}
+
+// The browser client is written against these exact JSON names; a renamed tag
+// would silently drop the field on one side of the wire.
+func TestExecStreamEnvAndHopWireNames(t *testing.T) {
+	msg := ControlMessage{
+		Type:        "exec_output",
+		Stream:      "stderr",
+		HopIndex:    2,
+		Env:         map[string]string{"LANG": "C.UTF-8"},
+		EnvAccepted: []string{"LANG"},
+		EnvRejected: []string{"SECRET"},
+		Jump: []JumpHop{{
+			Host:                 "bastion",
+			Port:                 22,
+			User:                 "ops",
+			AuthMethod:           "password",
+			Password:             "p",
+			PublicKey:            "k",
+			PrivateKeyPem:        "pem",
+			PrivateKeyPassphrase: "pp",
+			KeyFingerprint:       "SHA256:x",
+		}},
+	}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	for _, key := range []string{"stream", "hopIndex", "env", "envAccepted", "envRejected", "jump"} {
+		if _, ok := top[key]; !ok {
+			t.Fatalf("expected key %q in %s", key, raw)
+		}
+	}
+	var hops []map[string]any
+	if err := json.Unmarshal(top["jump"], &hops); err != nil {
+		t.Fatalf("Unmarshal jump failed: %v", err)
+	}
+	for _, key := range []string{"host", "port", "user", "authMethod", "password", "publicKey", "privateKeyPem", "privateKeyPassphrase", "keyFingerprint"} {
+		if _, ok := hops[0][key]; !ok {
+			t.Fatalf("expected hop key %q in %s", key, top["jump"])
+		}
+	}
+
+	// A hop that names no credential must stay credential-free on the wire.
+	bare, _ := json.Marshal(JumpHop{Host: "b", Port: 22, User: "u"})
+	if string(bare) != `{"host":"b","port":22,"user":"u"}` {
+		t.Fatalf("expected a bare hop to omit every credential field, got %s", bare)
 	}
 }
 

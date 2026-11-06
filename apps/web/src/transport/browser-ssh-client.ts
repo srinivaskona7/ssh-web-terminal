@@ -1,10 +1,17 @@
-import type { ControlMessage } from '@webssh/protocol';
+import type { ControlMessage, EnvReport } from '@webssh/protocol';
 import {
   base64ToBytes,
   bytesToBase64,
   p1363ToSshMpint
 } from '../vault/ssh-wire.js';
-import type { ConnectedSessionMetadata, LiveConnectParams } from './transport.js';
+import type {
+  ConnectedSessionMetadata,
+  ExecStreamOptions,
+  LiveConnectParams
+} from './transport.js';
+import { ExecOutputSink, abortError } from './exec-output.js';
+import { routeSignRequest } from './remote-signer.js';
+import { prepareSessionEnv } from './session-env.js';
 import {
   SftpClient,
   SftpError,
@@ -305,9 +312,11 @@ interface RemoteChannelState {
   /** Outstanding CHANNEL_REQUEST acknowledgements, in send order. */
   pendingRequests: Array<{
     type: string;
-    resolve: () => void;
+    /** Resolves true on CHANNEL_SUCCESS; false on CHANNEL_FAILURE when the caller tolerates it. */
+    resolve: (accepted: boolean) => void;
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout>;
+    tolerateFailure?: boolean;
   }>;
   /** Waiters blocked on the remote window opening up. */
   windowWaiters: Array<() => void>;
@@ -315,6 +324,8 @@ interface RemoteChannelState {
   onDirectTcpComplete?: (rawResponse: string) => void;
   onData?: (data: Uint8Array) => void;
   onStderr?: (data: Uint8Array) => void;
+  /** Fails a streaming exec when the channel or session goes away first. */
+  onExecFailed?: (err: Error) => void;
   sftp?: SftpClient;
 }
 
@@ -505,6 +516,9 @@ export class BrowserSshRelaySessionClient {
     { remoteHost: string; remotePort: number; localPort: number }
   >();
 
+  /** Validated env for this session's shells; undefined when none was requested. */
+  private sessionEnv: Record<string, string> | undefined;
+
   constructor(private readonly params: LiveConnectParams) {}
 
   get isConnected(): boolean {
@@ -541,6 +555,14 @@ export class BrowserSshRelaySessionClient {
   }
 
   async connect(): Promise<ConnectedSessionMetadata> {
+    // The relay speaks SSH directly; it has no bastion dialling. Refuse rather
+    // than connect straight to the target and pretend the chain was used.
+    if (this.params.jumpHops?.length) {
+      throw new Error(
+        'ProxyJump requires the Go gateway: the Cloudflare relay cannot dial bastion hops.'
+      );
+    }
+    this.sessionEnv = prepareSessionEnv(this.params.env);
     const wsUrl = this.buildRelayWsUrl();
 
     // Pre-flight HTTP check when possible to surface precise 401/403/503 JSON error codes from the Worker
@@ -625,6 +647,7 @@ export class BrowserSshRelaySessionClient {
         const wasConnected = this.connected;
         this.connected = false;
         this.params.onStateChange?.('disconnected', 0);
+        this.failOpenStreams(new Error('SSH session disconnected.'));
         if (!wasConnected && this.connectReject) {
           if (ev.reason) {
             this.failConnect(new Error(`ERR_RELAY_CLOSED (${ev.code}): ${ev.reason}`));
@@ -1079,9 +1102,11 @@ export class BrowserSshRelaySessionClient {
       case SSH_MSG_USERAUTH_SUCCESS: {
         void (async () => {
           try {
-            const chId = await this.openInteractivePtyChannel(this.params.cols, this.params.rows);
+            const shell = await this.openInteractivePtyChannel(this.params.cols, this.params.rows);
+            const chId = shell.channel;
             this.connected = true;
             const meta: ConnectedSessionMetadata = {
+              ...shell.env,
               type: 'connected',
               sessionId: `cf_ssh_${Date.now().toString(36)}`,
               resumeToken: `cf_resume_${Date.now().toString(36)}`,
@@ -1164,7 +1189,9 @@ export class BrowserSshRelaySessionClient {
         if (!pending) return;
         clearTimeout(pending.timer);
         if (msgType === SSH_MSG_CHANNEL_SUCCESS) {
-          pending.resolve();
+          pending.resolve(true);
+        } else if (pending.tolerateFailure) {
+          pending.resolve(false);
         } else {
           pending.reject(
             new Error(`SSH_REQUEST_FAILED: server rejected channel request "${pending.type}"`)
@@ -1201,8 +1228,10 @@ export class BrowserSshRelaySessionClient {
           this.params.onPtyData(localId, data);
         } else if (ch.kind === 'sftp') {
           ch.sftp?.handleData(data);
+        } else if (ch.onData) {
+          // A streaming consumer owns decoding; chunks are only kept for buffered callers.
+          ch.onData(data);
         } else {
-          if (ch.onData) ch.onData(data);
           ch.stdoutChunks.push(new TextDecoder().decode(data));
         }
         return;
@@ -1217,8 +1246,9 @@ export class BrowserSshRelaySessionClient {
         if (ch.kind === 'pty') {
           this.appendToRingBuffer(localId, data);
           this.params.onPtyData(localId, data);
+        } else if (ch.onStderr) {
+          ch.onStderr(data);
         } else {
-          ch.onStderr?.(data);
           ch.stderrChunks.push(new TextDecoder().decode(data));
         }
         return;
@@ -1346,14 +1376,17 @@ export class BrowserSshRelaySessionClient {
       sshString(alg),
       sshString(pubBlob)
     );
-    const rawSigB64 = (await this.params.onSignRequest?.({
+    const verdict = await routeSignRequest(this.params, {
       type: 'sign_request',
       requestId: `sign_${++this.opCounter}`,
       keyFingerprint: this.params.keyFingerprint ?? '',
       algorithm: alg,
-      dataBase64: bytesToBase64(signData)
-    })) ?? '';
-    const rawSig = base64ToBytes(rawSigB64);
+      dataBase64: bytesToBase64(signData),
+      host: this.params.host,
+      port: this.params.port
+    });
+    if (!verdict.ok) throw new Error(`SSH_SIGN_REFUSED: ${verdict.reason}`);
+    const rawSig = base64ToBytes(verdict.signatureBase64);
     const sigBlob =
       alg === 'ecdsa-sha2-nistp256'
         ? concatBytes(sshString('ecdsa-sha2-nistp256'), sshString(p1363ToSshMpint(rawSig)))
@@ -1420,10 +1453,11 @@ export class BrowserSshRelaySessionClient {
     reqType: string,
     payload: Uint8Array,
     wantReply = true,
-    timeoutMs = 15_000
-  ): Promise<void> {
+    timeoutMs = 15_000,
+    tolerateFailure = false
+  ): Promise<boolean> {
     const ack = wantReply
-      ? new Promise<void>((resolve, reject) => {
+      ? new Promise<boolean>((resolve, reject) => {
           const timer = setTimeout(() => {
             const idx = ch.pendingRequests.findIndex((p) => p.timer === timer);
             if (idx !== -1) ch.pendingRequests.splice(idx, 1);
@@ -1433,9 +1467,9 @@ export class BrowserSshRelaySessionClient {
               )
             );
           }, timeoutMs);
-          ch.pendingRequests.push({ type: reqType, resolve, reject, timer });
+          ch.pendingRequests.push({ type: reqType, resolve, reject, timer, tolerateFailure });
         })
-      : Promise.resolve();
+      : Promise.resolve(true);
 
     void this.sendPacket(
       concatBytes(
@@ -1477,8 +1511,34 @@ export class BrowserSshRelaySessionClient {
     }
   }
 
-  private async openInteractivePtyChannel(cols: number, rows: number): Promise<number> {
+  /**
+   * Ask for each env variable with want_reply and wait for its verdict before the next one.
+   * A rejected name is reported, never exported through the shell as a fallback.
+   */
+  private async requestEnv(ch: RemoteChannelState): Promise<EnvReport | null> {
+    const env = this.sessionEnv;
+    if (!env) return null;
+    const report = { envAccepted: [] as string[], envRejected: [] as string[] };
+    for (const [name, value] of Object.entries(env)) {
+      const accepted = await this.sendChannelRequest(
+        ch,
+        'env',
+        concatBytes(sshString(name), sshString(value)),
+        true,
+        15_000,
+        true
+      );
+      (accepted ? report.envAccepted : report.envRejected).push(name);
+    }
+    return report;
+  }
+
+  private async openInteractivePtyChannel(
+    cols: number,
+    rows: number
+  ): Promise<{ channel: number; env: EnvReport | null }> {
     const ch = await this.openRawSessionChannel('pty');
+    const env = await this.requestEnv(ch);
     await this.sendChannelRequest(
       ch,
       'pty-req',
@@ -1492,7 +1552,7 @@ export class BrowserSshRelaySessionClient {
       )
     );
     await this.sendChannelRequest(ch, 'shell', new Uint8Array(0));
-    return ch.localId;
+    return { channel: ch.localId, env };
   }
 
   /**
@@ -1576,12 +1636,13 @@ export class BrowserSshRelaySessionClient {
     cols: number,
     rows: number
   ): Promise<Extract<ControlMessage, { type: 'channel_opened' }>> {
-    const chId = await this.openInteractivePtyChannel(cols, rows);
+    const shell = await this.openInteractivePtyChannel(cols, rows);
     return {
       type: 'channel_opened',
       opId: `chan_${++this.opCounter}`,
       ok: true,
-      channel: chId
+      channel: shell.channel,
+      ...shell.env
     };
   }
 
@@ -1598,6 +1659,10 @@ export class BrowserSshRelaySessionClient {
     void this.sendPacket(
       concatBytes(new Uint8Array([SSH_MSG_CHANNEL_CLOSE]), writeUint32BE(ch.remoteId))
     );
+  }
+
+  private failOpenStreams(err: Error): void {
+    for (const ch of this.channels.values()) ch.onExecFailed?.(err);
   }
 
   async execCommand(
@@ -1634,55 +1699,60 @@ export class BrowserSshRelaySessionClient {
   /**
    * Execute a command and stream stdout/stderr as it arrives. Used by
    * discovery, installation jobs and build logs so the UI shows real
-   * progress instead of waiting for a buffered blob.
+   * progress instead of waiting for a buffered blob. A nonzero exit resolves;
+   * aborting closes the SSH channel and rejects with an AbortError.
    */
   async execStream(
     command: string,
-    options: {
-      onStdout?: (chunk: string) => void;
-      onStderr?: (chunk: string) => void;
-      timeoutMs?: number;
-      /** Stop callback: return true to abort the remote command. */
-      signal?: AbortSignal;
-    } = {}
+    options: ExecStreamOptions = {}
   ): Promise<Extract<ControlMessage, { type: 'exec_result' }>> {
+    const { signal } = options;
+    if (signal?.aborted) throw abortError();
+    if (!this.isConnected) throw new Error('SSH session is not connected.');
     const ch = await this.openRawSessionChannel('exec');
-    const decoder = new TextDecoder();
-    const errDecoder = new TextDecoder();
-    let combinedStdout = '';
-    let combinedStderr = '';
-    const maxCapture = 4 * 1024 * 1024;
-    ch.onData = (data) => {
-      const text = decoder.decode(data, { stream: true });
-      if (combinedStdout.length < maxCapture) combinedStdout += text;
-      options.onStdout?.(text);
-    };
-    ch.onStderr = (data) => {
-      const text = errDecoder.decode(data, { stream: true });
-      if (combinedStderr.length < maxCapture) combinedStderr += text;
-      options.onStderr?.(text);
-    };
-    const timeoutMs = options.timeoutMs ?? 30 * 60_000;
+    if (signal?.aborted) {
+      this.closeChannel(ch.localId);
+      throw abortError();
+    }
+    const retain = options.retainOutput ?? true;
+    const stdout = new ExecOutputSink(options.onStdout, retain);
+    const stderr = new ExecOutputSink(options.onStderr, retain);
+    ch.onData = (data) => stdout.push(data);
+    ch.onStderr = (data) => stderr.push(data);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort = () => {};
     const result = new Promise<Extract<ControlMessage, { type: 'exec_result' }>>(
       (resolve, reject) => {
-        const timer = setTimeout(() => {
+        const settle = () => {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+        };
+        const fail = (err: Error) => {
+          if (settled) return;
+          settle();
+          stdout.finish();
+          stderr.finish();
+          reject(err);
+        };
+        ch.onExecFailed = fail;
+        if (options.timeoutMs !== undefined) {
+          const timeoutMs = options.timeoutMs;
+          timer = setTimeout(() => {
+            this.closeChannel(ch.localId);
+            fail(new Error(`SSH_EXEC_TIMEOUT: command exceeded ${Math.round(timeoutMs / 1000)}s`));
+          }, timeoutMs);
+        }
+        onAbort = () => {
           this.closeChannel(ch.localId);
-          reject(
-            new Error(`SSH_EXEC_TIMEOUT: command exceeded ${Math.round(timeoutMs / 1000)}s`)
-          );
-        }, timeoutMs);
-        options.signal?.addEventListener('abort', () => {
-          this.closeChannel(ch.localId);
-          clearTimeout(timer);
-          reject(new Error('SSH_EXEC_ABORTED: cancelled by user'));
-        });
+          fail(abortError());
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
         ch.onExecComplete = (res) => {
-          clearTimeout(timer);
-          resolve({
-            ...res,
-            stdout: combinedStdout,
-            stderr: combinedStderr
-          });
+          if (settled) return;
+          settle();
+          resolve({ ...res, stdout: stdout.finish(), stderr: stderr.finish() });
         };
       }
     );
@@ -1690,10 +1760,12 @@ export class BrowserSshRelaySessionClient {
       await this.sendChannelRequest(ch, 'exec', sshString(command));
     } catch (err) {
       this.closeChannel(ch.localId);
-      throw err;
+      ch.onExecFailed?.(err instanceof Error ? err : new Error(String(err)));
+      // The request's own error is what the caller needs; the result promise carries it.
     }
     return result;
   }
+
   private appendToRingBuffer(channel: number, data: Uint8Array): void {
     const copy = new Uint8Array(data);
     const seq = ++this.ptySeq;
@@ -2074,6 +2146,7 @@ export class BrowserSshRelaySessionClient {
 
   close(): void {
     this.connected = false;
+    this.failOpenStreams(new Error('SSH session closed'));
     for (const ch of this.channels.values()) {
       ch.sftp?.close();
     }

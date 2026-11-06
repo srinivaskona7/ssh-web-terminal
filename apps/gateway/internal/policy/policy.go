@@ -40,27 +40,27 @@ type Guard struct {
 }
 
 var defaultBlockedCIDRs = []string{
-	"0.0.0.0/8",          // Unspecified IPv4
-	"127.0.0.0/8",        // Loopback IPv4
-	"10.0.0.0/8",         // RFC1918 Private
-	"172.16.0.0/12",      // RFC1918 Private
-	"192.168.0.0/16",     // RFC1918 Private
-	"169.254.0.0/16",     // Link-local & Cloud Metadata (169.254.169.254)
-	"100.64.0.0/10",      // CGNAT
-	"192.0.0.0/24",       // IETF protocol assignments
-	"192.0.2.0/24",       // TEST-NET-1
-	"198.18.0.0/15",      // Benchmarking
-	"198.51.100.0/24",    // TEST-NET-2
-	"203.0.113.0/24",     // TEST-NET-3
-	"224.0.0.0/4",        // Multicast IPv4
-	"240.0.0.0/4",        // Reserved IPv4
-	"::/128",             // Unspecified IPv6
-	"::1/128",            // Loopback IPv6
-	"fe80::/10",          // Link-local IPv6
-	"fc00::/7",           // Unique local IPv6 (ULA)
-	"ff00::/8",           // Multicast IPv6
-	"2001:db8::/32",      // Documentation IPv6
-	"100::/64",           // Discard-only IPv6
+	"0.0.0.0/8",       // Unspecified IPv4
+	"127.0.0.0/8",     // Loopback IPv4
+	"10.0.0.0/8",      // RFC1918 Private
+	"172.16.0.0/12",   // RFC1918 Private
+	"192.168.0.0/16",  // RFC1918 Private
+	"169.254.0.0/16",  // Link-local & Cloud Metadata (169.254.169.254)
+	"100.64.0.0/10",   // CGNAT
+	"192.0.0.0/24",    // IETF protocol assignments
+	"192.0.2.0/24",    // TEST-NET-1
+	"198.18.0.0/15",   // Benchmarking
+	"198.51.100.0/24", // TEST-NET-2
+	"203.0.113.0/24",  // TEST-NET-3
+	"224.0.0.0/4",     // Multicast IPv4
+	"240.0.0.0/4",     // Reserved IPv4
+	"::/128",          // Unspecified IPv6
+	"::1/128",         // Loopback IPv6
+	"fe80::/10",       // Link-local IPv6
+	"fc00::/7",        // Unique local IPv6 (ULA)
+	"ff00::/8",        // Multicast IPv6
+	"2001:db8::/32",   // Documentation IPv6
+	"100::/64",        // Discard-only IPv6
 }
 
 func NewGuard(cfg Config) (*Guard, error) {

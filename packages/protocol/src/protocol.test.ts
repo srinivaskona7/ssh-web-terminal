@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import fc from 'fast-check';
 import {
   CONTROL_CHANNEL_ID,
+  ENV_MAX_VALUE_BYTES,
+  ENV_MAX_VARIABLES,
   FlowController,
   FrameType,
   HEADER_BYTE_LENGTH,
@@ -11,6 +13,7 @@ import {
   decodeFrame,
   encodeControlFrame,
   encodeFrame,
+  validateEnvVars,
   type ControlMessage
 } from './index.js';
 
@@ -107,9 +110,23 @@ describe('@webssh/protocol binary framing & property/fuzz suite', () => {
         jump: [{ host: 'bastion.example.com', port: 22, user: 'ec2-user' }]
       },
       { type: 'sign_request', requestId: 'req-1', dataBase64: 'YWJj', algorithm: 'ssh-ed25519', keyFingerprint: 'SHA256:abc' },
+      {
+        type: 'sign_request',
+        requestId: 'req-2',
+        dataBase64: 'YWJj',
+        algorithm: 'ssh-ed25519',
+        keyFingerprint: 'SHA256:hop',
+        host: 'bastion.example.com',
+        port: 22,
+        hopIndex: 1
+      },
       { type: 'sign_response', requestId: 'req-1', signatureBase64: 'c2ln' },
       { type: 'credit', channel: 1, bytes: 65536 },
-      { type: 'resync', firstAvailableSeq: '100', lastSeq: '250', truncatedBytes: 4096 }
+      { type: 'resync', firstAvailableSeq: '100', lastSeq: '250', truncatedBytes: 4096 },
+      { type: 'exec_stream', opId: 'op-1', command: 'journalctl -fu nginx' },
+      { type: 'exec_output', opId: 'op-1', stream: 'stderr', dataBase64: 'b29wcw==' },
+      { type: 'exec_stream_end', opId: 'op-1', ok: false, error: 'cancelled', durationMs: 40 },
+      { type: 'exec_cancel', opId: 'op-1' }
     ];
 
     for (const [idx, msg] of messages.entries()) {
@@ -138,5 +155,67 @@ describe('@webssh/protocol binary framing & property/fuzz suite', () => {
     expect(fcCtrl.getAvailableCredit(1)).toBe(0);
     expect(() => fcCtrl.consumeCredit(1, -5)).toThrow(ProtocolError);
     expect(() => fcCtrl.addCredit(1, 0)).toThrow(ProtocolError);
+  });
+});
+
+describe('validateEnvVars', () => {
+  it('accepts portable names and values within the limits', () => {
+    expect(validateEnvVars({})).toEqual([]);
+    expect(
+      validateEnvVars({
+        LANG: 'en_US.UTF-8',
+        LC_ALL: 'C',
+        _private: '',
+        APP_ENV2: 'x'.repeat(ENV_MAX_VALUE_BYTES),
+        ['A'.repeat(64)]: 'ok'
+      })
+    ).toEqual([]);
+  });
+
+  it('rejects names that are empty, start with a digit, hold punctuation, or pass 64 characters', () => {
+    const errors = validateEnvVars({
+      '': 'a',
+      '1ABC': 'b',
+      'MY-VAR': 'c',
+      'A B': 'd',
+      'É': 'e',
+      ['A'.repeat(65)]: 'f'
+    });
+    expect(errors.map((e) => [e.name, e.field])).toEqual([
+      ['', 'name'],
+      ['1ABC', 'name'],
+      ['MY-VAR', 'name'],
+      ['A B', 'name'],
+      ['É', 'name'],
+      ['A'.repeat(65), 'name']
+    ]);
+  });
+
+  it('measures values in UTF-8 bytes, not characters', () => {
+    // "é" is two bytes, so 2048 of them are exactly at the limit.
+    expect(validateEnvVars({ GREETING: 'é'.repeat(2048) })).toEqual([]);
+    expect(validateEnvVars({ GREETING: 'é'.repeat(2049) })).toEqual([
+      { name: 'GREETING', field: 'value', message: expect.stringMatching(/4096 bytes/) }
+    ]);
+    expect(validateEnvVars({ BIG: 'x'.repeat(ENV_MAX_VALUE_BYTES + 1) })).toHaveLength(1);
+  });
+
+  it('rejects a NUL inside a value and a value that is not text', () => {
+    expect(validateEnvVars({ BAD: 'a\u0000b' })).toEqual([
+      { name: 'BAD', field: 'value', message: expect.stringMatching(/NUL/) }
+    ]);
+    expect(validateEnvVars({ NUM: 5 as unknown as string })).toEqual([
+      { name: 'NUM', field: 'value', message: expect.any(String) }
+    ]);
+  });
+
+  it(`allows ${ENV_MAX_VARIABLES} variables and reports one more as a count error`, () => {
+    const env = Object.fromEntries(
+      Array.from({ length: ENV_MAX_VARIABLES }, (_, i) => [`VAR_${i}`, 'x'])
+    );
+    expect(validateEnvVars(env)).toEqual([]);
+    expect(validateEnvVars({ ...env, VAR_EXTRA: 'x' })).toEqual([
+      { field: 'count', message: expect.stringMatching(/33 .*at most 32/) }
+    ]);
   });
 });

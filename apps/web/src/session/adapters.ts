@@ -4,6 +4,7 @@
  * modules (discovery, recipes, containers, Kubernetes, automation).
  */
 import type { RemoteExecOptions, RemoteExecResult, RemoteSession } from './remote-session.js';
+import { readRemoteFile, REMOTE_INLINE_WRITE_BYTES } from '../files/remote-file-io.js';
 
 /** The subset of the relay client this adapter needs. */
 export interface RelayLikeClient {
@@ -39,6 +40,8 @@ export interface WorkspaceRemoteSession extends RemoteSession {
   writeFile?(path: string, data: Uint8Array): Promise<void>;
   /** Read a file through SFTP as text; absent when the transport cannot do it. */
   readFile?(path: string): Promise<string>;
+  /** Read a file through SFTP as raw bytes (used for image preview). */
+  readFileBytes?(path: string): Promise<Uint8Array>;
   /** List a directory through SFTP; absent when the transport cannot do it. */
   listDir?(path: string): Promise<SftpEntryInfo[]>;
   /** Rename or move a path through SFTP. */
@@ -83,7 +86,7 @@ function bytesFromBinary(binary: string): Uint8Array {
  * lossy decode would turn every invalid byte into U+FFFD, and the editor would
  * then write that corruption back on the next save.
  */
-function decodeUtf8Text(bytes: Uint8Array, path: string): string {
+export function decodeUtf8Text(bytes: Uint8Array, path: string): string {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch {
@@ -114,8 +117,18 @@ export function createRemoteSession(
     // The Go gateway encodes exitCode with `omitempty`, so a successful command
     // arrives without the field. Missing means zero, not undefined.
     const exitCodeOf = (code: unknown): number => (typeof code === 'number' ? code : 0);
-    if (client.execStream) {
-      const result = await client.execStream(command, execOptions);
+    // The gateway's buffered exec_command stays the default there; a stream is used when the
+    // caller needs live output, cancellation or no retention. The relay only streams.
+    const wantsStream =
+      options.transport === 'cloudflare-relay' ||
+      Boolean(execOptions.onStdout || execOptions.onStderr || execOptions.signal) ||
+      execOptions.retainOutput === false;
+    if (client.execStream && wantsStream) {
+      const streamOptions =
+        options.transport === 'cloudflare-relay'
+          ? { ...execOptions, timeoutMs: execOptions.timeoutMs ?? 30 * 60_000 }
+          : execOptions;
+      const result = await client.execStream(command, streamOptions);
       return {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -140,7 +153,15 @@ export function createRemoteSession(
   };
 
   if (client.execStream) {
-    session.execStream = (command, execOptions) => exec(command, execOptions);
+    const execStream = client.execStream.bind(client);
+    session.execStream = async (command, execOptions) => {
+      const result = await execStream(command, execOptions);
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: typeof result.exitCode === 'number' ? result.exitCode : 0
+      };
+    };
   }
 
   if (client.sftpOp) {
@@ -148,7 +169,7 @@ export function createRemoteSession(
     // A single write_file frame carries the whole base64 file. The Go gateway
     // rejects WebSocket frames over 4 MiB and closes the session, so larger
     // buffers must go through the chunked upload ops both transports expose.
-    const CHUNKED_WRITE_THRESHOLD = 3 * 1024 * 1024;
+    const CHUNKED_WRITE_THRESHOLD = REMOTE_INLINE_WRITE_BYTES;
     const WRITE_CHUNK_BYTES = 256 * 1024;
     const chunkedWrite = async (path: string, data: Uint8Array): Promise<void> => {
       // Drop any stale part file first; upload_init would otherwise resume from
@@ -180,6 +201,11 @@ export function createRemoteSession(
       }
       const commit = await sftpOp({ op: 'upload_commit', path });
       if (!commit.ok) throw new Error(commit.error ?? `Could not finish writing ${path}`);
+    };
+    session.readFileBytes = async (path) => {
+      const read = await readRemoteFile(sftpOp, path);
+      if ('error' in read) throw new Error(read.error);
+      return read.bytes;
     };
     session.writeFile = async (path, data) => {
       if (data.byteLength > CHUNKED_WRITE_THRESHOLD) {
