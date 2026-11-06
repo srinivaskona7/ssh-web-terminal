@@ -107,6 +107,26 @@ export const TOKENS = {
     "normal": "180ms cubic-bezier(0.16, 1, 0.3, 1)",
     "max": "200ms cubic-bezier(0.16, 1, 0.3, 1)"
   },
+  "density": {
+    "comfortable": {
+      "controlHeight": "36px",
+      "controlPadding": "var(--space-2) var(--space-3)",
+      "fontSize": "var(--font-size-md)",
+      "gap": "var(--space-2)"
+    },
+    "compact": {
+      "controlHeight": "28px",
+      "controlPadding": "var(--space-1) var(--space-2)",
+      "fontSize": "var(--font-size-sm)",
+      "gap": "var(--space-1)"
+    }
+  },
+  "surface": {
+    "app": "var(--color-bg-canvas)",
+    "nav": "var(--color-bg-surface)",
+    "workspace": "var(--color-bg-elevated)",
+    "workspaceBorder": "var(--color-border-subtle)"
+  },
   "typography": {
     "fontSans": "'WebSSH Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     "fontMono": "'WebSSH Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",

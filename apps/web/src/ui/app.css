@@ -1900,3 +1900,734 @@ html {
   height: auto;
   image-rendering: auto;
 }
+
+/* ========================================================================
+   Editor: collapsible file explorer
+   ======================================================================== */
+.ide-explorer-collapsed .ws-mod-split > aside {
+  display: none;
+}
+
+.ide-explorer-collapsed .ws-mod-content {
+  flex: 1;
+}
+
+/* ========================================================================
+   Editor: bottom panel tabs (Output / Search / Git)
+   ======================================================================== */
+.ide-bottom-panel-tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: var(--border-hairline);
+  margin-bottom: var(--space-1);
+}
+
+.ide-bottom-panel-tab {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-hairline);
+  border-bottom: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background-color: var(--color-bg-surface);
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-font-sans);
+  cursor: pointer;
+}
+
+.ide-bottom-panel-tab:hover {
+  background-color: var(--color-bg-elevated);
+  color: var(--color-fg-primary);
+}
+
+.ide-bottom-panel-tab--active {
+  background-color: var(--color-bg-elevated);
+  color: var(--color-fg-primary);
+  border-bottom-color: var(--color-bg-elevated);
+}
+
+.ide-bottom-panel-content {
+  flex: 1;
+  min-height: 120px;
+  overflow: auto;
+}
+
+/* ========================================================================
+   Editor: save progress indicator
+   ======================================================================== */
+.ide-save-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 120px;
+}
+
+.ide-save-progress-bar {
+  height: 6px;
+  background-color: var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  flex: 1;
+}
+
+.ide-save-progress-bar > div {
+  height: 100%;
+  background-color: var(--color-accent-primary);
+  border-radius: var(--radius-pill);
+  transition: width var(--motion-fast) ease;
+}
+
+.ide-save-progress-text {
+  font-size: var(--font-size-xs);
+  font-family: var(--font-font-mono);
+  color: var(--color-fg-secondary);
+  min-width: 28px;
+  text-align: right;
+}
+
+/* ========================================================================
+   Refined spacing: tighter control heights, consistent radii
+   ======================================================================== */
+.webssh-density-compact .webssh-session-tab {
+  padding: var(--space-0) var(--space-2);
+  font-size: var(--density-compact-font-size);
+}
+
+.webssh-density-compact .ui-input {
+  font-size: var(--density-compact-font-size);
+  padding: var(--density-compact-control-padding);
+}
+
+/* Connection context banner - shown in header when connected */
+.webssh-connection-context {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background-color: var(--color-bg-elevated);
+  border: var(--border-hairline);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-primary);
+}
+
+.webssh-connection-context .webssh-status-dot {
+  flex-shrink: 0;
+}
+
+/* ========================================================================
+   Three surface levels (from design tokens)
+   ======================================================================== */
+.surface-app {
+  background-color: var(--surface-app);
+}
+.surface-nav {
+  background-color: var(--surface-nav);
+}
+.surface-workspace {
+  background-color: var(--surface-workspace);
+  border: var(--surface-workspace-border);
+}
+
+/* ========================================================================
+   Density control sizing
+   ======================================================================== */
+.webssh-density-comfortable .ui-btn {
+  padding: var(--density-comfortable-control-padding);
+  font-size: var(--density-comfortable-font-size);
+  min-height: var(--density-comfortable-control-height);
+}
+.webssh-density-compact .ui-btn {
+  padding: var(--density-compact-control-padding);
+  font-size: var(--density-compact-font-size);
+  min-height: var(--density-compact-control-height);
+}
+.webssh-density-compact .ui-select,
+.webssh-density-compact .ui-input {
+  font-size: var(--density-compact-font-size);
+  padding: var(--density-compact-control-padding);
+}
+
+/* ========================================================================
+   Simplified header bar (replaces macOS title bar + native menu bar)
+   ======================================================================== */
+.webssh-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-3);
+  background-color: var(--surface-nav);
+  border-bottom: var(--border-hairline);
+  gap: var(--space-3);
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+.webssh-header-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+.webssh-header-workspace {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-sans);
+  letter-spacing: var(--font-letter-spacing-tight);
+}
+
+.webssh-header-connection {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.webssh-header-connection-label {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-sans);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.webssh-header-connection-rtt {
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-mono);
+  white-space: nowrap;
+}
+
+.webssh-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+.webssh-view-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.webssh-view-menu-trigger:hover {
+  color: var(--color-fg-primary);
+  border-color: var(--color-border-subtle);
+  background-color: var(--color-bg-elevated);
+}
+
+/* ========================================================================
+   Session strip (tabs + new tab + split + disconnect)
+   ======================================================================== */
+.webssh-session-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-3);
+  background-color: var(--surface-nav);
+  border-bottom: var(--border-hairline);
+  gap: var(--space-2);
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+.webssh-session-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  overflow-x: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: var(--space-2);
+  scrollbar-width: thin;
+}
+
+.webssh-session-tabs::-webkit-scrollbar {
+  height: 6px;
+}
+
+.webssh-session-tabs::-webkit-scrollbar-thumb {
+  background-color: var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+}
+
+.webssh-session-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background-color: var(--color-bg-canvas);
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-font-sans);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+  flex: 0 0 auto;
+}
+
+.webssh-session-tab:hover {
+  background-color: var(--color-bg-elevated);
+  color: var(--color-fg-primary);
+}
+
+.webssh-session-tab--active {
+  background-color: var(--color-bg-elevated);
+  color: var(--color-fg-primary);
+  border-color: var(--color-border-strong);
+}
+
+.webssh-session-tab .webssh-status-dot {
+  flex-shrink: 0;
+}
+
+.webssh-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--color-fg-secondary);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.webssh-tab-close:hover {
+  color: var(--color-status-danger);
+}
+
+.webssh-session-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.webssh-session-disconnect {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: transparent;
+  border: 1px solid var(--color-border-subtle);
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.webssh-session-disconnect:hover {
+  color: var(--color-status-danger);
+  border-color: var(--color-status-danger);
+}
+
+.webssh-stop-square {
+  width: var(--space-stop-icon);
+  height: var(--space-stop-icon);
+  border-radius: var(--radius-stop-square);
+  background-color: var(--studio-stop-square);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+/* ========================================================================
+   View display menu (font, theme, density, fullscreen, zen)
+   ======================================================================== */
+.webssh-view-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  width: 240px;
+  background-color: var(--color-bg-surface);
+  border: var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elevation-3);
+  padding: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0);
+  z-index: 2000;
+}
+
+.webssh-view-menu-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.webssh-view-menu-separator {
+  height: 0;
+  margin: var(--space-1) 0;
+  border-top: var(--border-hairline);
+}
+
+.webssh-view-menu-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-primary);
+}
+
+.webssh-view-menu-field span:first-child {
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--font-letter-spacing-tight);
+}
+
+.webssh-view-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.webssh-view-menu-item:hover {
+  background-color: var(--color-accent-primary);
+  color: var(--color-bg-canvas);
+}
+
+.webssh-view-menu-item span:last-child {
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-muted);
+}
+
+.webssh-view-menu-font-size {
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-xs);
+  min-width: 24px;
+  text-align: center;
+  color: var(--color-fg-primary);
+}
+
+/* ========================================================================
+   Welcome screen: Quick Connect above the fold
+   ======================================================================== */
+.webssh-welcome-quick-connect {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.webssh-welcome-heading {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-sans);
+  letter-spacing: var(--font-letter-spacing-tight);
+}
+
+.webssh-welcome-subheading {
+  margin: 0 0 var(--space-3);
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-ui);
+}
+
+.webssh-welcome-guest-challenge {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background-color: var(--color-bg-elevated);
+  border: var(--border-hairline);
+  border-radius: var(--radius-md);
+}
+
+.webssh-welcome-connect-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.webssh-welcome-field-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.webssh-welcome-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.webssh-welcome-field label {
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-sans);
+}
+
+.webssh-welcome-section-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-fg-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--font-letter-spacing-tight);
+  font-family: var(--font-font-sans);
+}
+
+.webssh-welcome-recent-card {
+  margin-top: var(--space-2);
+}
+
+.webssh-welcome-admin-settings {
+  margin-top: var(--space-4);
+}
+
+@media (max-width: 640px) {
+  .webssh-welcome-field-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ========================================================================
+   Server tools screen
+   ======================================================================== */
+.webssh-panel-content[data-testid='screen-server-tools'] h1 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+/* ========================================================================
+   App body: three surface levels
+   ======================================================================== */
+.webssh-app {
+  background-color: var(--surface-app);
+}
+
+.webssh-main {
+  background-color: var(--surface-workspace);
+}
+
+.webssh-rail {
+  background-color: var(--surface-nav);
+}
+
+/* Connection context enhancements */
+.webssh-header-connection-label-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.webssh-header-environment {
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-mono);
+  background-color: var(--color-bg-elevated);
+  border: var(--border-hairline);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-1);
+}
+
+.webssh-header-connection-rtt {
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-mono);
+  white-space: nowrap;
+}
+
+/* ========================================================================
+   Connection state banner (shown when connecting/reconnecting/failed)
+   ======================================================================== */
+.webssh-connection-state-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background-color: var(--color-bg-elevated);
+  border-bottom: var(--border-hairline);
+  font-size: var(--font-size-sm);
+}
+
+.webssh-connection-state-banner--connecting {
+  border-left: var(--space-2) solid var(--color-status-warning);
+}
+
+.webssh-connection-state-banner--reconnecting {
+  border-left: var(--space-2) solid var(--color-status-warning);
+}
+
+.webssh-connection-state-banner--failed {
+  border-left: var(--space-2) solid var(--color-status-danger);
+}
+
+.webssh-connection-state-banner__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-fg-primary);
+}
+
+.webssh-connection-state-banner__detail {
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-mono);
+  white-space: nowrap;
+}
+
+.webssh-connection-state-banner__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* ========================================================================
+   Mobile rail drawer: hamburger toggle + backdrop
+   ======================================================================== */
+.webssh-header-menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.webssh-header-menu-toggle:hover {
+  color: var(--color-fg-primary);
+  border-color: var(--color-border-subtle);
+  background-color: var(--color-bg-elevated);
+}
+
+.webssh-header-menu-toggle:focus-visible {
+  outline: var(--border-focus-ring);
+  outline-offset: var(--space-1);
+}
+
+.webssh-rail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+  background-color: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+}
+
+/* ========================================================================
+   Empty state: disconnected workspace
+   ======================================================================== */
+.webssh-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+  padding: var(--space-6);
+  color: var(--color-fg-secondary);
+}
+
+.webssh-empty-state-icon {
+  font-size: var(--font-size2xl);
+  margin-bottom: var(--space-4);
+  opacity: 0.5;
+}
+
+.webssh-empty-state-title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--color-fg-primary);
+}
+
+.webssh-empty-state-description {
+  margin: 0 0 var(--space-5);
+  font-size: var(--font-size-sm);
+  max-width: 320px;
+  line-height: var(--font-line-height-ui);
+}
+
+.webssh-empty-state-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* Desktop: hide hamburger toggle and backdrop */
+@media (min-width: 821px) {
+  .webssh-header-menu-toggle {
+    display: none;
+  }
+
+  .webssh-rail-backdrop {
+    display: none;
+  }
+}
+
+/* ========================================================================
+   Narrow layout: drawer-style sidebar
+   ======================================================================== */
+@media (max-width: 820px) {
+  .webssh-rail {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 260px;
+    transform: translateX(-100%);
+    transition: transform var(--motion-normal) ease;
+    z-index: 100;
+    box-shadow: var(--elevation-2);
+  }
+
+  .webssh-header {
+    padding-left: var(--space-2);
+    padding-right: var(--space-2);
+  }
+
+  .webssh-session-strip {
+    padding-left: var(--space-2);
+    padding-right: var(--space-2);
+  }
+}

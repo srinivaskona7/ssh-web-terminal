@@ -169,6 +169,10 @@ export function LightIde({
   const [bracketMatch, setBracketMatch] = useState<{ open: number; close: number } | null>(null);
   const [dragging, setDragging] = useState<boolean>(false);
   const [sftpState, setSftpState] = useState<'unknown' | 'ready' | 'unavailable'>('unknown');
+  /** Collapse the file explorer to give the editor more room. */
+  const [explorerCollapsed, setExplorerCollapsed] = useState<boolean>(false);
+  /** Bottom panel tab: 'output' | 'search' | 'git'. */
+  const [bottomPanelTab, setBottomPanelTab] = useState<'output' | 'search' | 'git'>('output');
 
   const [findQuery, setFindQuery] = useState<string>('');
   const [replaceValue, setReplaceValue] = useState<string>('');
@@ -194,9 +198,11 @@ export function LightIde({
   >([]);
   const [git, setGit] = useState<{ branch: string; changes: number } | null>(null);
   const [diff, setDiff] = useState<Array<{ kind: string; text: string }>>([]);
+  const [saveProgress, setSaveProgress] = useState<{ path: string; percent: number } | null>(null);
 
   const timers = useRef<Map<string, number>>(new Map());
   const savingRef = useRef<Set<string>>(new Set());
+  const saveProgressIntervals = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
   const filesRef = useRef(files);
   filesRef.current = files;
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
@@ -341,7 +347,6 @@ export function LightIde({
       return 'failed';
     }
     if (savingRef.current.has(path)) {
-      // A save is already in flight for this buffer; re-check shortly.
       armTimer(path, 300);
       return 'busy';
     }
@@ -349,12 +354,26 @@ export function LightIde({
     savingRef.current.add(path);
     updateFile(path, { saving: true, error: null });
     const content = buffer.content;
+    const contentBytes = new TextEncoder().encode(normalizeEol(content, buffer.eol)).byteLength;
+    const isLargeFile = contentBytes > 3 * 1024 * 1024;
+    if (isLargeFile) {
+      setSaveProgress({ path, percent: 0 });
+      const progressInterval = setInterval(() => {
+        setSaveProgress((prev) => {
+          if (!prev || prev.path !== path) return prev;
+          const next = prev.percent + 10;
+          if (next >= 90) return prev;
+          return { path, percent: next };
+        });
+      }, 200);
+      saveProgressIntervals.current.set(path, progressInterval);
+    }
     try {
       if (!force) {
         const remote = await session.readFile(path);
         if (hasRemoteConflict(buffer.original, normalizeEol(remote, '\n'))) {
           updateFile(path, { saving: false, conflict: true });
-          setStatus(`${path} changed on the server — not saved.`);
+          setStatus(`${path} changed on the server — resolve the conflict before saving.`);
           return 'conflict';
         }
       }
@@ -365,18 +384,27 @@ export function LightIde({
         saving: false,
         dirty: unchanged ? false : latest.dirty,
         conflict: false,
+        error: null,
         original: content
       });
       setStatus(unchanged ? `Saved ${path}` : `Saved ${path} — newer edits are still pending`);
       return 'saved';
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       updateFile(path, {
         saving: false,
-        error: err instanceof Error ? err.message : String(err)
+        error: message
       });
+      setStatus(`Save failed for ${path}: ${message}`);
       return 'failed';
     } finally {
       savingRef.current.delete(path);
+      const interval = saveProgressIntervals.current.get(path);
+      if (interval) {
+        clearInterval(interval);
+        saveProgressIntervals.current.delete(path);
+      }
+      if (saveProgress?.path === path) setSaveProgress(null);
     }
   };
   saveRef.current = save;
@@ -1037,6 +1065,9 @@ export function LightIde({
           </p>
         </div>
         <div className="ws-mod-actions">
+          <Button variant="ghost" onClick={() => void setExplorerCollapsed(!explorerCollapsed)} testId="ide-collapse-explorer" title={explorerCollapsed ? 'Show file explorer' : 'Collapse file explorer'}>
+            {explorerCollapsed ? '▸ Explorer' : '◂ Explorer'}
+          </Button>
           <Badge tone={badgeTone}>{badgeText}</Badge>
           <label className="ws-mod-check" htmlFor="ide-auto-save">
             Auto-save
@@ -1127,109 +1158,111 @@ export function LightIde({
         </p>
       ) : null}
 
-      <div className="ws-mod-split ide-workspace-split">
-        <aside
-          className={dragging ? 'ws-mod-list ide-drop-active' : 'ws-mod-list'}
-          aria-label="Project files"
-          data-testid="ide-drop-zone"
-          style={{ overflowX: 'hidden' }}
-          onDragOver={(event) => {
-            event.preventDefault();
-            if (!dragging) setDragging(true);
-          }}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              setDragging(false);
-            }
-          }}
-          onDrop={(event) => void dropFiles(event)}
-        >
-          <h3>{root}</h3>
-          <div className="ws-mod-actions">
-            <Button variant="ghost" onClick={() => void newFile()} testId="ide-new-file">
-              New file
-            </Button>
-            <Button variant="ghost" onClick={() => void newFolder()} testId="ide-new-folder">
-              New folder
-            </Button>
-            <Button variant="ghost" onClick={() => uploadRef.current?.click()} testId="ide-upload">
-              Upload
-            </Button>
-            <input
-              ref={(el) => {
-                uploadRef.current = el;
-              }}
-              type="file"
-              aria-label="Upload a file into the open folder"
-              data-testid="ide-upload-input"
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                const file = (e.currentTarget as HTMLInputElement).files?.[0];
-                if (file) void uploadFile(file);
-                (e.currentTarget as HTMLInputElement).value = '';
-              }}
-            />
-          </div>
-          <ul data-testid="ide-file-list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            {entries.map((entry) => (
-              <li key={entry.path}>
-                <button
-                  type="button"
-                  className="ui-button"
-                  data-testid={`ide-entry-${entry.name}`}
-                  onClick={() => void (entry.isDir ? refresh(entry.path) : openFile(entry.path))}
-                  style={{ width: '100%', textAlign: 'left' }}
-                >
-                  {entry.isDir ? '▸ ' : '  '}
-                  {entry.name}
-                  {!entry.isDir && entry.size > 0 ? ` · ${formatBytes(entry.size)}` : ''}
-                </button>
-              </li>
-            ))}
-            {entries.length === 0 && !busy ? <li>No entries listed.</li> : null}
-            {busy ? <li>Loading…</li> : null}
-          </ul>
-
-          <h4 style={{ marginBottom: 'var(--space-1)' }}>Quick open</h4>
-          <div className="ws-mod-filters">
-            <input
-              className="ui-input"
-              aria-label="Find a file by name"
-              data-testid="ide-quick-open"
-              value={quickOpen}
-              onInput={(e) => setQuickOpen((e.currentTarget as HTMLInputElement).value)}
-            />
-            <Button variant="ghost" onClick={() => void quickFind()} testId="ide-quick-open-run">
-              Find
-            </Button>
-          </div>
-          {quickResults.length > 0 ? (
-            <ul data-testid="ide-quick-results" style={{ listStyle: 'none', padding: 0 }}>
-              {quickResults.map((path) => (
-                <li key={path}>
-                  <button type="button" onClick={() => void openFile(path)}>
-                    {path}
+      <div className={`ws-mod-split ide-workspace-split ${explorerCollapsed ? 'ide-explorer-collapsed' : ''}`}>
+        {!explorerCollapsed ? (
+          <aside
+            className={dragging ? 'ws-mod-list ide-drop-active' : 'ws-mod-list'}
+            aria-label="Project files"
+            data-testid="ide-drop-zone"
+            style={{ overflowX: 'hidden' }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (!dragging) setDragging(true);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setDragging(false);
+              }
+            }}
+            onDrop={(event) => void dropFiles(event)}
+          >
+            <h3>{root}</h3>
+            <div className="ws-mod-actions">
+              <Button variant="ghost" onClick={() => void newFile()} testId="ide-new-file">
+                New file
+              </Button>
+              <Button variant="ghost" onClick={() => void newFolder()} testId="ide-new-folder">
+                New folder
+              </Button>
+              <Button variant="ghost" onClick={() => uploadRef.current?.click()} testId="ide-upload">
+                Upload
+              </Button>
+              <input
+                ref={(el) => {
+                  uploadRef.current = el;
+                }}
+                type="file"
+                aria-label="Upload a file into the open folder"
+                data-testid="ide-upload-input"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = (e.currentTarget as HTMLInputElement).files?.[0];
+                  if (file) void uploadFile(file);
+                  (e.currentTarget as HTMLInputElement).value = '';
+                }}
+              />
+            </div>
+            <ul data-testid="ide-file-list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {entries.map((entry) => (
+                <li key={entry.path}>
+                  <button
+                    type="button"
+                    className="ui-button"
+                    data-testid={`ide-entry-${entry.name}`}
+                    onClick={() => void (entry.isDir ? refresh(entry.path) : openFile(entry.path))}
+                    style={{ width: '100%', textAlign: 'left' }}
+                  >
+                    {entry.isDir ? '▸ ' : '  '}
+                    {entry.name}
+                    {!entry.isDir && entry.size > 0 ? ` · ${formatBytes(entry.size)}` : ''}
                   </button>
                 </li>
               ))}
+              {entries.length === 0 && !busy ? <li>No entries listed.</li> : null}
+              {busy ? <li>Loading…</li> : null}
             </ul>
-          ) : null}
 
-          {recentFiles.length > 0 ? (
-            <>
-              <h4 style={{ marginBottom: 'var(--space-1)' }}>Recent files</h4>
-              <ul data-testid="ide-recent-files" style={{ listStyle: 'none', padding: 0 }}>
-                {recentFiles.slice(0, 8).map((path) => (
+            <h4 style={{ marginBottom: 'var(--space-1)' }}>Quick open</h4>
+            <div className="ws-mod-filters">
+              <input
+                className="ui-input"
+                aria-label="Find a file by name"
+                data-testid="ide-quick-open"
+                value={quickOpen}
+                onInput={(e) => setQuickOpen((e.currentTarget as HTMLInputElement).value)}
+              />
+              <Button variant="ghost" onClick={() => void quickFind()} testId="ide-quick-open-run">
+                Find
+              </Button>
+            </div>
+            {quickResults.length > 0 ? (
+              <ul data-testid="ide-quick-results" style={{ listStyle: 'none', padding: 0 }}>
+                {quickResults.map((path) => (
                   <li key={path}>
                     <button type="button" onClick={() => void openFile(path)}>
-                      {baseName(path)}
+                      {path}
                     </button>
                   </li>
                 ))}
               </ul>
-            </>
-          ) : null}
-        </aside>
+            ) : null}
+
+            {recentFiles.length > 0 ? (
+              <>
+                <h4 style={{ marginBottom: 'var(--space-1)' }}>Recent files</h4>
+                <ul data-testid="ide-recent-files" style={{ listStyle: 'none', padding: 0 }}>
+                  {recentFiles.slice(0, 8).map((path) => (
+                    <li key={path}>
+                      <button type="button" onClick={() => void openFile(path)}>
+                        {baseName(path)}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+          </aside>
+        ) : null}
 
         <section className="ws-mod-content" aria-label="Editor">
           <div role="tablist" aria-label="Open files" data-testid="ide-tabs">
@@ -1262,10 +1295,28 @@ export function LightIde({
             <div className="ws-mod-detail">
               <div className="ws-mod-actions">
                 <span data-testid="ide-active-path">{active.path}</span>
-                <Badge tone={active.conflict ? 'danger' : active.dirty ? 'warning' : 'success'}>
-                  {active.conflict ? 'Remote changed' : active.dirty ? 'Unsaved' : 'Saved'}
+                <Badge tone={active.conflict ? 'danger' : active.saving ? 'warning' : active.dirty ? 'warning' : 'success'}>
+                  {active.conflict ? 'Conflict' : active.saving ? 'Saving…' : active.dirty ? 'Unsaved' : 'Saved'}
                 </Badge>
-                {active.saving ? <span>Saving…</span> : null}
+                {active.saving ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+                    <span className="ws-mod-muted">Saving to server…</span>
+                    {saveProgress?.path === active.path ? (
+                      <div className="ide-save-progress">
+                        <div
+                          className="ide-save-progress-bar"
+                          style={{ width: `${saveProgress.percent}%` }}
+                        />
+                        <span className="ide-save-progress-text">{saveProgress.percent}%</span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {active.error ? (
+                  <Badge tone="danger" data-testid="ide-save-error-badge">
+                    Save error
+                  </Badge>
+                ) : null}
                 <Button onClick={() => void save(active.path)} testId="ide-save">
                   Save now
                 </Button>
@@ -1474,9 +1525,44 @@ export function LightIde({
               </div>
               )}
               {active.error ? (
-                <p role="alert" data-testid="ide-save-error">
-                  {active.error}
-                </p>
+                <div className="ws-mod-error" role="alert" data-testid="ide-save-error-banner">
+                  Save failed for {active.path}: {active.error}
+                </div>
+              ) : null}
+              {active.conflict ? (
+                <>
+                  <div className="ws-mod-error" role="alert" data-testid="ide-conflict-banner">
+                    {active.path} changed on the server since you opened it.
+                  </div>
+                  <div className="ws-mod-actions" style={{ marginTop: 'var(--space-2)' }}>
+                  <Button
+                    variant="default"
+                    onClick={() => {
+                      // Re-read the remote file and replace the local buffer with it.
+                      void session?.readFile?.(active.path).then((remote) => {
+                        updateFile(active.path, {
+                          content: normalizeEol(remote, '\n'),
+                          original: normalizeEol(remote, '\n'),
+                          dirty: false,
+                          conflict: false,
+                          error: null
+                        });
+                        setStatus(`Reverted to server version of ${active.path}.`);
+                      });
+                    }}
+                    testId="ide-preserve-local"
+                  >
+                    Keep server version (discard my edits)
+                  </Button>
+                  <Button
+                    variant="danger"
+                    onClick={() => void save(active.path, true)}
+                    testId="ide-overwrite"
+                  >
+                    Overwrite with my version
+                  </Button>
+                </div>
+                </>
               ) : null}
             </div>
           ) : (
@@ -1491,109 +1577,151 @@ export function LightIde({
       </div>
 
       <div className="ws-mod-split ide-secondary-split">
-        <section className="ws-mod-detail" aria-label="Find in project">
-        <h3>Project search</h3>
-        <div className="ws-mod-filters">
-          <input
-            className="ui-input"
-            aria-label="Search project text"
-            data-testid="ide-search-query"
-            value={searchQuery}
-            onInput={(e) => setSearchQuery((e.currentTarget as HTMLInputElement).value)}
-            style={{ flex: 1 }}
-          />
-          <Button variant="ghost" onClick={() => void searchProject()} testId="ide-search-run">
+        <div className="ide-bottom-panel-tabs">
+          <button
+            type="button"
+            className={`ide-bottom-panel-tab ${bottomPanelTab === 'output' ? 'ide-bottom-panel-tab--active' : ''}`}
+            onClick={() => setBottomPanelTab('output')}
+            data-testid="ide-bottom-tab-output"
+          >
+            Output
+          </button>
+          <button
+            type="button"
+            className={`ide-bottom-panel-tab ${bottomPanelTab === 'search' ? 'ide-bottom-panel-tab--active' : ''}`}
+            onClick={() => setBottomPanelTab('search')}
+            data-testid="ide-bottom-tab-search"
+          >
             Search
-          </Button>
+          </button>
+          <button
+            type="button"
+            className={`ide-bottom-panel-tab ${bottomPanelTab === 'git' ? 'ide-bottom-panel-tab--active' : ''}`}
+            onClick={() => setBottomPanelTab('git')}
+            data-testid="ide-bottom-tab-git"
+          >
+            Git
+          </button>
         </div>
-        {searchResults.length > 0 ? (
-          <ul data-testid="ide-search-results" style={{ listStyle: 'none', padding: 0 }}>
-            {searchResults.map((hit) => (
-              <li key={`${hit.path}:${hit.line}`}>
-                <button type="button" onClick={() => void openFile(hit.path, hit.line)}>
-                  {hit.path}:{hit.line} — {hit.text.slice(0, 120)}
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        </section>
-
-        <section className="ws-mod-detail" aria-label="Run a command">
-        <h3>Run a command</h3>
-        <div className="ws-mod-filters">
-          <input
-            className="ui-input"
-            aria-label="Command"
-            data-testid="ide-command-input"
-            value={command}
-            onInput={(e) => setCommand((e.currentTarget as HTMLInputElement).value)}
-            onKeyDown={onCommandKeyDown}
-            style={{ flex: 1 }}
-          />
-          <Button onClick={() => void runCommand()} testId="ide-run-command">
-            Run
-          </Button>
-          <Button variant="ghost" onClick={pinCommand} testId="ide-pin-command">
-            Pin
-          </Button>
+        <div className="ide-bottom-panel-content">
+          {bottomPanelTab === 'output' ? (
+            <>
+              <div className="ws-mod-filters">
+                <input
+                  className="ui-input"
+                  aria-label="Command"
+                  data-testid="ide-command-input"
+                  value={command}
+                  onInput={(e) => setCommand((e.currentTarget as HTMLInputElement).value)}
+                  onKeyDown={onCommandKeyDown}
+                  style={{ flex: 1 }}
+                />
+                <Button onClick={() => void runCommand()} testId="ide-run-command">
+                  Run
+                </Button>
+                <Button variant="ghost" onClick={pinCommand} testId="ide-pin-command">
+                  Pin
+                </Button>
+              </div>
+              <label htmlFor="ide-run-in-root">
+                Run inside {root}
+                <input
+                  id="ide-run-in-root"
+                  type="checkbox"
+                  checked={runInRoot}
+                  data-testid="ide-run-in-root"
+                  onChange={(e) => setRunInRoot((e.currentTarget as HTMLInputElement).checked)}
+                />
+              </label>
+              {presets.length > 0 ? (
+                <div data-testid="ide-presets" className="ws-mod-chips">
+                  {presets.map((preset) => (
+                    <span key={preset}>
+                      <button type="button" onClick={() => void runCommand(preset)}>
+                        {preset}
+                      </button>
+                      <button type="button" aria-label={`Remove ${preset}`} onClick={() => removePreset(preset)}>
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              <div className="ws-mod-actions">
+                <Button variant="ghost" onClick={() => void copyOutput()} testId="ide-copy-output">
+                  Copy output
+                </Button>
+                <Button variant="ghost" onClick={() => setOutput([])} testId="ide-clear-output">
+                  Clear
+                </Button>
+                <Button variant="ghost" onClick={() => void refreshGit()} testId="ide-git-refresh">
+                  Refresh git
+                </Button>
+                <Button variant="ghost" onClick={() => void showDiff()} testId="ide-git-diff">
+                  Diff this file
+                </Button>
+                <span data-testid="ide-git-status">
+                  {git ? `${git.branch} · ${git.changes} change(s)` : 'git: not checked'}
+                </span>
+              </div>
+              <pre
+                data-testid="ide-command-output"
+                aria-live="polite"
+                style={{ maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }}
+              >
+                {output.join('\n')}
+              </pre>
+              {diff.length > 0 ? (
+                <pre data-testid="ide-diff" style={{ maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                  {diff
+                    .map((line) => `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`)
+                    .join('\n')}
+                </pre>
+              ) : null}
+            </>
+          ) : bottomPanelTab === 'search' ? (
+            <>
+              <div className="ws-mod-filters">
+                <input
+                  className="ui-input"
+                  aria-label="Search project text"
+                  data-testid="ide-search-query"
+                  value={searchQuery}
+                  onInput={(e) => setSearchQuery((e.currentTarget as HTMLInputElement).value)}
+                  style={{ flex: 1 }}
+                />
+                <Button variant="ghost" onClick={() => void searchProject()} testId="ide-search-run">
+                  Search
+                </Button>
+              </div>
+              {searchResults.length > 0 ? (
+                <ul data-testid="ide-search-results" style={{ listStyle: 'none', padding: 0 }}>
+                  {searchResults.map((hit) => (
+                    <li key={`${hit.path}:${hit.line}`}>
+                      <button type="button" onClick={() => void openFile(hit.path, hit.line)}>
+                        {hit.path}:{hit.line} — {hit.text.slice(0, 120)}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <div className="ws-mod-actions">
+                <Button variant="ghost" onClick={() => void refreshGit()} testId="ide-git-refresh">
+                  Refresh git
+                </Button>
+                <Button variant="ghost" onClick={() => void showDiff()} testId="ide-git-diff">
+                  Diff this file
+                </Button>
+                <span data-testid="ide-git-status">
+                  {git ? `${git.branch} · ${git.changes} change(s)` : 'git: not checked'}
+                </span>
+              </div>
+            </>
+          )}
         </div>
-        <label htmlFor="ide-run-in-root">
-          Run inside {root}
-          <input
-            id="ide-run-in-root"
-            type="checkbox"
-            checked={runInRoot}
-            data-testid="ide-run-in-root"
-            onChange={(e) => setRunInRoot((e.currentTarget as HTMLInputElement).checked)}
-          />
-        </label>
-        {presets.length > 0 ? (
-          <div data-testid="ide-presets" className="ws-mod-chips">
-            {presets.map((preset) => (
-              <span key={preset}>
-                <button type="button" onClick={() => void runCommand(preset)}>
-                  {preset}
-                </button>
-                <button type="button" aria-label={`Remove ${preset}`} onClick={() => removePreset(preset)}>
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        ) : null}
-        <div className="ws-mod-actions">
-          <Button variant="ghost" onClick={() => void copyOutput()} testId="ide-copy-output">
-            Copy output
-          </Button>
-          <Button variant="ghost" onClick={() => setOutput([])} testId="ide-clear-output">
-            Clear
-          </Button>
-          <Button variant="ghost" onClick={() => void refreshGit()} testId="ide-git-refresh">
-            Refresh git
-          </Button>
-          <Button variant="ghost" onClick={() => void showDiff()} testId="ide-git-diff">
-            Diff this file
-          </Button>
-          <span data-testid="ide-git-status">
-            {git ? `${git.branch} · ${git.changes} change(s)` : 'git: not checked'}
-          </span>
-        </div>
-        <pre
-          data-testid="ide-command-output"
-          aria-live="polite"
-          style={{ maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }}
-        >
-          {output.join('\n')}
-        </pre>
-        {diff.length > 0 ? (
-          <pre data-testid="ide-diff" style={{ maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }}>
-            {diff
-              .map((line) => `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`)
-              .join('\n')}
-          </pre>
-        ) : null}
-        </section>
       </div>
 
       <p role="status" data-testid="ide-status" className="ws-mod-muted">

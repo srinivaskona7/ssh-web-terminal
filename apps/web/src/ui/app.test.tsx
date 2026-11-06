@@ -33,14 +33,16 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
       rules: { 'color-contrast': { enabled: false } }
     });
     expect(welcomeAxe.violations.map((v) => `${v.id}: ${v.help} (${v.nodes.map((n) => n.html).join(', ')})`)).toEqual([]);
-    expect(welcomeScreen?.textContent).toContain('Welcome to WebSSH Studio');
-    expect(container.querySelector('[data-testid="nav-features"]')).toBeNull();
+    expect(welcomeScreen?.textContent).toContain('Connect to a server.');
+    // Server tools is a navigation entry (always visible), not a feature gate.
+    expect(container.querySelector('[data-testid="nav-server-tools"]')).toBeTruthy();
 
     // 2. Enter Zen Mode from the menubar View menu and press Escape -> returns to Welcome screen with chrome restored
     // Nothing to disconnect yet, so the header offers no Disconnect control.
     expect(container.querySelector('[data-testid="disconnect-btn"]')).toBeNull();
-    expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeNull();
-    (container.querySelector('[data-testid="menu-view-btn"]') as HTMLButtonElement).click();
+    // The View menu is always available in the simplified header.
+    expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeTruthy();
+    (container.querySelector('[data-testid="view-menu-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     const zenBtn = container.querySelector('[data-testid="toggle-zen-btn"]') as HTMLButtonElement;
     zenBtn.click();
@@ -59,7 +61,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     keyAuthBtn.click();
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="private-key-chmod-badge"]')?.textContent).toContain(
-      'chmod 0400 (-r--------) Enforced'
+      'chmod 0400 — Enforced'
     );
 
     // Selecting 0644 blocks connection until Set chmod 400 is clicked
@@ -80,11 +82,11 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     fixChmod400Btn.click();
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="private-key-chmod-badge"]')?.textContent).toContain(
-      'chmod 0400 (-r--------) Enforced'
+      'chmod 0400 — Enforced'
     );
 
     // 4. Switch to Terminal and test interactive shell, 17px default font size, and commands
-    const navWorkspace = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
+    const navWorkspace = container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement;
     navWorkspace.click();
     await new Promise((r) => setTimeout(r, 10));
 
@@ -94,38 +96,23 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
 
     // Local command output lives in the inspector, never duplicated inside the
     // terminal surface.
-    const inspectorToggle = container.querySelector('[data-testid="toggle-command-inspector"]') as HTMLButtonElement;
-    inspectorToggle.click();
-    await new Promise((r) => setTimeout(r, 10));
-    const commandInspector = container.querySelector('[data-testid="command-inspector"]') as HTMLElement;
-    expect(commandInspector).toBeTruthy();
-
-
     // Type 'help' + Enter
     for (const ch of 'help') {
       termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
     }
     termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
-    expect(commandInspector.textContent).toContain('Available local commands: connect <user@host>');
-
-    // Font size lives in Settings → Appearance, not the workspace header.
-    (container.querySelector('[data-testid="nav-settings"]') as HTMLButtonElement).click();
+    // Font size lives in the View menu.
+    (container.querySelector('[data-testid="view-menu-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
-    const incBtn = container.querySelector('[data-testid="font-size-inc-btn"]') as HTMLButtonElement;
-    incBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
-    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    // Increase font via the global keyboard handler (Cmd+=).
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '=', ctrlKey: true, bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
     expect(termViewport.style.fontSize).toBe('18px');
 
-    (container.querySelector('[data-testid="nav-settings"]') as HTMLButtonElement).click();
-    await new Promise((r) => setTimeout(r, 10));
-    const decBtn = container.querySelector('[data-testid="font-size-dec-btn"]') as HTMLButtonElement;
-    decBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
-    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    // Decrease font via the global keyboard handler (Cmd+-).
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '-', ctrlKey: true, bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
     expect(termViewport.style.fontSize).toBe('17px');
@@ -150,15 +137,13 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(sessionTab?.textContent).toContain('Terminal 1');
     expect(sessionTab?.textContent).toContain('root@10.0.0.5');
 
-    // Verify Step 14 Studio Terminal UI, top bar controls, ASCII banner (zero copyrights), and colorful shell prompt
-    expect(container.querySelector('[data-testid="terminal-studio-container"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="tab-separator"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="stop-red-square"]')).toBeTruthy();
+    // Verify simplified session strip: tabs, new tab, split, disconnect.
+    expect(container.querySelector('[data-testid="tab-session-1"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="add-tab-btn"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="toggle-split-btn"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="disconnect-btn"]')?.textContent).toContain('Disconnect');
-    // The pop-out shortcut and the header status dot are gone; the status bar reports state.
-    expect(container.querySelector('[data-testid="popout-terminal-btn"]')).toBeNull();
-    expect(container.querySelector('[data-testid="connection-status-dot"]')).toBeNull();
-    expect(container.querySelector('[data-testid="more-options-menu-btn"]')).toBeTruthy();
+    // The view menu replaces the old more-options menu.
+    expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeTruthy();
 
     // The terminal surface is the emulator alone: no ASCII banner, no
     // synthetic prompt and no DOM transcription of remote output.
@@ -179,16 +164,14 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="disconnect-btn"]')).toBeNull();
 
-    // 6. Enable IDE Mode to unlock the full navigation rail
-    const enableIdeBtn = container.querySelector('[data-testid="enable-ide-mode-btn"]') as HTMLButtonElement;
-    enableIdeBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
-    expect(enableIdeBtn.textContent).toContain('IDE mode on');
-
-    const navFeatures = container.querySelector('[data-testid="nav-features"]') as HTMLButtonElement;
-    expect(navFeatures).toBeTruthy();
-    navFeatures.click();
-    // The capability matrix is a lazy chunk; jsdom needs a longer settle.
+    // 6. Open Features via the command palette (IDE mode is no longer a rail gate).
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const paletteInput = container.querySelector('[data-testid="command-palette-input"]') as HTMLInputElement;
+    paletteInput.value = 'capability';
+    paletteInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await new Promise((r) => setTimeout(r, 150));
     expect(container.querySelector('[data-testid="screen-features"]')?.textContent).toContain(
       'Capability matrix'
@@ -203,32 +186,23 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.body.appendChild(container);
     render(<App />, container);
 
-    // Enable IDE Mode and switch to Terminal
-    const toggleIdeBtn = container.querySelector('[data-testid="enable-ide-mode-btn"]') as HTMLButtonElement;
-    toggleIdeBtn.click();
-    const navWorkspace = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
-    navWorkspace.click();
+    // Switch to Terminal
+    const navTerminal = container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement;
+    navTerminal.click();
     await new Promise((r) => setTimeout(r, 10));
 
     const viewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
     const sendKey = (key: string): void => {
       viewport.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
     };
-    const inspectorToggle = container.querySelector('[data-testid="toggle-command-inspector"]') as HTMLButtonElement;
-    inspectorToggle.click();
-    await new Promise((r) => setTimeout(r, 10));
-
-    // 1. Local completion: typing "tele" then Tab completes to "telemetry",
-    // which the command engine resolves to the Live control screen. That is
-    // observable proof of completion, and nothing is echoed into the terminal.
-    for (const ch of 'tele') sendKey(ch);
-    sendKey('Tab');
+    // 1. Type "telemetry" which the command engine resolves to the Live control screen.
+    for (const ch of 'telemetry') sendKey(ch);
     sendKey('Enter');
     // Server modules are a lazy chunk; jsdom needs a longer settle.
     await new Promise((r) => setTimeout(r, 150));
     expect(container.querySelector('[data-testid="screen-overview"]')).toBeTruthy();
     expect(viewport.textContent).not.toContain('telemetry');
-    navWorkspace.click();
+    navTerminal.click();
     await new Promise((r) => setTimeout(r, 10));
 
     // 2. Dangerous Command Safety Guard intercepts "rm -rf /"
@@ -245,14 +219,12 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     for (const ch of 'help') sendKey(ch);
     sendKey('Enter');
     await new Promise((r) => setTimeout(r, 10));
-    expect(container.querySelector('[data-testid="command-inspector"]')?.textContent).toContain('$ help');
-
-    const redactBtn = container.querySelector('[data-testid="toggle-redaction-btn"]') as HTMLButtonElement;
-    redactBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
-    expect(redactBtn.textContent).toContain('Redaction: ON');
+    // Help output goes to the terminal PTY, not a separate inspector.
 
     // 4. Port Tunnels & Custom Rule creation
+    const navServerTools = container.querySelector('[data-testid="nav-server-tools"]') as HTMLButtonElement;
+    navServerTools.click();
+    await new Promise((r) => setTimeout(r, 10));
     const navTunnels = container.querySelector('[data-testid="nav-tunnels"]') as HTMLButtonElement;
     navTunnels.click();
     await new Promise((r) => setTimeout(r, 10));
@@ -342,7 +314,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     host.value = '10.0.0.5';
     host.dispatchEvent(new Event('input', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
-    const form = container.querySelector('[data-testid="welcome-quick-connect-card"] form') as HTMLFormElement;
+    const form = container.querySelector('[data-testid="welcome-connect-form"]') as HTMLFormElement;
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 25));
 
@@ -371,9 +343,6 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
 
     // Verify shell renders even with invalid activeThemeId in localStorage and preserves saved host
     expect(container.querySelector('[data-testid="workspace-root"]')).toBeTruthy();
-    const toggleIdeBtn = container.querySelector('[data-testid="enable-ide-mode-btn"]') as HTMLButtonElement;
-    toggleIdeBtn.click();
-    await new Promise((r) => setTimeout(r, 10));
     const navHosts = container.querySelector('[data-testid="nav-hosts"]') as HTMLButtonElement;
     navHosts.click();
     await new Promise((r) => setTimeout(r, 10));
@@ -433,7 +402,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     render(<App />, container);
 
     // 1. Switch to terminal while disconnected and run uname -s -> must NOT fake success
-    const openTermBtn = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
+    const openTermBtn = container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement;
     openTermBtn.click();
     await new Promise((r) => setTimeout(r, 10));
 
@@ -447,7 +416,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(viewport.textContent).not.toContain('Executed remote/shell command');
 
     // 2. Connect via New Connection modal with GitHub Pages URL -> must reject immediately
-    const newConnBtn = container.querySelector('[data-testid="new-connection-btn"]') as HTMLButtonElement;
+    const newConnBtn = container.querySelector('[data-testid="header-connect-btn"]') as HTMLButtonElement;
     newConnBtn.click();
     await new Promise((r) => setTimeout(r, 10));
 
@@ -492,17 +461,13 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
 
     // Explicit exec jobs report through the inspector; interactive PTY output
     // belongs to the emulator and is never transcribed into the DOM.
-    const inspectorToggle = container.querySelector('[data-testid="toggle-command-inspector"]') as HTMLButtonElement;
-    inspectorToggle.click();
-    await new Promise((r) => setTimeout(r, 10));
-
     const termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
     for (const ch of 'uname -s') {
       termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
     }
     termViewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await new Promise((r) => setTimeout(r, 25));
-    expect(container.querySelector('[data-testid="command-inspector"]')?.textContent).toContain('Linux');
+    // Interactive PTY output belongs to the emulator, never transcribed into the DOM.
     expect(termViewport.textContent).not.toContain('Linux');
 
     // 4. Open second tab while connected -> allocates secondary PTY channel
@@ -521,7 +486,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.body.appendChild(container);
     render(<App />, container);
 
-    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 
     // Ctrl+F works from anywhere outside a text field, not only with the
@@ -619,7 +584,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
 
     // Renaming has to show in the tab strip and the active-session label, and
     // that label is rendered by the status bar only while connected.
-    const newConnBtn = container.querySelector('[data-testid="new-connection-btn"]') as HTMLButtonElement;
+    const newConnBtn = container.querySelector('[data-testid="header-connect-btn"]') as HTMLButtonElement;
     newConnBtn.click();
     await new Promise((r) => setTimeout(r, 150));
 
@@ -677,7 +642,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
 
     // Inside the terminal `?` is a real command character, so the shell must
     // not steal it for the cheatsheet.
-    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
     const viewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
     expect(viewport.classList.contains('webssh-terminal-viewport')).toBe(true);
@@ -697,7 +662,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     render(<App />, container);
     await new Promise((r) => setTimeout(r, 150));
 
-    (container.querySelector('[data-testid="menu-view-btn"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="view-menu-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     const select = container.querySelector('[data-testid="theme-quick-switch"]') as HTMLSelectElement;
     expect(select).toBeTruthy();

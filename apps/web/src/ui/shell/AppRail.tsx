@@ -9,78 +9,81 @@ export interface AppRailProps {
   setActiveScreen: Setter<ScreenId>;
   workspacePreset: WorkspacePreset;
   applyPreset: (preset: WorkspacePreset) => void;
-  /** IDE mode adds the Workspace tools group. */
-  ideMode: boolean;
-  setIdeMode: Setter<boolean>;
   railWidth: number;
   setRailWidth: Setter<number>;
-  /** A right-hand rail drags the other way. */
   layoutPreset: LayoutPreset;
-  /** The resizer persists the width when a drag or arrow-key step ends. */
   prefsStore: PreferencesStore;
+  isRailOpen: boolean;
 }
 
-/** Workspace navigation rail and its resize handle. */
+/** Screens that belong under the "Server tools" destination. */
+const SERVER_TOOL_SCREENS: readonly ScreenId[] = [
+  'overview',
+  'software',
+  'containers',
+  'kubernetes',
+  'automations',
+  'deployments',
+  'activity',
+  'tunnels'
+];
+
+/**
+ * Workspace navigation rail.
+ *
+ * Groups:
+ *   Global:        Welcome, Hosts, Settings
+ *   Connection:    Terminal, Files, Editor, Server tools
+ *
+ * Server tools (containers, Kubernetes, software, automations, deployments,
+ * activity) are revealed through the "Server tools" entry so the initial
+ * navigation stays short. IDE mode is no longer a gate for basic navigation.
+ */
 export function AppRail({
   activeScreen,
   setActiveScreen,
   workspacePreset,
   applyPreset,
-  ideMode,
-  setIdeMode,
   railWidth,
   setRailWidth,
   layoutPreset,
-  prefsStore
+  prefsStore,
+  isRailOpen
 }: AppRailProps): JSX.Element {
+  const showServerTools = SERVER_TOOL_SCREENS.includes(activeScreen as ScreenId) || activeScreen === 'server-tools';
+
   return (
     <>
-      <nav
-        className="webssh-rail"
-        aria-label="Workspace navigation"
-        style={{ width: `${railWidth}px` }}
-      >
+      <nav className="webssh-rail" aria-label="Workspace navigation" style={{ width: `${railWidth}px`, transform: isRailOpen ? 'translateX(0)' : 'translateX(-100%)' }}>
         <div className="webssh-rail-scroll">
-          <Button
-            variant="ghost"
-            className={activeScreen === 'welcome' ? 'webssh-rail-home webssh-rail-home--active' : 'webssh-rail-home'}
-            onClick={() => setActiveScreen('welcome')}
-            testId="nav-welcome"
-          >
-            <Icon name="home" /> Home
-          </Button>
-          <div className="webssh-rail-presets-group">
-            <span className="webssh-rail-group-title">Workspace</span>
-            <div className="webssh-rail-presets" role="group" aria-label="Workspace preset">
-              {(['terminal', 'develop', 'operate'] as const).map((preset) => (
-                <Button
-                  key={preset}
-                  variant={workspacePreset === preset ? 'default' : 'ghost'}
-                  ariaPressed={workspacePreset === preset}
-                  onClick={() => applyPreset(preset)}
-                  testId={`preset-${preset}`}
-                >
-                  {preset[0]!.toUpperCase() + preset.slice(1)}
-                </Button>
-              ))}
-            </div>
+          {/* Global */}
+          <div className="webssh-rail-group" role="group" aria-label="Global">
+            <span className="webssh-rail-group-title">Global</span>
+            <Button
+              variant={activeScreen === 'welcome' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('welcome')}
+              testId="nav-welcome"
+            >
+              <Icon name="home" /> Welcome
+            </Button>
+            <Button
+              variant={activeScreen === 'hosts' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('hosts')}
+              testId="nav-hosts"
+            >
+              <Icon name="server" /> Hosts
+            </Button>
           </div>
 
-          <div className="webssh-rail-group" role="group" aria-label="Sessions">
-            <span className="webssh-rail-group-title">Sessions</span>
+          {/* Connection */}
+          <div className="webssh-rail-group" role="group" aria-label="Connection">
+            <span className="webssh-rail-group-title">Connection</span>
             <Button
               variant={activeScreen === 'workspace' ? 'primary' : 'ghost'}
               onClick={() => setActiveScreen('workspace')}
-              testId="nav-workspace"
+              testId="nav-terminal"
             >
               <Icon name="terminal" /> Terminal
-            </Button>
-            <Button
-              variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('overview')}
-              testId="nav-overview"
-            >
-              <Icon name="server" /> Servers
             </Button>
             <Button
               variant={activeScreen === 'files' ? 'primary' : 'ghost'}
@@ -90,126 +93,105 @@ export function AppRail({
               <Icon name="folder" /> Files
             </Button>
             <Button
-              variant={activeScreen === 'activity' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('activity')}
-              testId="nav-activity"
+              variant={activeScreen === 'editor' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('editor')}
+              testId="nav-editor"
             >
-              Activity
+              <Icon name="file" /> Editor
+            </Button>
+            <Button
+              variant={activeScreen === 'server-tools' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('server-tools')}
+              testId="nav-server-tools"
+            >
+              <Icon name="settings" /> Server tools
             </Button>
           </div>
 
-          <div className="webssh-rail-group" role="group" aria-label="Operations">
-            <span className="webssh-rail-group-title">Operations</span>
-            <Button
-              variant={activeScreen === 'software' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('software')}
-              testId="nav-software"
-            >
-              Software
-            </Button>
-            <Button
-              variant={activeScreen === 'containers' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('containers')}
-              testId="nav-containers"
-            >
-              Containers
-            </Button>
-            <Button
-              variant={activeScreen === 'kubernetes' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('kubernetes')}
-              testId="nav-kubernetes"
-            >
-              Kubernetes
-            </Button>
-            <Button
-              variant={activeScreen === 'automations' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('automations')}
-              testId="nav-automations"
-            >
-              Automations
-            </Button>
-            <Button
-              variant={activeScreen === 'deployments' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('deployments')}
-              testId="nav-deployments"
-            >
-              Deployments
-            </Button>
-          </div>
-
-          {ideMode ? (
-            <div className="webssh-rail-group" role="group" aria-label="Workspace tools" data-testid="sidebar-nav">
-              <span className="webssh-rail-group-title">Workspace tools</span>
+          {/* Server tools (expanded when any server tool screen is active) */}
+          {showServerTools ? (
+            <div className="webssh-rail-group" role="group" aria-label="Server tools">
+              <span className="webssh-rail-group-title">Server tools</span>
               <Button
-                variant={activeScreen === 'features' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('features')}
-                testId="nav-features"
+                variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('overview')}
+                testId="nav-overview"
               >
-                Features
+                <Icon name="server" /> Overview
+              </Button>
+              <Button
+                variant={activeScreen === 'software' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('software')}
+                testId="nav-software"
+              >
+                Software
+              </Button>
+              <Button
+                variant={activeScreen === 'containers' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('containers')}
+                testId="nav-containers"
+              >
+                <Icon name="server" /> Containers
+              </Button>
+              <Button
+                variant={activeScreen === 'kubernetes' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('kubernetes')}
+                testId="nav-kubernetes"
+              >
+                <Icon name="server" /> Kubernetes
+              </Button>
+              <Button
+                variant={activeScreen === 'automations' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('automations')}
+                testId="nav-automations"
+              >
+                Automations
+              </Button>
+              <Button
+                variant={activeScreen === 'deployments' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('deployments')}
+                testId="nav-deployments"
+              >
+                Deployments
+              </Button>
+              <Button
+                variant={activeScreen === 'activity' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('activity')}
+                testId="nav-activity"
+              >
+                Activity
               </Button>
               <Button
                 variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}
                 onClick={() => setActiveScreen('tunnels')}
                 testId="nav-tunnels"
               >
-                Port Tunnels
-              </Button>
-              <Button
-                variant={activeScreen === 'vault' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('vault')}
-                testId="nav-vault"
-              >
-                <Icon name="key" /> Key Vault
-              </Button>
-              <Button
-                variant={activeScreen === 'hosts' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('hosts')}
-                testId="nav-hosts"
-              >
-                <Icon name="server" /> Hosts
-              </Button>
-              <Button
-                variant={activeScreen === 'editor' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('editor')}
-                testId="nav-editor"
-              >
-                Editor
-              </Button>
-              <Button
-                variant={activeScreen === 'ide' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('ide')}
-                testId="nav-ide"
-              >
-                Workspace IDE
-              </Button>
-              <Button
-                variant={activeScreen === 'snippets' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('snippets')}
-                testId="nav-snippets"
-              >
-                Snippets &amp; Replay
+                <Icon name="command" /> Tunnels
               </Button>
             </div>
           ) : null}
+
+          {/* Vault + snippets (security/productivity, always available) */}
+          <div className="webssh-rail-group" role="group" aria-label="Security & productivity">
+            <span className="webssh-rail-group-title">Security & productivity</span>
+            <Button
+              variant={activeScreen === 'vault' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('vault')}
+              testId="nav-vault"
+            >
+              <Icon name="key" /> Key Vault
+            </Button>
+            <Button
+              variant={activeScreen === 'snippets' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('snippets')}
+              testId="nav-snippets"
+            >
+              Snippets & Replay
+            </Button>
+          </div>
         </div>
 
         <div className="webssh-rail-footer">
-          <Button
-            variant={ideMode ? 'primary' : 'default'}
-            ariaPressed={ideMode}
-            onClick={() => {
-              setIdeMode((prev) => {
-                const next = !prev;
-                if (next && activeScreen === 'welcome') {
-                  setActiveScreen('features');
-                }
-                return next;
-              });
-            }}
-            testId="enable-ide-mode-btn"
-          >
-            {ideMode ? 'IDE mode on' : 'Open IDE'}
-          </Button>
           <Button
             variant={activeScreen === 'settings' ? 'primary' : 'ghost'}
             onClick={() => setActiveScreen('settings')}
@@ -219,6 +201,7 @@ export function AppRail({
           </Button>
         </div>
       </nav>
+
       <div
         className="webssh-rail-resizer"
         role="separator"

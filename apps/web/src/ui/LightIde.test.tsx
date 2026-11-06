@@ -316,6 +316,9 @@ describe('LightIde', () => {
     render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
     await settle();
 
+    input(el, 'ide-bottom-tab-search').click();
+    await settle();
+
     const query = input(el, 'ide-search-query') as HTMLInputElement;
     query.value = 'needle';
     query.dispatchEvent(new Event('input', { bubbles: true }));
@@ -427,6 +430,9 @@ describe('LightIde', () => {
     render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
     await settle();
     input(el, 'ide-entry-app.ts').click();
+    await settle();
+
+    input(el, 'ide-bottom-tab-search').click();
     await settle();
 
     const query = input(el, 'ide-search-query') as HTMLInputElement;

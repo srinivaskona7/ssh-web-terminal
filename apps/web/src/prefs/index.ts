@@ -72,6 +72,8 @@ export interface HostPreferenceOverride {
   layoutPreset?: LayoutPreset;
 }
 
+export type Density = 'comfortable' | 'compact';
+
 export interface UserPreferencesV2 {
   schemaVersion: 2;
   activeThemeId: ThemeId | string;
@@ -82,6 +84,8 @@ export interface UserPreferencesV2 {
   railWidthPx: number;
   /** Named workspace preset: terminal-first, develop, or operate. */
   workspacePreset: WorkspacePreset;
+  /** Control density: comfortable (default) or compact. */
+  density: Density;
   surface: SurfacePreferences;
   storageLimits: StorageLimitPreferences;
   perHostOverrides: Record<string, HostPreferenceOverride>;
@@ -112,6 +116,7 @@ export function createDefaultPreferences(): UserPreferencesV2 {
     layoutPreset: 'sidebar-left',
     railWidthPx: 168,
     workspacePreset: 'terminal',
+    density: 'comfortable',
     surface: {
       cursorShape: 'block',
       cursorBlink: true,
@@ -270,6 +275,10 @@ export function migratePreferences(raw: unknown): UserPreferencesV2 {
     };
     if (!VALID_WORKSPACE_PRESETS.includes(merged.workspacePreset)) {
       merged.workspacePreset = defaults.workspacePreset;
+    }
+    const rawDensity = typeof merged.density === 'string' ? merged.density : '';
+    if (rawDensity !== 'comfortable' && rawDensity !== 'compact') {
+      merged.density = defaults.density;
     }
     merged.railWidthPx = Math.min(
       360,

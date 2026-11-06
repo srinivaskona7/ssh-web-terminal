@@ -60,6 +60,18 @@
   --studio-logo-orange: #FFB86C;
   --studio-logo-coral: #FF6E67;
   --studio-logo-pink: #FF79C6;
+  --density-comfortable-control-height: 36px;
+  --density-comfortable-control-padding: var(--space-2) var(--space-3);
+  --density-comfortable-font-size: var(--font-size-md);
+  --density-comfortable-gap: var(--space-2);
+  --density-compact-control-height: 28px;
+  --density-compact-control-padding: var(--space-1) var(--space-2);
+  --density-compact-font-size: var(--font-size-sm);
+  --density-compact-gap: var(--space-1);
+  --surface-app: var(--color-bg-canvas);
+  --surface-nav: var(--color-bg-surface);
+  --surface-workspace: var(--color-bg-elevated);
+  --surface-workspace-border: var(--color-border-subtle);
   --color-bg-canvas: #0b0d12;
   --color-bg-surface: #11151d;
   --color-bg-elevated: #171c26;

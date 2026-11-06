@@ -46,7 +46,7 @@ export function describeReconnectAttempt(attempt: number, max = MAX_RECONNECT_AT
 
 export interface ConnectionDetails {
   transportMode: 'go-gateway' | 'cloudflare-relay';
-  state: 'connected' | 'reconnecting' | 'disconnected' | 'offline';
+  state: 'connected' | 'reconnecting' | 'disconnected' | 'offline' | 'connecting' | 'failed';
   target: string;
   rttMs: number;
   uptimeMs: number | null;

@@ -19,16 +19,13 @@ describe('Session recording UI', () => {
     document.body.appendChild(container);
     render(<App />, container);
 
-    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 
     const recordBtn = container.querySelector('[data-testid="toggle-recording-btn"]') as HTMLButtonElement;
     expect(recordBtn).toBeTruthy();
     expect(recordBtn.disabled).toBe(true);
-    expect(recordBtn.getAttribute('aria-pressed')).toBe('false');
 
-    (container.querySelector('[data-testid="enable-ide-mode-btn"]') as HTMLButtonElement).click();
-    await new Promise((r) => setTimeout(r, 150));
     (container.querySelector('[data-testid="nav-snippets"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 

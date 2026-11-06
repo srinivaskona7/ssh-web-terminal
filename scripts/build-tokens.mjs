@@ -66,6 +66,18 @@ if (pkgTokens.studio) {
     rootLines.push(`  --studio-${camelToKebab(key)}: ${val};`);
   }
 }
+if (pkgTokens.density) {
+  for (const [densityName, densityVals] of Object.entries(pkgTokens.density)) {
+    for (const [key, val] of Object.entries(densityVals)) {
+      rootLines.push(`  --density-${densityName}-${camelToKebab(key)}: ${val};`);
+    }
+  }
+}
+if (pkgTokens.surface) {
+  for (const [key, val] of Object.entries(pkgTokens.surface)) {
+    rootLines.push(`  --surface-${camelToKebab(key)}: ${val};`);
+  }
+}
 
 rootLines.push(renderThemeVars(pkgTokens.themes.dark));
 rootLines.push('}');

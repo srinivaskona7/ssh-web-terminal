@@ -117,14 +117,17 @@ export type ScreenId =
   | 'kubernetes'
   | 'automations'
   | 'deployments'
-  | 'activity';
+  | 'activity'
+  | 'server-tools';
 
 export type ConnectionState =
   | 'disconnected'
+  | 'connecting'
   | 'connected'
   | 'reconnecting'
   | 'offline'
-  | 'resumed';
+  | 'resumed'
+  | 'failed';
 
 export type AuthMethod = 'Password' | 'Private Key (.pem / id_rsa)' | 'Argon2id Ed25519 Key';
 
@@ -274,7 +277,13 @@ export function App(): JSX.Element {
     [recordedCastText]
   );
   const [termSearchOpen, setTermSearchOpen] = useState(false);
-  const [termSearchQuery, setTermSearchQuery] = useState('');
+  const [termSearchQuery, setTermSearchQuery] = useState<string>(() => {
+    try {
+      return localStorage?.getItem('webssh.termSearch.lastQuery') ?? '';
+    } catch {
+      return '';
+    }
+  });
   const [termSearchStatus, setTermSearchStatus] = useState('');
 
   /** Search the active pane's scrollback through xterm's search addon. */
@@ -327,11 +336,16 @@ export function App(): JSX.Element {
     const stored = prefsStore.get().activeThemeId;
     return (THEME_IDS as readonly string[]).includes(stored) ? (stored as ThemeId) : 'dark';
   });
+  const [density, setDensity] = useState<'comfortable' | 'compact'>(() => {
+    const stored = prefsStore.get().density;
+    return stored === 'compact' ? 'compact' : 'comfortable';
+  });
   const [layoutPreset, setLayoutPreset] = useState<LayoutPreset>(() => prefsStore.get().layoutPreset);
   const [workspacePreset, setWorkspacePreset] = useState<WorkspacePreset>(
     () => prefsStore.get().workspacePreset
   );
   const [railWidth, setRailWidth] = useState<number>(() => prefsStore.get().railWidthPx);
+  const [railOpen, setRailOpen] = useState<boolean>(false);
   const [cursorShape, setCursorShape] = useState<CursorShape>(() => prefsStore.get().surface.cursorShape);
   const [zenMode, setZenMode] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -346,6 +360,7 @@ export function App(): JSX.Element {
   const [reconnectCount, setReconnectCount] = useState(0);
   const [reconnectNotice, setReconnectNotice] = useState<string | null>(null);
   const [reconnectMessage, setReconnectMessage] = useState<string | null>(null);
+  const [reconnectCountdown, setReconnectCountdown] = useState<number | null>(null);
   const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
   // Jump hops belong to the saved host they came from. They are only sent when
   // the form still targets that host, so editing the host cannot silently
@@ -369,8 +384,27 @@ export function App(): JSX.Element {
   }, [connectionState, connectedAt]);
 
   useEffect(() => () => clearReconnectTimer(), []);
+
+  useEffect(() => {
+    try {
+      localStorage?.setItem('webssh.termSearch.lastQuery', termSearchQuery);
+    } catch {
+      // Storage unavailable — search query won't persist across reloads.
+    }
+  }, [termSearchQuery]);
   const [sessionTabLabel, setSessionTabLabel] = useState<string>('Terminal 1');
   const [connectedUser, setConnectedUser] = useState<string>('');
+  const [environmentLabel, setEnvironmentLabel] = useState<string>('');
+
+  /** Derive an environment label from the host name for quick context. */
+  function deriveEnvironmentLabel(host: string): string {
+    const lower = host.toLowerCase();
+    if (lower.includes('prod') || lower.includes('production')) return 'Production';
+    if (lower.includes('stag') || lower.includes('staging')) return 'Staging';
+    if (lower.includes('dev') || lower.includes('development') || lower === 'localhost' || lower === '127.0.0.1') return 'Development';
+    if (lower.includes('test') || lower.includes('testing')) return 'Test';
+    return '';
+  }
 
   const startRecording = (): void => {
     // Only a live session has bytes worth recording; starting on a
@@ -1376,6 +1410,7 @@ export function App(): JSX.Element {
     );
     setSessionTabLabel('Terminal 1');
     setTerminalLines([]);
+    setEnvironmentLabel('');
   };
 
   const handlePrivateKeyFileUpload = async (e: Event): Promise<void> => {
@@ -1408,6 +1443,7 @@ export function App(): JSX.Element {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+    setReconnectCountdown(null);
   };
 
   const transportOf = (connectionId: string): 'go-gateway' | 'cloudflare-relay' =>
@@ -1434,12 +1470,29 @@ export function App(): JSX.Element {
     reconnectAttemptRef.current = attempt;
     setConnectionState('reconnecting');
     setReconnectNotice(describeReconnectAttempt(attempt));
+    
+    // Start countdown for user-visible reconnect ETA
+    const delayMs = immediate ? 0 : reconnectDelayMs(attempt);
+    let secondsLeft = Math.ceil(delayMs / 1000);
+    setReconnectCountdown(secondsLeft > 0 ? secondsLeft : null);
+    const countdownInterval = setInterval(() => {
+      setReconnectCountdown((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(countdownInterval);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    
     reconnectTimerRef.current = setTimeout(
       () => {
         reconnectTimerRef.current = null;
+        clearInterval(countdownInterval);
+        setReconnectCountdown(null);
         void performReconnect(client, connectionId);
       },
-      immediate ? 0 : reconnectDelayMs(attempt)
+      delayMs
     );
   };
 
@@ -1549,6 +1602,7 @@ export function App(): JSX.Element {
     }
 
     setConnectErrorMsg('');
+    setConnectionState('connecting');
     const hostVal = connectHost.trim() || '127.0.0.1';
     const userVal = connectUser.trim() || 'ubuntu';
     const portVal = connectPort.trim() || '22';
@@ -1830,6 +1884,7 @@ export function App(): JSX.Element {
         setHosts(hostRegistry.list());
         setConnectedUser(userVal);
         setConnectedHost(hostVal);
+        setEnvironmentLabel(deriveEnvironmentLabel(hostVal));
         setSessionTabLabel(tabTitle);
         setNegotiatedCipher(meta.cipher || '');
         setNegotiatedServerVersion(meta.serverVersion || '');
@@ -1923,7 +1978,7 @@ export function App(): JSX.Element {
         }
       } catch (err) {
         liveSessionRef.current = null;
-        setConnectionState('disconnected');
+        setConnectionState('failed');
         setTabs((prev) => prev.map((t) => ({ ...t, connected: false })));
         const errMsg = err instanceof Error ? err.message : String(err);
         setConnectErrorMsg(errMsg);
@@ -2297,6 +2352,10 @@ export function App(): JSX.Element {
     prefsStore.update({ activeThemeId: activeTheme });
   }, [activeTheme, prefsStore]);
 
+  useEffect(() => {
+    prefsStore.update({ density });
+  }, [density, prefsStore]);
+
   const enterImmersiveFullscreen = async (): Promise<void> => {
     const el = rootRef.current;
     if (el && typeof el.requestFullscreen === 'function') {
@@ -2364,6 +2423,12 @@ export function App(): JSX.Element {
           e.preventDefault();
           openTerminalSearch();
         }
+      } else if ((e.metaKey || e.ctrlKey) && e.key === '=') {
+        e.preventDefault();
+        setFontSize((s) => Math.min(32, s + 1));
+      } else if ((e.metaKey || e.ctrlKey) && e.key === '-') {
+        e.preventDefault();
+        setFontSize((s) => Math.max(11, s - 1));
       } else if (e.key === 'F11' || ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'f')) {
         e.preventDefault();
         toggleFullscreen();
@@ -2599,7 +2664,7 @@ export function App(): JSX.Element {
     <div
       ref={rootRef}
       data-testid="workspace-root"
-      className={`webssh-app ${isPseudoFullscreen ? 'webssh-app--pseudo-fullscreen' : ''}`.trim()}
+      className={`webssh-app webssh-density-${density} ${isPseudoFullscreen ? 'webssh-app--pseudo-fullscreen' : ''}`.trim()}
       onKeyDown={(e) => {
         if (e.key === 'Escape' && zenMode) {
           e.preventDefault();
@@ -2647,7 +2712,6 @@ export function App(): JSX.Element {
           setActiveScreen={setActiveScreen}
           openMenu={openMenu}
           setOpenMenu={setOpenMenu}
-          authorizedKeysSnippet={authorizedKeysSnippet}
           view={{
             zenMode,
             setZenMode,
@@ -2655,7 +2719,12 @@ export function App(): JSX.Element {
             toggleFullscreen,
             activeTheme,
             setActiveTheme,
-            setFontSize
+            density,
+            setDensity,
+            fontSize,
+            setFontSize,
+            isRailOpen: railOpen,
+            toggleRail: () => setRailOpen((o) => !o)
           }}
           sessionTabs={{
             tabs,
@@ -2670,6 +2739,10 @@ export function App(): JSX.Element {
           }}
           connection={{
             connectionState,
+            connectedUser,
+            connectedHost,
+            environmentLabel,
+            rttMs,
             handleDisconnect,
             setPendingJump,
             setConnectModalOpen,
@@ -2677,19 +2750,12 @@ export function App(): JSX.Element {
             connectionRegistryRef
           }}
           terminal={{
-            terminalLines,
-            setTerminalLines,
-            copyToClipboard,
-            updateCurrentInput,
             splitPanes,
             setSplitPanes,
             broadcastInput,
-            setBroadcastInput,
-            showCommandInspector,
-            setShowCommandInspector
+            setBroadcastInput
           }}
           recorder={{ recording, startRecording, stopRecording, setReconnectNotice }}
-          ide={{ ideMode, setIdeMode, redactionMode, setRedactionMode }}
         />
       ) : null}
 
@@ -2725,12 +2791,11 @@ export function App(): JSX.Element {
             setActiveScreen={setActiveScreen}
             workspacePreset={workspacePreset}
             applyPreset={applyPreset}
-            ideMode={ideMode}
-            setIdeMode={setIdeMode}
             railWidth={railWidth}
             setRailWidth={setRailWidth}
             layoutPreset={layoutPreset}
             prefsStore={prefsStore}
+            isRailOpen={railOpen}
           />
         ) : null}
 
@@ -2976,6 +3041,37 @@ export function App(): JSX.Element {
             </div>
           ) : null}
 
+          {activeScreen === 'workspace' && connectionState === 'disconnected' && (
+            <div className="webssh-empty-state" data-testid="empty-disconnected-state">
+              <div className="webssh-empty-state-icon">◐</div>
+              <h2 className="webssh-empty-state-title">No active connection</h2>
+              <p className="webssh-empty-state-description">
+                Connect to an SSH server to open a terminal, browse files, and use the editor.
+              </p>
+              <div className="webssh-empty-state-actions">
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    setPendingJump(null);
+                    setConnectModalOpen(true);
+                  }}
+                  testId="empty-state-connect-btn"
+                >
+                  Connect to a server
+                </Button>
+                {recentHosts.length > 0 ? (
+                  <Button
+                    variant="default"
+                    onClick={() => setActiveScreen('welcome')}
+                    testId="empty-state-welcome-btn"
+                  >
+                    Open Welcome screen
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          )}
+
           {activeScreen === 'ide' ? (
             <Suspense fallback={<p className="ws-mod-muted">Loading workspace IDE…</p>}>
               <LightIde
@@ -3201,6 +3297,70 @@ export function App(): JSX.Element {
                 </p>
                 <pre data-testid="tunnel-preview-output">{tunnelPreviewOutput}</pre>
               </Card>
+            </div>
+          ) : null}
+
+          {activeScreen === 'server-tools' ? (
+            <div className="webssh-panel-content" data-testid="screen-server-tools">
+              <h1>Server tools</h1>
+              <p className="ws-mod-muted">
+                Containers, Kubernetes, services, and automation for the active connection.
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
+                <Card>
+                  <h3>Overview</h3>
+                  <p className="ws-mod-muted">Live CPU, memory, disk, uptime, processes, and services.</p>
+                  <Button variant="default" onClick={() => setActiveScreen('overview')} testId="server-tools-overview">
+                    Open Overview
+                  </Button>
+                </Card>
+                <Card>
+                  <h3>Software</h3>
+                  <p className="ws-mod-muted">Installed packages and software inventory.</p>
+                  <Button variant="default" onClick={() => setActiveScreen('software')} testId="server-tools-software">
+                    Open Software
+                  </Button>
+                </Card>
+                <Card>
+                  <h3>Containers</h3>
+                  <p className="ws-mod-muted">Docker container management.</p>
+                  <Button variant="default" onClick={() => setActiveScreen('containers')} testId="server-tools-containers">
+                    Open Containers
+                  </Button>
+                </Card>
+                <Card>
+                  <h3>Kubernetes</h3>
+                  <p className="ws-mod-muted">kubectl cluster inspection.</p>
+                  <Button variant="default" onClick={() => setActiveScreen('kubernetes')} testId="server-tools-kubernetes">
+                    Open Kubernetes
+                  </Button>
+                </Card>
+                <Card>
+                  <h3>Automations</h3>
+                  <p className="ws-mod-muted">Python automation templates and job runner.</p>
+                  <Button variant="default" onClick={() => setActiveScreen('automations')} testId="server-tools-automations">
+                    Open Automations
+                  </Button>
+                </Card>
+                <Card>
+                  <h3>Deployments</h3>
+                  <p className="ws-mod-muted">Git plan, preview, and deploy workflows.</p>
+                  <Button variant="default" onClick={() => setActiveScreen('deployments')} testId="server-tools-deployments">
+                    Open Deployments
+                  </Button>
+                </Card>
+                <Card>
+                  <h3>Activity</h3>
+                  <p className="ws-mod-muted">Session history and job states.</p>
+                  <Button variant="default" onClick={() => setActiveScreen('activity')} testId="server-tools-activity">
+                    Open Activity
+                  </Button>
+                </Card>
+              </div>
+              <p className="ws-mod-muted" style={{ marginTop: 'var(--space-4)' }}>
+                Some tools require the Go SSH/SFTP Gateway mode and may report &ldquo;not reported&rdquo;
+                when a capability probe has not yet run.
+              </p>
             </div>
           ) : null}
 
@@ -4071,22 +4231,45 @@ export function App(): JSX.Element {
         </main>
       </div>
 
-      {reconnectNotice || reconnectMessage ? (
+      {connectionState === 'connecting' || connectionState === 'reconnecting' || reconnectMessage ? (
         <div
-          className={`webssh-conn-banner${connectionState === 'connected' ? ' webssh-conn-banner--info' : ''}`}
+          className={`webssh-connection-state-banner ${
+            connectionState === 'failed' || (reconnectMessage && !reconnectNotice)
+              ? 'webssh-connection-state-banner--failed'
+              : ''
+          }`}
           role="status"
-          data-testid="reconnect-banner"
+          data-testid="connection-state-banner"
         >
-          <span className="webssh-conn-banner-text">{reconnectNotice ?? reconnectMessage}</span>
-          {connectionState === 'connected' ? (
-            <Button variant="ghost" onClick={() => setReconnectMessage(null)} testId="dismiss-reconnect-btn">
+          <div className="webssh-connection-state-banner__label">
+            <span className={`webssh-status-dot ${statusDotClass}`} aria-hidden="true" />
+            <span>
+              {connectionState === 'reconnecting'
+                ? `Reconnecting${reconnectNotice ? ` (attempt ${reconnectCount})` : ''}${reconnectCountdown !== null ? ` — ${reconnectCountdown}s` : ''}…`
+                : connectionState === 'connecting'
+                  ? 'Connecting…'
+                  : 'Connection failed'}
+            </span>
+            {connectedHost ? (
+              <span className="webssh-connection-state-banner__detail">
+                {connectedUser}@{connectedHost}
+              </span>
+            ) : null}
+          </div>
+          <div className="webssh-connection-state-banner__actions">
+            {connectionState === 'reconnecting' || connectionState === 'connecting' ? (
+              <Button variant="default" onClick={handleReconnectNow} testId="reconnect-now-btn">
+                Cancel
+              </Button>
+            ) : (
+              <Button variant="default" onClick={handleReconnectNow} testId="reconnect-now-btn">
+                Reconnect now
+              </Button>
+            )}
+            <Button variant="ghost" onClick={() => setReconnectMessage(null)} testId="dismiss-banner-btn">
               Dismiss
             </Button>
-          ) : (
-            <Button variant="default" onClick={handleReconnectNow} testId="reconnect-now-btn">
-              Reconnect now
-            </Button>
-          )}
+          </div>
         </div>
       ) : null}
 
@@ -4159,6 +4342,22 @@ export function App(): JSX.Element {
                       <dd className={`webssh-conn-tone--${row.tone}`}>{row.value}</dd>
                     </div>
                   ))}
+                  {connectionState === 'connected' && (
+                    <>
+                      <div className="webssh-conn-row">
+                        <dt>Transport</dt>
+                        <dd>{transportMode === 'go-gateway' ? 'Go Gateway (SSH+SFTP)' : 'Cloudflare Relay (TCP only)'}</dd>
+                      </div>
+                      <div className="webssh-conn-row">
+                        <dt>Environment</dt>
+                        <dd>{environmentLabel || '—'}</dd>
+                      </div>
+                      <div className="webssh-conn-row">
+                        <dt>Open tabs</dt>
+                        <dd>{tabs.filter((t) => t.connected).length}</dd>
+                      </div>
+                    </>
+                  )}
                 </dl>
               </div>
             ) : null}
@@ -4518,15 +4717,31 @@ export function App(): JSX.Element {
           <dt>
             <kbd>?</kbd>
           </dt>
-          <dd>Show this list (not while typing in a text field).</dd>
+          <dd>Show this shortcuts list (not while typing in a text field).</dd>
           <dt>
             <kbd>F11</kbd>
           </dt>
-          <dd>Toggle full-screen terminal.</dd>
+          <dd>Toggle immersive full-screen terminal.</dd>
           <dt>
             <kbd>Esc</kbd>
           </dt>
-          <dd>Leave Zen mode or full screen.</dd>
+          <dd>Leave Zen mode, full screen, or close an open dialog.</dd>
+          <dt>
+            <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>S</kbd>
+          </dt>
+          <dd>Save the active editor file (in the editor screen).</dd>
+          <dt>
+            <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>S</kbd>
+          </dt>
+          <dd>Save all open editor files.</dd>
+          <dt>
+            <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>T</kbd>
+          </dt>
+          <dd>Open a new terminal tab.</dd>
+          <dt>
+            <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>D</kbd>
+          </dt>
+          <dd>Split the terminal into panes.</dd>
           <dt>Double-click</dt>
           <dd>Rename a session tab.</dd>
         </dl>
