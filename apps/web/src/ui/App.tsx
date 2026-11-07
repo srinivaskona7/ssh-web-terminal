@@ -94,6 +94,7 @@ import {
   describeReconnectAttempt,
   formatRtt,
   formatUptime,
+  formatAgo,
   reconnectDelayMs,
   reconnectOutcomeMessage
 } from './session-health';
@@ -362,12 +363,23 @@ export function App(): JSX.Element {
   const [reconnectMessage, setReconnectMessage] = useState<string | null>(null);
   const [reconnectCountdown, setReconnectCountdown] = useState<number | null>(null);
   const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
+  /** True only when a live session is established; false for disconnected/reconnecting/failed/offline. */
+  const connected = connectionState === 'connected';
+  /** Last time the SFTP directory was successfully listed; used for stale-content badges. */
+  const [sftpLastUpdated, setSftpLastUpdated] = useState<number | null>(null);
+  /** Last time capabilities were successfully discovered; used for stale/unknown badges. */
+  const [capabilitiesLastUpdated, setCapabilitiesLastUpdated] = useState<number | null>(null);
   // Jump hops belong to the saved host they came from. They are only sent when
   // the form still targets that host, so editing the host cannot silently
   // route a new connection through an unrelated bastion.
   const [pendingJump, setPendingJump] = useState<PendingJump | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
+  /** Per-connection resource metrics: cpu percent, ram percent, disk percent, last updated. */
+  const [resourceMetrics, setResourceMetrics] = useState<Map<string, { cpu: number; ram: number; disk: number; updatedAt: number }>>(new Map());
+  const resourcePollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resourceCollectingRef = useRef<Set<string>>(new Set());
+  const documentVisibilityRef = useRef<boolean>(!document.hidden);
   // Connections the user closed explicitly must never be resurrected by the
   // auto-reconnect loop; this is per connection, not global.
   const suppressedReconnectRef = useRef<Set<string>>(new Set());
@@ -488,6 +500,7 @@ export function App(): JSX.Element {
       const { runDiscovery } = await import('./ServerModules');
       const result = await runDiscovery(session);
       setCapabilities(result);
+      setCapabilitiesLastUpdated(Date.now());
       return result;
     } catch (err) {
       setDiscoveryError(err instanceof Error ? err.message : String(err));
@@ -535,7 +548,7 @@ export function App(): JSX.Element {
   const [localStatus, setLocalStatus] = useState<string>(
     'No local folder selected. Upload and download still work without one.'
   );
-  const [editorFilePath, setEditorFilePath] = useState<string>('README.md');
+  const [editorFilePath, setEditorFilePath] = useState<string>('');
   const [editorOriginalContent, setEditorOriginalContent] = useState('');
   const [editorContent, setEditorContent] = useState('');
   const [editorSaved, setEditorSaved] = useState(true);
@@ -802,6 +815,7 @@ export function App(): JSX.Element {
       if (res.ok && res.entries) {
         setSftpCurrentPath(targetPath);
         setSftpRawEntries(res.entries);
+        setSftpLastUpdated(Date.now());
         if (!preserveStatus) {
           setTransferStatus(`Listed ${res.entries.length} remote items in ${targetPath}`);
         }
@@ -892,7 +906,10 @@ export function App(): JSX.Element {
       setTransferStatus('Folder name must be a single path segment without control characters.');
       return;
     }
-    if (!activeClient) return;
+    if (!activeClient || !activeClient.isConnected) {
+      setTransferStatus('Create folder not applied: the SSH session is disconnected.');
+      return;
+    }
     await runSftpAction(`Create folder ${newFolderName.trim()}`, () =>
       activeClient.sftpOp({ op: 'mkdir', path: sftpPathFor(newFolderName) })
     );
@@ -905,7 +922,10 @@ export function App(): JSX.Element {
       setTransferStatus('New name must be a single path segment without control characters.');
       return;
     }
-    if (!activeClient) return;
+    if (!activeClient || !activeClient.isConnected) {
+      setTransferStatus('Rename not applied: the SSH session is disconnected.');
+      return;
+    }
     await runSftpAction(`Rename ${renameTarget.path}`, () =>
       activeClient.sftpOp({
         op: 'rename',
@@ -918,7 +938,10 @@ export function App(): JSX.Element {
 
   const deleteEntry = async (): Promise<void> => {
     const activeClient = liveSessionRef.current;
-    if (!deleteTarget || !activeClient) return;
+    if (!deleteTarget || !activeClient || !activeClient.isConnected) {
+      setTransferStatus('Delete not applied: the SSH session is disconnected.');
+      return;
+    }
     await runSftpAction(`Delete ${deleteTarget.path}`, () =>
       activeClient.sftpOp({ op: 'remove', path: deleteTarget.path })
     );
@@ -1585,6 +1608,138 @@ export function App(): JSX.Element {
     clearReconnectTimer();
     scheduleReconnect(client, activeConnectionId, true);
   };
+
+  // ---- Resource metrics (CPU / RAM / Disk) collected via SSH exec ----
+
+  interface CpuSample { total: number; idle: number }
+  const prevCpuRef = useRef<Map<string, CpuSample>>(new Map());
+
+  function parseCpuStat(output: string): CpuSample | null {
+    const match = output.match(/^cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+    if (!match) return null;
+    const user = Number(match[1] ?? '0');
+    const nice = Number(match[2] ?? '0');
+    const system = Number(match[3] ?? '0');
+    const idle = Number(match[4] ?? '0');
+    const iowait = Number(match[5] ?? '0');
+    const irq = Number(match[6] ?? '0');
+    const softirq = Number(match[7] ?? '0');
+    const steal = Number(match[8] ?? '0');
+    const total = user + nice + system + idle + iowait + irq + softirq + steal;
+    return { total, idle };
+  }
+
+  function computeRamPercent(output: string): number {
+    const memTotalMatch = output.match(/MemTotal:\s+(\d+)/);
+    const memAvailableMatch = output.match(/MemAvailable:\s+(\d+)/);
+    if (!memTotalMatch || !memAvailableMatch) return 0;
+    const total = Number(memTotalMatch[1] ?? '0');
+    const available = Number(memAvailableMatch[1] ?? '0');
+    if (total <= 0) return 0;
+    return ((total - available) / total) * 100;
+  }
+
+  function computeDiskPercent(output: string): number {
+    // df -m / output: Filesystem 1M-blocks Used Available Use% Mounted-on
+    const lines = output.trim().split('\n');
+    if (lines.length < 2) return 0;
+    const parts = (lines[1] ?? '').trim().split(/\s+/);
+    const total = Number(parts[1] ?? '0');
+    const used = Number(parts[2] ?? '0');
+    if (total <= 0) return 0;
+    return (used / total) * 100;
+  }
+
+  async function collectResourceMetrics(connectionId: string, client: LiveGatewaySessionClient | BrowserSshRelaySessionClient): Promise<void> {
+    if (resourceCollectingRef.current.has(connectionId)) return;
+    resourceCollectingRef.current.add(connectionId);
+
+    try {
+      // CPU: two samples of /proc/stat for delta calculation
+      const cpu1 = await client.execCommand('head -1 /proc/stat');
+      await new Promise(r => setTimeout(r, 1000));
+      const cpu2 = await client.execCommand('head -1 /proc/stat');
+
+      let cpuPercent = 0;
+      const s1 = parseCpuStat(cpu1.stdout || '');
+      const s2 = parseCpuStat(cpu2.stdout || '');
+      if (s1 && s2) {
+        const totalDelta = s2.total - s1.total;
+        const idleDelta = s2.idle - s1.idle;
+        cpuPercent = totalDelta > 0 ? Math.max(0, (1 - idleDelta / totalDelta) * 100) : 0;
+      }
+      prevCpuRef.current.set(connectionId, s2 ?? { total: 0, idle: 0 });
+
+      // RAM
+      const mem = await client.execCommand('cat /proc/meminfo');
+      const ramPercent = computeRamPercent(mem.stdout || '');
+
+      // Disk
+      const df = await client.execCommand('df -m /');
+      const diskPercent = computeDiskPercent(df.stdout || '');
+
+      setResourceMetrics(prev => {
+        const next = new Map(prev);
+        next.set(connectionId, {
+          cpu: Math.round(cpuPercent),
+          ram: Math.round(ramPercent),
+          disk: Math.round(diskPercent),
+          updatedAt: Date.now()
+        });
+        return next;
+      });
+    } catch {
+      // Metrics are best-effort; silently ignore failures
+    } finally {
+      resourceCollectingRef.current.delete(connectionId);
+    }
+  }
+
+  function startResourcePolling(): void {
+    if (resourcePollingRef.current !== null) return;
+    const activeConnectionId = tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId;
+    const client = liveSessionRef.current;
+    if (!client || !activeConnectionId) return;
+
+    // Collect immediately, then poll
+    void collectResourceMetrics(activeConnectionId, client);
+    resourcePollingRef.current = setInterval(() => {
+      if (!documentVisibilityRef.current) return;
+      const cid = tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId;
+      const c = liveSessionRef.current;
+      if (cid && c) void collectResourceMetrics(cid, c);
+    }, 2000);
+  }
+
+  function stopResourcePolling(): void {
+    if (resourcePollingRef.current !== null) {
+      clearInterval(resourcePollingRef.current);
+      resourcePollingRef.current = null;
+    }
+  }
+
+  // Start/stop polling based on connection state
+  useEffect(() => {
+    if (connected) {
+      startResourcePolling();
+    } else {
+      stopResourcePolling();
+    }
+    return () => stopResourcePolling();
+  }, [connected]);
+
+  // Pause/resume polling on visibility change
+  useEffect(() => {
+    const handler = (): void => {
+      documentVisibilityRef.current = !document.hidden;
+      if (documentVisibilityRef.current && connected) {
+        void startResourcePolling();
+      }
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, []);
+
 
   const handleConnectSubmit = (e?: Event): void => {
     if (e) e.preventDefault();
@@ -2743,6 +2898,7 @@ export function App(): JSX.Element {
             connectedHost,
             environmentLabel,
             rttMs,
+            resourceMetrics,
             handleDisconnect,
             setPendingJump,
             setConnectModalOpen,
@@ -3598,7 +3754,20 @@ export function App(): JSX.Element {
                     <Card key={h.id} testId={`host-card-${h.alias}`}>
                       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                         <strong>{h.alias}</strong>
-                        <Badge tone="success">{h.folder ?? 'Default'}</Badge>
+                        <Badge
+                  tone={
+                    connectedHost === h.host && connectedUser === h.user && connected
+                      ? 'success'
+                      : 'neutral'
+                  }
+                  testId={`host-badge-${h.alias}`}
+                >
+                  {connectedHost === h.host && connectedUser === h.user && connected
+                    ? 'Connected'
+                    : h.lastConnectedAt
+                      ? `Last seen ${formatAgo(h.lastConnectedAt)}`
+                      : 'Never connected'}
+                </Badge>
                       </div>
                       <p>
                         {h.user}@{h.host}:{h.port}
@@ -3658,7 +3827,19 @@ export function App(): JSX.Element {
                   Storage Guard: {quotaSnap.percentUsed}% of 256 MiB cap (256 KiB chunks, SHA-256 verified)
                 </Badge>
               </div>
-              <p data-testid="transfer-status-badge">{transferStatus}</p>
+              <p data-testid="transfer-status-badge">
+                {transferStatus}
+                {!connected && sftpLastUpdated ? (
+                  <span className="ws-mod-muted" style={{ marginLeft: 'var(--space-1)', fontSize: 'var(--font-size-xs)' }}>
+                    (cached {Math.floor((Date.now() - sftpLastUpdated) / 1000)}s ago — stale)
+                  </span>
+                ) : null}
+                {!connected && !sftpLastUpdated ? (
+                  <span className="ws-mod-muted" style={{ marginLeft: 'var(--space-1)', fontSize: 'var(--font-size-xs)' }}>
+                    (no cached data — connect to list files)
+                  </span>
+                ) : null}
+              </p>
               <input
                 type="search"
                 className="ui-input"
@@ -3751,7 +3932,7 @@ export function App(): JSX.Element {
                     value={newFolderName}
                     onInput={(e) => setNewFolderName((e.target as HTMLInputElement).value)}
                   />
-                  <Button variant="default" onClick={() => void createFolder()} testId="sftp-create-folder">
+                  <Button variant="default" onClick={() => void createFolder()} testId="sftp-create-folder" disabled={!connected}>
                     Create folder
                   </Button>
                 </div>
@@ -3784,12 +3965,14 @@ export function App(): JSX.Element {
                       <Button
                         variant="ghost"
                         onClick={() => setRenameTarget({ path: entry.path, name: entry.name })}
+                        disabled={!connected}
                       >
                         Rename
                       </Button>
                       <Button
                         variant="danger"
                         onClick={() => setDeleteTarget({ path: entry.path, name: entry.name })}
+                        disabled={!connected}
                       >
                         Delete
                       </Button>
@@ -3811,7 +3994,7 @@ export function App(): JSX.Element {
                       }
                     />
                     <div className="ws-mod-actions">
-                      <Button variant="primary" onClick={() => void renameEntry()} testId="sftp-confirm-rename">
+                      <Button variant="primary" onClick={() => void renameEntry()} testId="sftp-confirm-rename" disabled={!connected}>
                         Rename
                       </Button>
                       <Button variant="ghost" onClick={() => setRenameTarget(null)}>
@@ -3828,7 +4011,7 @@ export function App(): JSX.Element {
                       nothing is sent to a trash.
                     </p>
                     <div className="ws-mod-actions">
-                      <Button variant="danger" onClick={() => void deleteEntry()} testId="sftp-confirm-delete">
+                      <Button variant="danger" onClick={() => void deleteEntry()} testId="sftp-confirm-delete" disabled={!connected}>
                         Confirm delete
                       </Button>
                       <Button variant="ghost" onClick={() => setDeleteTarget(null)}>
@@ -3980,42 +4163,78 @@ export function App(): JSX.Element {
 
           {activeScreen === 'editor' ? (
             <div className="webssh-panel-content" data-testid="screen-editor">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-                <h1>Remote File Editor — {editorFilePath}</h1>
-                <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
-                  <input
-                    type="text"
-                    className="ui-input"
-                    aria-label="Remote file path"
-                    value={editorFilePath}
-                    onInput={(e) => setEditorFilePath((e.target as HTMLInputElement).value)}
-                    data-testid="editor-filepath-input"
-                    style={{ width: '200px' }}
-                  />
-                  <Button
-                    variant="default"
-                    testId="load-remote-file-btn"
-                    onClick={() => void loadRemoteFileIntoEditor(editorFilePath)}
-                  >
-                    Load from Host
-                  </Button>
-                  <Button
-                    variant="default"
-                    testId="toggle-diff-viewer-btn"
-                    onClick={() => setShowDiffViewer((d) => !d)}
-                  >
-                    {showDiffViewer ? 'Hide Side-by-Side Diff' : 'Compare Side-by-Side Diff'}
-                  </Button>
-                  <Button
-                    variant="primary"
-                    onClick={() => void saveEditorBuffer()}
-                    testId="save-remote-file-btn"
-                  >
-                    Save to host {editorLoadedPath !== editorFilePath ? '(Not loaded)' : editorSaved ? '(Saved)' : '(Unsaved*)'}
-                  </Button>
+              {!editorLoadedPath ? (
+                <div className="webssh-empty-state" style={{ maxWidth: '480px', margin: '0 auto' }}>
+                  <div className="webssh-empty-state-icon">📄</div>
+                  <h2 className="webssh-empty-state-title">No file loaded</h2>
+                  <p className="webssh-empty-state-description">
+                    Open a file from the Files screen or enter a path above to start editing.
+                  </p>
+                  <div className="webssh-empty-state-actions">
+                    <input
+                      type="text"
+                      className="ui-input"
+                      aria-label="Remote file path"
+                      value={editorFilePath}
+                      onInput={(e) => setEditorFilePath((e.target as HTMLInputElement).value)}
+                      data-testid="editor-filepath-input"
+                      style={{ width: '200px', marginRight: 'var(--space-2)' }}
+                    />
+                    <Button
+                      variant="default"
+                      testId="load-remote-file-btn"
+                      onClick={() => void loadRemoteFileIntoEditor(editorFilePath)}
+                      disabled={!connected || !editorFilePath.trim()}
+                    >
+                      Load from Host
+                    </Button>
+                  </div>
+                  {editorError ? (
+                    <p className="ws-mod-error" role="alert" data-testid="editor-error">
+                      {editorError}
+                    </p>
+                  ) : null}
                 </div>
-              </div>
-              {editorError ? (
+              ) : (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
+                    <h1>Remote File Editor — {editorFilePath}</h1>
+                    <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <input
+                        type="text"
+                        className="ui-input"
+                        aria-label="Remote file path"
+                        value={editorFilePath}
+                        onInput={(e) => setEditorFilePath((e.target as HTMLInputElement).value)}
+                        data-testid="editor-filepath-input"
+                        style={{ width: '200px' }}
+                      />
+                      <Button
+                        variant="default"
+                        testId="load-remote-file-btn"
+                        onClick={() => void loadRemoteFileIntoEditor(editorFilePath)}
+                        disabled={!connected}
+                      >
+                        Load from Host
+                      </Button>
+                      <Button
+                        variant="default"
+                        testId="toggle-diff-viewer-btn"
+                        onClick={() => setShowDiffViewer((d) => !d)}
+                      >
+                        {showDiffViewer ? 'Hide Side-by-Side Diff' : 'Compare Side-by-Side Diff'}
+                      </Button>
+                      <Button
+                        variant="primary"
+                        onClick={() => void saveEditorBuffer()}
+                        testId="save-remote-file-btn"
+                        disabled={!editorLoadedPath || editorSaved || !connected}
+                      >
+                        Save to host {editorLoadedPath !== editorFilePath ? '(Not loaded)' : editorSaved ? '(Saved)' : '(Unsaved*)'}
+                      </Button>
+                    </div>
+                  </div>
+                {editorError ? (
                 <p className="ws-mod-error" role="alert" data-testid="editor-error">
                   {editorError}
                 </p>
@@ -4078,7 +4297,7 @@ export function App(): JSX.Element {
                   </div>
                 </Card>
               ) : null}
-            </div>
+            </>)}</div>
           ) : null}
 
           {activeScreen === 'snippets' ? (

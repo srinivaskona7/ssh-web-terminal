@@ -35,6 +35,19 @@ export function formatUptime(elapsedMs: number): string {
   return `${seconds}s`;
 }
 
+/** Human-readable relative time: `2m ago`, `1h ago`, `5d ago`. */
+export function formatAgo(timestampMs: number): string {
+  if (!Number.isFinite(timestampMs)) return 'unknown';
+  const deltaSeconds = Math.floor((Date.now() - timestampMs) / 1000);
+  if (deltaSeconds < 60) return 'just now';
+  const minutes = Math.floor(deltaSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
 /** Backoff before reconnect `attempt` (1-based), capped at 15 s. */
 export function reconnectDelayMs(attempt: number): number {
   return computeBackoffMs(Math.max(1, attempt), 500, 15_000);

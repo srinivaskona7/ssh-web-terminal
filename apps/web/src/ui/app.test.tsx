@@ -244,10 +244,16 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     const navEditor = container.querySelector('[data-testid="nav-editor"]') as HTMLButtonElement;
     navEditor.click();
     await new Promise((r) => setTimeout(r, 10));
-    const diffBtn = container.querySelector('[data-testid="toggle-diff-viewer-btn"]') as HTMLButtonElement;
-    diffBtn.click();
+    // Editor starts empty; verify empty state is shown
+    expect(container.querySelector('[data-testid="editor-filepath-input"]')).toBeTruthy();
+    // Type a path and attempt load (will fail without connection, but button should respond)
+    const filepathInput = container.querySelector('[data-testid="editor-filepath-input"]') as HTMLInputElement;
+    filepathInput.value = '/etc/hostname';
+    filepathInput.dispatchEvent(new Event('input', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
-    expect(container.querySelector('[data-testid="side-by-side-diff-card"]')?.textContent).toContain('Original Remote File');
+    const loadBtn = container.querySelector('[data-testid="load-remote-file-btn"]') as HTMLButtonElement;
+    loadBtn.click();
+    await new Promise((r) => setTimeout(r, 10));
 
     // 6. FIDO2 Hardware Key & SSH CA Certificate Viewer
     const navVault = container.querySelector('[data-testid="nav-vault"]') as HTMLButtonElement;

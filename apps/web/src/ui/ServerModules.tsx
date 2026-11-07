@@ -1439,7 +1439,7 @@ export function AutomationsPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!session) {
+    if (!session || !session.isConnected()) {
       setEnvironment(null);
       setEntries([]);
       return;
@@ -1495,6 +1495,8 @@ export function AutomationsPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
           {environment.venvAvailable ? ' · venv module available' : ' · venv module missing'}
           {environment.pipAvailable ? ' · pip available' : ' · pip missing'}
         </p>
+      ) : session && !session.isConnected() ? (
+        <p className="ws-mod-muted">Python check not reported — not connected to a server.</p>
       ) : (
         !busy && <p className="ws-mod-muted">Python 3 was not found on this server.</p>
       )}

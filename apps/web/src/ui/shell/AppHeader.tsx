@@ -42,6 +42,7 @@ export interface HeaderConnection {
   connectedHost: string;
   environmentLabel: string;
   rttMs: number;
+  resourceMetrics: Map<string, { cpu: number; ram: number; disk: number; updatedAt: number }>;
   handleDisconnect: () => void;
   setPendingJump: Setter<PendingJump | null>;
   setConnectModalOpen: Setter<boolean>;
@@ -112,6 +113,7 @@ export function AppHeader({
     connectedUser,
     connectedHost,
     rttMs,
+    resourceMetrics,
     handleDisconnect,
     setPendingJump,
     setConnectModalOpen,
@@ -125,6 +127,7 @@ export function AppHeader({
   const activeConnection = connectionRegistryRef.current.get(activeTab?.connectionId);
   const isConnected = connectionState === 'connected' && Boolean(connectedHost);
   const isConnecting = connectionState === 'reconnecting';
+  const metrics = activeTab?.connectionId ? resourceMetrics.get(activeTab.connectionId) : undefined;
 
   const connectionLabel = isConnected
     ? `${connectedUser}@${connectedHost}`
@@ -286,6 +289,52 @@ export function AppHeader({
               </button>
             );
           })}
+        </div>
+
+        {/* Resource strip: CPU / RAM / Disk for the active connection */}
+        <div className="webssh-resource-strip">
+          {connectionState === 'connected' && connectedHost ? (
+            <>
+              <span className="webssh-resource-label">{connectedUser}@{connectedHost}</span>
+              <div className="webssh-resource-metric">
+                <span className="webssh-resource-name">CPU</span>
+                <div className="webssh-resource-bar">
+                  <div
+                    className="webssh-resource-bar-fill"
+                    style={{ width: `${metrics?.cpu ?? 0}%` }}
+                  />
+                </div>
+                <span className="webssh-resource-value">{metrics?.cpu ?? '--'}%</span>
+              </div>
+              <div className="webssh-resource-metric">
+                <span className="webssh-resource-name">RAM</span>
+                <div className="webssh-resource-bar">
+                  <div
+                    className="webssh-resource-bar-fill"
+                    style={{ width: `${metrics?.ram ?? 0}%` }}
+                  />
+                </div>
+                <span className="webssh-resource-value">{metrics?.ram ?? '--'}%</span>
+              </div>
+              <div className="webssh-resource-metric">
+                <span className="webssh-resource-name">Disk</span>
+                <div className="webssh-resource-bar">
+                  <div
+                    className="webssh-resource-bar-fill"
+                    style={{ width: `${metrics?.disk ?? 0}%` }}
+                  />
+                </div>
+                <span className="webssh-resource-value">{metrics?.disk ?? '--'}%</span>
+              </div>
+              {metrics?.updatedAt && (
+                <span className="webssh-resource-updated">
+                  updated {Math.floor((Date.now() - metrics.updatedAt) / 1000)}s ago
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="webssh-resource-empty">No active connection</span>
+          )}
         </div>
         <div className="webssh-session-controls">
           <Button
