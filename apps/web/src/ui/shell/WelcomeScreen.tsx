@@ -142,7 +142,7 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
                 </select>
                 <Button variant="default" testId="apply-key-chmod-400-btn" onClick={() => setKeyPermissionMode('0400')}>Set 400</Button>
               </div>
-              <textarea className="ui-input" rows={3} placeholder="Paste -----BEGIN OPENSSH PRIVATE KEY----- content" aria-label="Private key content" value={uploadedKeyContent} onInput={(e) => setUploadedKeyContent((e.target as HTMLTextAreaElement).value)} data-testid="private-key-textarea" />
+              <textarea className="ui-input" rows={3} placeholder="Paste -----BEGIN OPENSSH PRIVATE KEY----- content" aria-label="Private key content" value={uploadedKeyContent} onInput={(e) => { setUploadedKeyContent((e.target as HTMLTextAreaElement).value); setKeyPermissionMode('0400'); setConnectErrorMsg(''); }} data-testid="private-key-textarea" />
               <input id="welcome-key-passphrase-input" type="password" autoComplete="off" className="ui-input" placeholder="Key passphrase (leave blank if unencrypted)" value={keyPassphrase} onInput={(e) => setKeyPassphrase((e.target as HTMLInputElement).value)} data-testid="welcome-key-passphrase-input" style={{ maxWidth: '320px' }} />
             </div>
           ) : null}

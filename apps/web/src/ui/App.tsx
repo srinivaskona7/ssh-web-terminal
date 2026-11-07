@@ -1861,6 +1861,10 @@ export function App(): JSX.Element {
       );
       return;
     }
+    if (authMethod === 'Private Key (.pem / id_rsa)' && keyPermissionMode === '0600') {
+      setKeyPermissionMode('0400');
+      setConnectErrorMsg('Key was chmod 0600 — tightened to 0400.');
+    }
 
     const gwValidation = validateGatewayWsUrl(gatewayUrl);
     if (!gwValidation.valid) {
@@ -2790,6 +2794,8 @@ export function App(): JSX.Element {
       const record = await vault.generateKeyPair('prod-ed25519-key');
       setGeneratedPubKey(record.authorizedKeyLine);
       setGeneratedFp(record.fingerprintSHA256);
+      setKeyPermissionMode('0400');
+      setConnectErrorMsg('');
     } catch {
       // Keep fallback display in constrained environment
     }
