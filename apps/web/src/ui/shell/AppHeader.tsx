@@ -335,7 +335,7 @@ export function AppHeader({
                 onMouseEnter={() => setHoveredMetric('disk')}
                 onMouseLeave={() => setHoveredMetric(null)}
               >
-                <span className="webssh-resource-name">Disk</span>
+                <span className="webssh-resource-name">{metrics?.disk?.[0]?.mountpoint ?? 'Disk'}</span>
                 <div className="webssh-resource-bar">
                   <div
                     className="webssh-resource-bar-fill"
@@ -425,6 +425,7 @@ export function AppHeader({
             <span className="webssh-resource-empty">No active connection</span>
           )}
         </div>
+        <Button variant="ghost" className="webssh-resource-mobile-btn" onClick={() => setActiveScreen('overview')} testId="resource-overview-btn">Resources</Button>
         <div className="webssh-session-controls">
           <Button
             variant="ghost"

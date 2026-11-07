@@ -788,6 +788,7 @@ export function App(): JSX.Element {
   const [connectUser, setConnectUser] = useState<string>('');
   const [authMethod, setAuthMethod] = useState<AuthMethod>('Password');
   const [connectPassword, setConnectPassword] = useState<string>('');
+  const [keyPassphrase, setKeyPassphrase] = useState<string>('');
   const [uploadedKeyFileName, setUploadedKeyFileName] = useState<string>('');
   const [uploadedKeyContent, setUploadedKeyContent] = useState<string>('');
   const [keyPermissionMode, setKeyPermissionMode] = useState<KeyPermissionMode>('0400');
@@ -1979,6 +1980,7 @@ export function App(): JSX.Element {
         authMethod: protocolAuthMethod as 'password' | 'private_key' | 'remote_signer',
         password: connectPassword,
         privateKeyPem: authMethod === 'Private Key (.pem / id_rsa)' ? uploadedKeyContent : undefined,
+        privateKeyPassphrase: keyPassphrase || undefined,
         publicKey: authMethod === 'Argon2id Ed25519 Key' ? generatedPubKey : undefined,
         keyFingerprint: generatedFp,
         cols,
@@ -3694,6 +3696,8 @@ export function App(): JSX.Element {
                 setKeyPermissionMode,
                 uploadedKeyContent,
                 setUploadedKeyContent,
+                keyPassphrase,
+                setKeyPassphrase,
                 connectErrorMsg,
                 setConnectErrorMsg,
                 handleConnectSubmit,
@@ -4997,6 +5001,7 @@ export function App(): JSX.Element {
                   chmod 400
                 </Button>
               </div>
+              <input id="modal-key-passphrase-input" type="password" autoComplete="off" className="ui-input" placeholder="Key passphrase (leave blank if unencrypted)" value={keyPassphrase} onInput={(e) => setKeyPassphrase((e.target as HTMLInputElement).value)} data-testid="modal-key-passphrase-input" />
             </div>
           ) : null}
 

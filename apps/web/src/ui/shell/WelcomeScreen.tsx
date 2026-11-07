@@ -23,6 +23,8 @@ export interface WelcomeQuickConnect {
   setKeyPermissionMode: Setter<KeyPermissionMode>;
   uploadedKeyContent: string;
   setUploadedKeyContent: Setter<string>;
+  keyPassphrase: string;
+  setKeyPassphrase: Setter<string>;
   connectErrorMsg: string;
   setConnectErrorMsg: Setter<string>;
   handleConnectSubmit: (e?: Event) => void;
@@ -78,6 +80,7 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
     connectHost, setConnectHost, connectUser, setConnectUser, connectPort, setConnectPort,
     authMethod, setAuthMethod, connectPassword, setConnectPassword,
     keyPermissionMode, setKeyPermissionMode, uploadedKeyContent, setUploadedKeyContent,
+    keyPassphrase, setKeyPassphrase,
     connectErrorMsg, setConnectErrorMsg, handleConnectSubmit,
     handlePrivateKeyFileUpload, handleGenerateKey, isConnecting, onCancel,
   } = quickConnect;
@@ -140,6 +143,7 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
                 <Button variant="default" testId="apply-key-chmod-400-btn" onClick={() => setKeyPermissionMode('0400')}>Set 400</Button>
               </div>
               <textarea className="ui-input" rows={3} placeholder="Paste -----BEGIN OPENSSH PRIVATE KEY----- content" aria-label="Private key content" value={uploadedKeyContent} onInput={(e) => setUploadedKeyContent((e.target as HTMLTextAreaElement).value)} data-testid="private-key-textarea" />
+              <input id="welcome-key-passphrase-input" type="password" autoComplete="off" className="ui-input" placeholder="Key passphrase (leave blank if unencrypted)" value={keyPassphrase} onInput={(e) => setKeyPassphrase((e.target as HTMLInputElement).value)} data-testid="welcome-key-passphrase-input" style={{ maxWidth: '320px' }} />
             </div>
           ) : null}
 
