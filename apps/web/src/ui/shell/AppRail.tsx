@@ -1,4 +1,5 @@
 import type { JSX } from 'preact';
+import { useState } from 'preact/hooks';
 import { Button, Icon } from '@webssh/ui-kit';
 import type { LayoutPreset, PreferencesStore, WorkspacePreset } from '../../prefs';
 import type { ScreenId } from '../App';
@@ -54,6 +55,8 @@ export function AppRail({
   isRailOpen
 }: AppRailProps): JSX.Element {
   const showServerTools = SERVER_TOOL_SCREENS.includes(activeScreen as ScreenId) || activeScreen === 'server-tools';
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const toggle = (id: string) => setCollapsed((prev) => ({ ...prev, [id]: !prev[id] }));
 
   return (
     <>
@@ -61,7 +64,7 @@ export function AppRail({
         <div className="webssh-rail-scroll">
           {/* Global */}
           <div className="webssh-rail-group" role="group" aria-label="Global">
-            <span className="webssh-rail-group-title">Global</span>
+            <button type="button" className="webssh-rail-group-title" aria-expanded={!collapsed.global} data-testid="rail-toggle-global" onClick={() => toggle('global')}>Global {collapsed.global ? '▸' : '▾'}</button>
             <Button
               variant={activeScreen === 'welcome' ? 'primary' : 'ghost'}
               onClick={() => setActiveScreen('welcome')}
@@ -114,7 +117,8 @@ export function AppRail({
           {/* Server tools (expanded when any server tool screen is active) */}
           {showServerTools ? (
             <div className="webssh-rail-group" role="group" aria-label="Server tools">
-              <span className="webssh-rail-group-title">Server tools</span>
+              <button type="button" className="webssh-rail-group-title" aria-expanded={!collapsed.server} data-testid="rail-toggle-server-tools" onClick={() => toggle('server')}>Server tools {collapsed.server ? '▸' : '▾'}</button>
+              <div style={{ display: collapsed.server ? 'none' : 'contents' }}>
               <Button
                 variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
                 onClick={() => setActiveScreen('overview')}
@@ -192,6 +196,7 @@ export function AppRail({
               >
                 <Icon name="command" /> Tunnels
               </Button>
+              </div>
             </div>
           ) : null}
 

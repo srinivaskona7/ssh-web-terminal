@@ -5,7 +5,7 @@ import { repairApplicationAssetCaches } from '../ErrorBoundary';
 import type { KeybindingRegistry } from '../productivity';
 import type { Setter } from './types';
 
-export type SettingsSection = 'appearance' | 'keyboard' | 'maintenance';
+export type SettingsSection = 'appearance' | 'keyboard' | 'maintenance' | 'administrator';
 
 /** Font, theme, layout and cursor; the layout buttons also write the preference store. */
 export interface SettingsAppearance {
@@ -22,6 +22,25 @@ export interface SettingsAppearance {
   prefsStore: PreferencesStore;
 }
 
+export interface SettingsAdministrator {
+  transportMode: string;
+  setTransportMode: (m: string) => void;
+  gatewayUrl: string;
+  setGatewayUrl: Setter<string>;
+  gatewayAuthToken: string;
+  setGatewayAuthToken: Setter<string>;
+  gatewayProbeStatus: { ok: boolean; message: string } | null;
+  setGatewayProbeStatus: Setter<{ ok: boolean; message: string } | null>;
+  handleTestGateway: (rawUrl?: string) => Promise<void>;
+  relaySessionUser: string;
+  relayLoginUser: string;
+  setRelayLoginUser: Setter<string>;
+  relayLoginPass: string;
+  setRelayLoginPass: Setter<string>;
+  handleRelayLogin: () => Promise<void>;
+  handleRelaySignOut: () => void;
+}
+
 export interface SettingsScreenProps {
   settingsSection: SettingsSection;
   setSettingsSection: Setter<SettingsSection>;
@@ -29,6 +48,7 @@ export interface SettingsScreenProps {
   keybindings: KeybindingRegistry;
   cacheRepairStatus: string;
   setCacheRepairStatus: Setter<string>;
+  administrator?: SettingsAdministrator;
 }
 
 /**
@@ -41,7 +61,8 @@ export function SettingsScreen({
   appearance,
   keybindings,
   cacheRepairStatus,
-  setCacheRepairStatus
+  setCacheRepairStatus,
+  administrator
 }: SettingsScreenProps): JSX.Element {
   const {
     fontFamily,
@@ -68,7 +89,8 @@ export function SettingsScreen({
         {([
           ['appearance', 'Appearance'],
           ['keyboard', 'Keyboard'],
-          ['maintenance', 'Maintenance']
+          ['maintenance', 'Maintenance'],
+          ['administrator', 'Administrator']
         ] as const).map(([id, label]) => (
           <Button
             key={id}
@@ -215,6 +237,37 @@ export function SettingsScreen({
               {cacheRepairStatus}
             </Badge>
           ) : null}
+        </div>
+      </Card>
+      ) : null}
+      {settingsSection === 'administrator' && administrator ? (
+      <Card testId="admin-transport-settings">
+        <h2>Administrator — Relay &amp; Gateway</h2>
+        <p className="ws-mod-muted">Connection endpoints and accounts. Saved in this browser only; never sent except to the relay/gateway you connect to.</p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
+          {administrator.relaySessionUser ? (
+            <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+              <Badge tone="success">Signed in as {administrator.relaySessionUser}</Badge>
+              <Button variant="ghost" testId="product-sign-out-btn" onClick={() => administrator.handleRelaySignOut()}>Sign out</Button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'flex-end' }} data-testid="product-sign-in">
+              <div style={{ flex: 1, minWidth: '160px' }}><label htmlFor="product-sign-in-user">Username</label><input id="product-sign-in-user" type="text" className="ui-input" value={administrator.relayLoginUser} onInput={(e) => administrator.setRelayLoginUser((e.target as HTMLInputElement).value)} data-testid="product-sign-in-user" /></div>
+              <div style={{ flex: 1, minWidth: '160px' }}><label htmlFor="product-sign-in-pass">Password</label><input id="product-sign-in-pass" type="password" className="ui-input" value={administrator.relayLoginPass} onInput={(e) => administrator.setRelayLoginPass((e.target as HTMLInputElement).value)} data-testid="product-sign-in-pass" /></div>
+              <Button variant="default" testId="product-sign-in-submit" onClick={() => void administrator.handleRelayLogin()}>Sign in</Button>
+            </div>
+          )}
+          <label htmlFor="welcome-transport-mode-select">SSH Transport Mode</label>
+          <select id="welcome-transport-mode-select" className="ui-input" value={administrator.transportMode} onChange={(e) => { const m = (e.target as HTMLSelectElement).value; administrator.setTransportMode(m); try { globalThis.localStorage?.setItem('webssh.transport.mode', m); } catch {} }} data-testid="welcome-transport-mode-select">
+            <option value="go-gateway">Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)</option>
+            <option value="cloudflare-relay">Cloudflare Worker SSH Relay (Terminal, tabs; SFTP via gateway preferred)</option>
+          </select>
+          <label htmlFor="welcome-gateway-url-input">{administrator.transportMode === 'cloudflare-relay' ? 'Relay endpoint (wss://…/ws)' : 'Gateway endpoint (wss://…/ws)'}</label>
+          <input id="welcome-gateway-url-input" type="text" className="ui-input" value={administrator.gatewayUrl} onInput={(e) => { const v = (e.target as HTMLInputElement).value; administrator.setGatewayUrl(v); administrator.setGatewayProbeStatus(null); try { globalThis.localStorage?.setItem('webssh.gateway.wsUrl', v); } catch {} }} data-testid="welcome-gateway-url-input" />
+          <label htmlFor="welcome-gateway-token-input">Gateway Auth Token (optional)</label>
+          <input id="welcome-gateway-token-input" type="password" className="ui-input" value={administrator.gatewayAuthToken} onInput={(e) => { const v = (e.target as HTMLInputElement).value; administrator.setGatewayAuthToken(v); try { globalThis.sessionStorage?.setItem('webssh.gateway.authToken', v); } catch {} }} data-testid="welcome-gateway-token-input" />
+          <Button variant="default" testId="test-gateway-btn" onClick={() => void administrator.handleTestGateway(administrator.gatewayUrl)}>Test Gateway</Button>
+          {administrator.gatewayProbeStatus ? <Badge tone={administrator.gatewayProbeStatus.ok ? 'success' : 'danger'} testId="gateway-probe-badge">{administrator.gatewayProbeStatus.message}</Badge> : null}
         </div>
       </Card>
       ) : null}

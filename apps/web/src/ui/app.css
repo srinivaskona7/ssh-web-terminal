@@ -1355,6 +1355,16 @@
   text-transform: uppercase;
 }
 
+button.webssh-rail-group-title {
+  color: var(--color-fg-primary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  text-align: left;
+  width: 100%;
+}
+
 .webssh-rail-resizer {
   width: 4px;
   flex: 0 0 auto;

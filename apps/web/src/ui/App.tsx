@@ -240,6 +240,7 @@ export function App(): JSX.Element {
     expiresAt: number;
   } | null>(null);
   const connectInFlightRef = useRef<boolean>(false);
+  const pendingConnectClientRef = useRef<{ close: () => void } | null>(null);
   const hostKeyDecisionResolverRef = useRef<((trusted: boolean) => void) | null>(null);
   const storageGuard = useMemo(() => new StorageGuard(), []);
   const snippetLib = useMemo(
@@ -280,10 +281,8 @@ export function App(): JSX.Element {
   const [openMenu, setOpenMenu] = useState<MenuId>(null);
 
   // 2. macOS / VS Code / Studio Tabs state
-  const [tabs, setTabs] = useState<SessionTabItem[]>([
-    { id: 'tab-1', title: 'Terminal 1', connected: false }
-  ]);
-  const [activeTabId, setActiveTabId] = useState<string>('tab-1');
+  const [tabs, setTabs] = useState<SessionTabItem[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string>('');
   const [splitPanes, setSplitPanes] = useState<number>(1);
   const [broadcastInput, setBroadcastInput] = useState<boolean>(false);
   // Session recording taps the active pane's bytes, not a demo: the raw
@@ -453,7 +452,7 @@ export function App(): JSX.Element {
       // Storage unavailable — search query won't persist across reloads.
     }
   }, [termSearchQuery]);
-  const [sessionTabLabel, setSessionTabLabel] = useState<string>('Terminal 1');
+  const [sessionTabLabel, setSessionTabLabel] = useState<string>('');
   const [connectedUser, setConnectedUser] = useState<string>('');
   const [environmentLabel, setEnvironmentLabel] = useState<string>('');
 
@@ -786,7 +785,7 @@ export function App(): JSX.Element {
       ? pendingJump.hops
       : undefined;
   }, [pendingJump, connectHost, connectPort]);
-  const [connectUser, setConnectUser] = useState<string>('ubuntu');
+  const [connectUser, setConnectUser] = useState<string>('');
   const [authMethod, setAuthMethod] = useState<AuthMethod>('Password');
   const [connectPassword, setConnectPassword] = useState<string>('');
   const [uploadedKeyFileName, setUploadedKeyFileName] = useState<string>('');
@@ -1442,9 +1441,8 @@ export function App(): JSX.Element {
       setReconnectMessage(null);
       setConnectedAt(null);
       setConnectionState('disconnected');
-      setSessionTabLabel('Terminal 1');
-      setTabs([{ id: 'tab-1', title: 'Terminal 1', connected: false, status: 'idle' }]);
-      setActiveTabId('tab-1');
+      setTabs([]);
+      setActiveTabId('');
       setSftpRawEntries([]);
       setTransferStatus('Disconnected — Connect to an SSH host to browse SFTP files');
       setTerminalLines([]);
@@ -1480,7 +1478,7 @@ export function App(): JSX.Element {
           : t
       )
     );
-    setSessionTabLabel('Terminal 1');
+    setSessionTabLabel('');
     setTerminalLines([]);
     setEnvironmentLabel('');
   };
@@ -1869,11 +1867,20 @@ export function App(): JSX.Element {
       return;
     }
 
+    const hostVal = connectHost.trim();
+    const userVal = connectUser.trim();
+    const portVal = connectPort.trim();
+    if (!hostVal) { setConnectErrorMsg('Host is required.'); return; }
+    if (!userVal) { setConnectErrorMsg('Username is required.'); return; }
+    if (!portVal || !Number.isInteger(Number(portVal)) || Number(portVal) < 1 || Number(portVal) > 65535) {
+      setConnectErrorMsg('Port must be 1–65535.'); return;
+    }
+    if (authMethod === 'Password' && !connectPassword) { setConnectErrorMsg('Password is required for Password authentication.'); return; }
+    if (authMethod === 'Private Key (.pem / id_rsa)' && !uploadedKeyContent.trim()) {
+      setConnectErrorMsg('Upload or paste a private key for Private Key authentication.'); return;
+    }
     setConnectErrorMsg('');
     setConnectionState('connecting');
-    const hostVal = connectHost.trim() || '127.0.0.1';
-    const userVal = connectUser.trim() || 'ubuntu';
-    const portVal = connectPort.trim() || '22';
     const portNum = Number.parseInt(portVal, 10) || 22;
     const label = `${userVal}@${hostVal}`;
     const tabTitle = `Terminal 1 (${label})`;
@@ -2125,6 +2132,7 @@ export function App(): JSX.Element {
         transportMode === 'cloudflare-relay'
           ? new BrowserSshRelaySessionClient(sessionParams)
           : new LiveGatewaySessionClient(sessionParams);
+      pendingConnectClientRef.current = client;
 
       try {
         const meta = await client.connect();
@@ -2168,7 +2176,20 @@ export function App(): JSX.Element {
         });
         const occupiedTab = tabsRef.current.find((t) => t.id === activeTabId);
         const occupiedConnection = connectionRegistryRef.current.get(occupiedTab?.connectionId);
-        if (occupiedConnection && occupiedConnection.client.isConnected) {
+        if (!occupiedTab) {
+          const firstTabId = `tab-${Date.now()}`;
+          setTabs([
+            {
+              id: firstTabId,
+              title: tabTitle,
+              connected: true,
+              status: 'ready',
+              connectionId,
+              channelId: initialChannel
+            }
+          ]);
+          setActiveTabId(firstTabId);
+        } else if (occupiedConnection && occupiedConnection.client.isConnected) {
           // The active tab already owns a live transport. Give the new server
           // its own tab instead of rewiring the pane onto a different client.
           const newTabId = `tab-${Date.now()}`;
@@ -2254,8 +2275,16 @@ export function App(): JSX.Element {
       }
       } finally {
         connectInFlightRef.current = false;
+        pendingConnectClientRef.current = null;
       }
     })();
+  };
+
+  const handleCancelConnect = (): void => {
+    pendingConnectClientRef.current?.close();
+    pendingConnectClientRef.current = null;
+    setConnectionState('disconnected');
+    setConnectErrorMsg('');
   };
 
   const appendCommandBlock = (
@@ -3669,7 +3698,9 @@ export function App(): JSX.Element {
                 setConnectErrorMsg,
                 handleConnectSubmit,
                 handlePrivateKeyFileUpload,
-                handleGenerateKey
+                handleGenerateKey,
+                isConnecting: connectionState === 'connecting',
+                onCancel: handleCancelConnect
               }}
               transport={{
                 transportMode,
@@ -3693,7 +3724,7 @@ export function App(): JSX.Element {
               }}
               guest={{ turnstileSiteKey, turnstileResetNonce, setTurnstileToken }}
               session={remoteSession}
-              onNavigate={setActiveScreen}
+              onNavigate={(s) => setActiveScreen(s as ScreenId)}
             />
           ) : null}
 
@@ -4560,6 +4591,24 @@ export function App(): JSX.Element {
               keybindings={keybindings}
               cacheRepairStatus={cacheRepairStatus}
               setCacheRepairStatus={setCacheRepairStatus}
+              administrator={{
+                transportMode,
+                setTransportMode: (m) => setTransportMode(m as TransportBackendMode),
+                gatewayUrl,
+                setGatewayUrl,
+                gatewayAuthToken,
+                setGatewayAuthToken,
+                gatewayProbeStatus,
+                setGatewayProbeStatus,
+                handleTestGateway,
+                relaySessionUser,
+                relayLoginUser,
+                setRelayLoginUser,
+                relayLoginPass,
+                setRelayLoginPass,
+                handleRelayLogin,
+                handleRelaySignOut
+              }}
             />
           ) : null}
 

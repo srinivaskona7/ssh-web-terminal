@@ -33,7 +33,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
       rules: { 'color-contrast': { enabled: false } }
     });
     expect(welcomeAxe.violations.map((v) => `${v.id}: ${v.help} (${v.nodes.map((n) => n.html).join(', ')})`)).toEqual([]);
-    expect(welcomeScreen?.textContent).toContain('Connect to a server.');
+    expect(welcomeScreen?.textContent).toContain('Connect to a server');
     // Server tools is a navigation entry (always visible), not a feature gate.
     expect(container.querySelector('[data-testid="nav-server-tools"]')).toBeTruthy();
 
@@ -129,9 +129,20 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(connectModal?.textContent).toContain('Username & Password');
     expect(connectModal?.textContent).toContain('Private Key (.pem / chmod 400)');
 
-    const connectSubmit = container.querySelector('[data-testid="connect-modal-submit-btn"]') as HTMLButtonElement;
-    connectSubmit.click();
+    (container.querySelector('[data-testid="auth-method-password-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
+    const connectSubmit = container.querySelector('[data-testid="connect-modal-submit-btn"]') as HTMLButtonElement;
+    (container.querySelector('[data-testid="connect-host-input"]') as HTMLInputElement).value = '10.0.0.5';
+    (container.querySelector('[data-testid="connect-host-input"]') as HTMLInputElement).dispatchEvent(new Event('input', { bubbles: true }));
+    (container.querySelector('[data-testid="connect-user-input"]') as HTMLInputElement).value = 'root';
+    (container.querySelector('[data-testid="connect-user-input"]') as HTMLInputElement).dispatchEvent(new Event('input', { bubbles: true }));
+    const pass = container.querySelector('[data-testid="connect-password-input"]') as HTMLInputElement;
+    pass.value = 'testpass123';
+    pass.dispatchEvent(new Event('input', { bubbles: true }));
+    pass.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    connectSubmit.click();
+    await new Promise((r) => setTimeout(r, 2000));
 
     const sessionTab = container.querySelector('[data-testid="tab-session-1"]');
     expect(sessionTab?.textContent).toContain('Terminal 1');
@@ -306,23 +317,35 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     // collapsed administrator panel.
     const outerSignIn = container.querySelector('[data-testid="product-sign-in"]');
 
-    // Relay internals and the optional account form live in the collapsed admin panel.
-    const admin = container.querySelector('[data-testid="admin-transport-settings"]') as HTMLDetailsElement;
+    // Relay internals and the optional account form live in Settings -> Administrator.
+    const settingsNav = container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement;
+    settingsNav.click();
+    await new Promise((r) => setTimeout(r, 10));
+    (container.querySelector('[data-testid="settings-tab-administrator"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    const admin = container.querySelector('[data-testid="admin-transport-settings"]');
     expect(admin).toBeTruthy();
-    expect(admin.open).toBe(false);
-    expect(admin.querySelector('[data-testid="welcome-gateway-url-input"]')).toBeTruthy();
-    expect(admin.querySelector('[data-testid="welcome-transport-mode-select"]')).toBeTruthy();
-    expect(admin.querySelector('[data-testid="product-sign-in"]')).toBeTruthy();
-    expect(outerSignIn).toBe(admin.querySelector('[data-testid="product-sign-in"]'));
+    expect(admin?.querySelector('[data-testid="welcome-gateway-url-input"]')).toBeTruthy();
+    expect(admin?.querySelector('[data-testid="welcome-transport-mode-select"]')).toBeTruthy();
+    expect(admin?.querySelector('[data-testid="product-sign-in"]')).toBeTruthy();
+    // Back to the connection page for the connect flow below.
+    (container.querySelector('[data-testid="nav-welcome"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
 
     // Connect acquires a guest ticket automatically instead of demanding a login.
     const host = container.querySelector('[data-testid="welcome-host-input"]') as HTMLInputElement;
     host.value = '10.0.0.5';
     host.dispatchEvent(new Event('input', { bubbles: true }));
+    const user = container.querySelector('[data-testid="welcome-user-input"]') as HTMLInputElement;
+    user.value = 'ubuntu';
+    user.dispatchEvent(new Event('input', { bubbles: true }));
+    const pass = container.querySelector('[data-testid="welcome-password-input"]') as HTMLInputElement;
+    pass.value = 'testpass123';
+    pass.dispatchEvent(new Event('input', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     const form = container.querySelector('[data-testid="welcome-connect-form"]') as HTMLFormElement;
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 25));
+    await new Promise((r) => setTimeout(r, 500));
 
     expect(ticketRequests.some((u) => u.includes('/auth/ticket'))).toBe(true);
     expect(container.textContent).toContain('Connection ticket issued');
@@ -429,6 +452,12 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     const gwInput = container.querySelector('[data-testid="gateway-url-input"]') as HTMLInputElement;
     gwInput.value = 'wss://srinivaskona7.github.io/ws';
     gwInput.dispatchEvent(new Event('input', { bubbles: true }));
+    const hostInput = container.querySelector('[data-testid="connect-host-input"]') as HTMLInputElement;
+    hostInput.value = '127.0.0.1';
+    hostInput.dispatchEvent(new Event('input', { bubbles: true }));
+    const userInput = container.querySelector('[data-testid="connect-user-input"]') as HTMLInputElement;
+    userInput.value = 'ubuntu';
+    userInput.dispatchEvent(new Event('input', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
     const submitBtn = container.querySelector('[data-testid="connect-modal-submit-btn"]') as HTMLButtonElement;
@@ -450,7 +479,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(container.querySelector('[data-testid="modal-connect-error-badge"]')?.textContent).toContain(
       'SSH_CONNECT_FAILED'
     );
-    expect(container.querySelector('[data-testid="tab-session-1"]')?.textContent).not.toContain(
+    expect(container.querySelector('[data-testid="tab-session-1"]')?.textContent ?? '').not.toContain(
       'ubuntu@127.0.0.1'
     );
 
@@ -597,12 +626,18 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     const gwInput = container.querySelector('[data-testid="gateway-url-input"]') as HTMLInputElement;
     gwInput.value = 'ws://127.0.0.1:8080/ws';
     gwInput.dispatchEvent(new Event('input', { bubbles: true }));
+    const hostInput2 = container.querySelector('[data-testid="connect-host-input"]') as HTMLInputElement;
+    hostInput2.value = '127.0.0.1';
+    hostInput2.dispatchEvent(new Event('input', { bubbles: true }));
+    const userInput2 = container.querySelector('[data-testid="connect-user-input"]') as HTMLInputElement;
+    userInput2.value = 'ubuntu';
+    userInput2.dispatchEvent(new Event('input', { bubbles: true }));
     const passInput = container.querySelector('[data-testid="connect-password-input"]') as HTMLInputElement;
     passInput.value = 'testpass123';
     passInput.dispatchEvent(new Event('input', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 150));
     (container.querySelector('[data-testid="connect-modal-submit-btn"]') as HTMLButtonElement).click();
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 500));
 
     const tab = (): HTMLElement => container.querySelector('[data-testid="tab-session-1"]') as HTMLElement;
     const statusBar = (): HTMLElement => container.querySelector('[data-testid="status-bar"]') as HTMLElement;
@@ -694,7 +729,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.body.removeChild(container);
   });
 
-  it('lists recent hosts on Welcome newest-first, skips never-connected hosts, and prefills Quick Connect from one', async () => {
+  it('keeps recent hosts off the connection page (Saved Hosts only) and prefills from a saved profile', async () => {
     localStorage.setItem(
       'webssh.hosts.v1',
       JSON.stringify([
@@ -749,17 +784,21 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     render(<App />, container);
     await new Promise((r) => setTimeout(r, 150));
 
-    const recentCard = container.querySelector('[data-testid="welcome-recent-hosts"]');
-    expect(recentCard).toBeTruthy();
+    // Fresh connection page shows no recent hosts, sample data, or startup tab.
+    expect(container.querySelector('[data-testid="welcome-recent-hosts"]')).toBeNull();
+    expect(container.querySelector('[data-testid="tab-session-1"]')).toBeNull();
+    expect((container.querySelector('[data-testid="welcome-host-input"]') as HTMLInputElement).value).toBe('');
+    expect((container.querySelector('[data-testid="welcome-user-input"]') as HTMLInputElement).value).toBe('');
 
-    const order = Array.from(recentCard?.querySelectorAll('[data-testid^="recent-host-"]') ?? []).map((el) =>
-      el.getAttribute('data-testid')
-    );
-    expect(order).toEqual(['recent-host-new-box', 'recent-host-mid-box', 'recent-host-old-box']);
-    expect(recentCard?.textContent).not.toContain('never-box');
+    // Saved profiles live behind the explicit Saved Hosts action.
+    (container.querySelector('[data-testid="welcome-saved-hosts-btn"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(container.textContent).toContain('new-box');
+    const profileBtn = container.querySelector('[data-testid="host-card-new-box"] button');
+    expect(profileBtn).toBeTruthy();
 
-    // Clicking a recent host opens the connection modal with its values filled in.
-    (container.querySelector('[data-testid="recent-host-new-box"]') as HTMLButtonElement).click();
+    // Selecting a saved profile fills the connection form.
+    (profileBtn as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 
     expect(container.querySelector('[data-testid="connect-modal"]')).toBeTruthy();
