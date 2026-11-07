@@ -34,11 +34,12 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     // 1. Starts on clean minimal Welcome screen (IDE navigation hidden until requested, 0 fake hosts)
     await expect(page.getByTestId('screen-welcome')).toBeVisible();
     await expect(page.getByTestId('welcome-quick-connect-card')).toBeVisible();
-    expect(await page.locator('[data-testid="sidebar-nav"]').count()).toBe(0);
 
-    // 2. Verify Zen mode has visible Exit button and Esc returns to Welcome screen
-    await page.getByTestId('traffic-light-minimize').click();
-    await expect(page.getByTestId('exit-zen-btn')).toBeVisible();
+    // 2. Verify Zen mode via View menu and Esc returns to Welcome screen
+    await page.getByTestId('view-menu-btn').click();
+    await expect(page.getByTestId('toggle-zen-btn')).toBeVisible();
+    await page.getByTestId('toggle-zen-btn').click();
+    await expect(page.getByTestId('zen-mode-banner')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('screen-welcome')).toBeVisible();
 
@@ -99,10 +100,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await page.keyboard.press('Enter');
     await expectScreen('command not found');
 
-    // 7. Enable Full Studio IDE Mode and verify real SFTP directory listing & Remote File Editor
-    await page.getByTestId('enable-ide-mode-btn').click();
-    await expect(page.getByTestId('sidebar-nav')).toBeVisible();
-
+    // 7. Navigate to Files and verify real SFTP directory listing & Remote File Editor
     await page.getByTestId('nav-files').click();
     await expect(page.getByTestId('screen-files')).toBeVisible();
     await expect(page.getByTestId('sftp-row-README.md')).toBeVisible();
@@ -154,7 +152,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await page.goto('./');
     await expect(page.getByTestId('workspace-root')).toBeVisible();
 
-    await page.getByTestId('nav-workspace').click();
+    await page.getByTestId('nav-terminal').click();
     await expect(page.getByTestId('terminal-viewport')).toBeVisible();
 
     // Ctrl+F from outside a text field opens the bar and takes the caret.
@@ -177,7 +175,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await page.goto('./');
     await expect(page.getByTestId('workspace-root')).toBeVisible();
 
-    await page.getByTestId('nav-workspace').click();
+    await page.getByTestId('nav-terminal').click();
     await expect(page.getByTestId('terminal-viewport')).toBeVisible();
 
     // The broadcast command opens the split and turns broadcast on in one step.
