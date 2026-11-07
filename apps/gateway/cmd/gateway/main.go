@@ -128,6 +128,14 @@ func extractGatewayToken(r *http.Request) string {
 	if xTok := strings.TrimSpace(r.Header.Get("X-Gateway-Token")); xTok != "" {
 		return xTok
 	}
+	// Browser WebSocket cannot set Authorization; the client passes
+	// `token.<jwt>` in Sec-WebSocket-Protocol. Preferred over query string
+	// (which lands in proxy/edge logs).
+	for _, part := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		if tok := strings.TrimSpace(part); strings.HasPrefix(tok, "token.") {
+			return strings.TrimSpace(strings.TrimPrefix(tok, "token."))
+		}
+	}
 	return strings.TrimSpace(r.URL.Query().Get("token"))
 }
 

@@ -1,5 +1,14 @@
 # WebSSH Studio — Project Memory Index
 
+- **Architecture Overview**: [ARCHITECTURE_OVERVIEW.md](./ARCHITECTURE_OVERVIEW.md) — system diagram, dual transport, ADR summary
+- **Module Map**: [MODULE_MAP.md](./MODULE_MAP.md) — every module, key files, dependencies
+- **Protocol & Data Flow**: [PROTOCOL_DATA_FLOW.md](./PROTOCOL_DATA_FLOW.md) — framing, control messages, PTY resume, SFTP
+- **Security Model**: [SECURITY_MODEL.md](./SECURITY_MODEL.md) — vault, TOFU, SSRF, JWT/Turnstile, quotas
+- **UI & Design System**: [UI_DESIGN_SYSTEM.md](./UI_DESIGN_SYSTEM.md) — token pipeline, themes, shell, IDE, terminal
+- **Deployment & CI**: [DEPLOYMENT_CI.md](./DEPLOYMENT_CI.md) — Pages, Relay, Gateway, EC2/Fly, gates
+- **Workspace Additions (2026-11)**: [WORKSPACE_ADDITIONS_2026-11.md](./WORKSPACE_ADDITIONS_2026-11.md) — shell, devops, diagrams
+- **Feature Claims Policy**: [FEATURE_CLAIMS.md](./FEATURE_CLAIMS.md) — Verified vs Implemented, how to claim
+- **Runbooks**: [RUNBOOK_control.md](./RUNBOOK_control.md) · [RUNBOOK_kubernetes.md](./RUNBOOK_kubernetes.md) · [RUNBOOK_git.md](./RUNBOOK_git.md) · [RUNBOOK_diagrams.md](./RUNBOOK_diagrams.md) · [RUNBOOK_devops.md](./RUNBOOK_devops.md)
 - **Session Plan & Checklist**: [SESSION_PLAN.md](./SESSION_PLAN.md)
 - **Honest capability matrix (source of truth for claims)**: [../docs/FEATURES.md](../docs/FEATURES.md)
 - **Monorepo Modules**:

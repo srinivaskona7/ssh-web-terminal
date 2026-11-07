@@ -199,7 +199,7 @@ Unlike a single EC2 bastion with an Elastic IP, **Cloudflare Workers using `clou
 
 ### Verification limits for relay file tools
 
-The relay SSH terminal and command execution have been verified against EC2 OpenSSH, not just the isolated fixture. The current relay `sftpOp` implementation is shell-command based, not the SFTP subsystem: it invokes `ls`/`cat` and a fixture-only `write-file` command. Relay editor saves/uploads therefore must not be considered production-ready. Use the Go gateway for real SFTP, binary transfers, and editor saves. Likewise, a browser-side replay buffer does not retain a remote process across a new SSH connection, and relay tunnel start does not bind a TCP listener on the user's computer. The feature matrix above describes intended/fixture behavior for those relay capabilities, not verified production support.
+Relay terminal, exec, and SFTP are verified against EC2 OpenSSH via a real browser SSH-2.0 SFTP client (`browser-ssh-client.ts` → `sftp-client.ts`, binary-safe base64, atomic `.part` rename, `~` expansion). The earlier shell-fixture note was superseded by the native SFTP implementation. Remaining relay limits: a browser-side replay buffer does not retain a remote process across a new SSH connection, and relay tunnel start does not bind a TCP listener on the user's computer (HTTP preview via `direct-tcpip` only).
 
 ## 6. Terminal verification (one emulator per pane)
 

@@ -27,7 +27,8 @@ import {
   replaceFirst,
   sortEntries,
   textStats,
-  toggleLineComment
+  toggleLineComment,
+  languageForPath
 } from './ide-editing';
 import { IDE_STORE_KEY } from './ide-storage';
 
@@ -1411,6 +1412,7 @@ export function LightIde({
                 <Button variant="danger" onClick={() => void deleteActive()} testId="ide-delete">
                   Delete
                 </Button>
+                <span data-testid="ide-language">{languageForPath(active.path)}</span>
                 <span data-testid="ide-cursor">
                   Ln {cursor.line}, Col {cursor.column}
                 </span>

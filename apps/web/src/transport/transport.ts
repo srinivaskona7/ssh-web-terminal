@@ -788,19 +788,11 @@ export class LiveGatewaySessionClient {
       throw new GatewayUnreachableError(rawWsUrl, validation.error);
     }
 
-    let wsUrl = validation.normalizedUrl;
+    const wsUrl = validation.normalizedUrl;
     const authToken = this.params.gatewayAuthToken?.trim() ?? '';
-    if (authToken) {
-      try {
-        const parsed = new URL(wsUrl);
-        if (!parsed.searchParams.has('token')) {
-          parsed.searchParams.set('token', authToken);
-          wsUrl = parsed.toString();
-        }
-      } catch {
-        // Keep normalizedUrl if URL parsing fails
-      }
-    }
+    // Token is sent via Sec-WebSocket-Protocol header in openSocket(), never
+    // in the URL, so it cannot leak into proxy/edge logs. The gateway also
+    // accepts a control-frame `hello.oidcToken` as defense-in-depth.
     return { wsUrl, authToken };
   }
 
@@ -831,7 +823,7 @@ export class LiveGatewaySessionClient {
         cols: this.params.cols,
         rows: this.params.rows
       });
-    });
+    }, authToken);
   }
 
   /**
@@ -864,7 +856,7 @@ export class LiveGatewaySessionClient {
       this.transport.sendControl(
         this.transport.seqTracker.buildResumeMessage(meta.sessionId, meta.resumeToken)
       );
-    });
+    }, authToken);
   }
 
   canResume(): boolean {
@@ -873,7 +865,8 @@ export class LiveGatewaySessionClient {
 
   private openSocket(
     wsUrl: string,
-    onOpen: () => void
+    onOpen: () => void,
+    authToken?: string
   ): Promise<ConnectedSessionMetadata> {
     return new Promise<ConnectedSessionMetadata>((resolve, reject) => {
       this.connectResolve = resolve;
@@ -882,7 +875,9 @@ export class LiveGatewaySessionClient {
       let wsOpened = false;
       let socket: WebSocket;
       try {
-        socket = new WebSocket(wsUrl);
+        const protocols = ['webssh-gateway.v1'];
+        if (authToken?.trim()) protocols.push(`token.${authToken.trim()}`);
+        socket = new WebSocket(wsUrl, protocols.length > 1 ? protocols : undefined);
       } catch (err) {
         this.connectResolve = null;
         this.connectReject = null;

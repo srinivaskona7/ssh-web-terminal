@@ -80,6 +80,7 @@ function errorText(err: unknown): string {
 function jobSessionFor(session: WorkspaceRemoteSession, executeAsRoot = false): JobSession {
   return {
     execCommand: (command, timeoutMs) => session.exec(command, { timeoutMs }),
+    writeFile: session.writeFile ? (path, content) => session.writeFile!(path, content) : undefined,
     executeAsRoot,
     isAttached: () => session.isConnected()
   };

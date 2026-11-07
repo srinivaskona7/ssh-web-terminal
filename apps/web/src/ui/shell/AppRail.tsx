@@ -25,6 +25,9 @@ const SERVER_TOOL_SCREENS: readonly ScreenId[] = [
   'automations',
   'deployments',
   'activity',
+  'diagrams',
+  'devops',
+  'integrated',
   'tunnels'
 ];
 
@@ -160,6 +163,27 @@ export function AppRail({
                 testId="nav-activity"
               >
                 Activity
+              </Button>
+              <Button
+                variant={activeScreen === 'diagrams' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('diagrams')}
+                testId="nav-diagrams"
+              >
+                <Icon name="command" /> Diagrams
+              </Button>
+              <Button
+                variant={activeScreen === 'devops' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('devops')}
+                testId="nav-devops"
+              >
+                <Icon name="command" /> DevOps
+              </Button>
+              <Button
+                variant={activeScreen === 'integrated' ? 'primary' : 'ghost'}
+                onClick={() => setActiveScreen('integrated')}
+                testId="nav-integrated"
+              >
+                <Icon name="command" /> Integrated
               </Button>
               <Button
                 variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}

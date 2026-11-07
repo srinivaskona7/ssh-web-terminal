@@ -10,6 +10,7 @@ import type {
   LiveConnectParams
 } from './transport.js';
 import { ExecOutputSink, abortError } from './exec-output.js';
+import { recordDiagnostic } from './diagnostics.js';
 import { routeSignRequest } from './remote-signer.js';
 import { prepareSessionEnv } from './session-env.js';
 import {
@@ -548,9 +549,8 @@ export class BrowserSshRelaySessionClient {
     }
     parsed.searchParams.set('host', this.params.host);
     parsed.searchParams.set('port', String(this.params.port));
-    if (this.params.gatewayAuthToken?.trim()) {
-      parsed.searchParams.set('token', this.params.gatewayAuthToken.trim());
-    }
+    // Token goes via Sec-WebSocket-Protocol header only — never in the URL,
+    // so it cannot land in edge logs. The relay prefers the header already.
     return parsed.toString();
   }
 
@@ -697,6 +697,7 @@ export class BrowserSshRelaySessionClient {
   }
 
   private failConnect(err: Error): void {
+    recordDiagnostic('ERR_RELAY_CONNECT', err.message, { host: this.params.host, port: this.params.port });
     if (this.connectReject) {
       const rej = this.connectReject;
       this.connectResolve = null;

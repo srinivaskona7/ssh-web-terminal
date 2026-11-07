@@ -1,6 +1,6 @@
 const CACHE_NAME = '__WEBSSH_CACHE_NAME__';
 const BUILD_VERSION = '__WEBSSH_BUILD_VERSION__';
-const PRECACHE_ASSETS = ['./manifest.webmanifest'];
+const PRECACHE_ASSETS = ['./manifest.webmanifest', './offline.html'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -82,7 +82,7 @@ self.addEventListener('fetch', (event) => {
         .catch(() =>
           caches
             .match(event.request)
-            .then((cached) => cached || caches.match('./index.html') || caches.match('./'))
+            .then((cached) => cached || caches.match('./index.html') || caches.match('./offline.html'))
         )
     );
     return;

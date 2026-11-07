@@ -88,6 +88,11 @@ const AutomationsPanel = lazy(() =>
   import('./ServerModules').then((m) => ({ default: m.AutomationsPanel }))
 );
 const ActivityPanel = lazy(() => import('./ServerModules').then((m) => ({ default: m.ActivityPanel })));
+const DiagramsPanel = lazy(() => import('./DiagramsPanel').then((m) => ({ default: m.DiagramsPanel })));
+const DevOpsPanel = lazy(() => import('./DevOpsPanel').then((m) => ({ default: m.DevOpsPanel })));
+const IntegratedWorkspaceView = lazy(() =>
+  import('./IntegratedWorkspace').then((m) => ({ default: m.IntegratedWorkspace }))
+);
 import {
   MAX_RECONNECT_ATTEMPTS,
   connectionHealthRows,
@@ -119,6 +124,9 @@ export type ScreenId =
   | 'automations'
   | 'deployments'
   | 'activity'
+  | 'diagrams'
+  | 'devops'
+  | 'integrated'
   | 'server-tools';
 
 export type ConnectionState =
@@ -3349,6 +3357,18 @@ export function App(): JSX.Element {
             {activeScreen === 'automations' ? <AutomationsPanel ctx={moduleContext} /> : null}
             {activeScreen === 'deployments' ? <DeploymentsPanel ctx={moduleContext} /> : null}
             {activeScreen === 'activity' ? <ActivityPanel ctx={moduleContext} /> : null}
+            {activeScreen === 'diagrams' ? <DiagramsPanel ctx={moduleContext} /> : null}
+            {activeScreen === 'devops' ? <DevOpsPanel ctx={moduleContext} /> : null}
+            {activeScreen === 'integrated' ? (
+              <IntegratedWorkspaceView
+                session={remoteSession}
+                connectedLabel={connectedHost ? `${connectedUser}@${connectedHost}` : ''}
+                transport={transportMode}
+                host={connectedHost}
+                port={Number.parseInt(connectPort, 10) || 22}
+                user={connectedUser}
+              />
+            ) : null}
           </Suspense>
 
           {activeScreen === 'features' ? (

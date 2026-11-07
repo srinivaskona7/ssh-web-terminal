@@ -140,13 +140,37 @@ if (fs.existsSync(swPath)) {
 // Ensure .nojekyll exists for GitHub Pages
 fs.writeFileSync(path.join(distDir, '.nojekyll'), '', 'utf8');
 
+// Bundle budget guard: keep the entry and split chunks within a sane ceiling.
+// The code-split chunks (LightIde, ServerModules, CapabilityMatrixPanel) should
+// stay under 600 KiB gzipped each; the main entry under 1.5 MiB gzipped.
+// Budgets are generous enough for normal growth but catch accidental bloat.
+import zlib from 'node:zlib';
+let totalGzip = 0;
+for (const file of assetFiles) {
+  if (!file.endsWith('.js')) continue;
+  const fullPath = path.join(assetsDir, file);
+  const buf = fs.readFileSync(fullPath);
+  const gz = zlib.gzipSync(buf).length;
+  totalGzip += gz;
+  const budget = file.includes('LightIde') || file.includes('ServerModules') || file.includes('CapabilityMatrix')
+    ? 600 * 1024
+    : 1_500 * 1024;
+  if (gz > budget) {
+    console.error(`Build verification failed: bundle ${file} is ${gz} bytes gzip, budget ${budget}.`);
+    process.exit(1);
+  }
+  console.log(`bundle ${file}: ${gz} gzip bytes (budget ${budget})`);
+}
+console.log(`total gzip js: ${totalGzip}`);
+
 // Emit build-manifest.json for runtime and deployment inspection
 const buildManifest = {
   version: buildVersion,
   cacheName,
   basePath,
   referencedAssets,
-  assets: assetFiles
+  assets: assetFiles,
+  totalGzip
 };
 fs.writeFileSync(path.join(distDir, 'build-manifest.json'), JSON.stringify(buildManifest, null, 2), 'utf8');
 

@@ -47,3 +47,8 @@
 - **Context**: A remote editor that writes blindly can silently overwrite another operator's change, and a save attempted while the socket is closed must never present as successful.
 - **Decision**: `saveEditorBuffer` (App.tsx) re-reads the remote file before writing and refuses when the content differs from what was loaded. The UI offers explicit "Overwrite with my version" or "Discard mine and reload". A disconnected session returns an error state; no local-fallback success path exists.
 - **Consequences**: Editor-sized files (<= 512 KiB read cap) pay one extra read per save. Larger files are outside the editor's scope.
+
+## ADR-009: Memory Is Canonical for All Agents (2026-11-07)
+- **Context**: Claude, Gemini, and Codex each have a different entry file (`CLAUDE.md`/`GEMINI.md`/`AGENTS.md`). Without a single index they drift and each agent re-derives architecture from scratch.
+- **Decision**: `memory/MEMORY.md` is the canonical index. The three entry files stay byte-identical, carry the starter line *"Start every session by reading `memory/MEMORY.md`..."*, and are enforced by `scripts/check-memory-sync.mjs` (`npm run lint:memory`, part of `npm run lint`). Detailed memory is split per concern (`ARCHITECTURE_OVERVIEW`, `MODULE_MAP`, `PROTOCOL_DATA_FLOW`, `SECURITY_MODEL`, `UI_DESIGN_SYSTEM`, `DEPLOYMENT_CI`, `WORKSPACE_ADDITIONS`, `FEATURE_CLAIMS`) plus per-module runbooks (`RUNBOOK_<module>.md`). New decisions append an ADR here and update the index.
+- **Consequences**: Any agent gets full context in ~2 min; CI fails if entry files drift.

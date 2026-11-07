@@ -2,6 +2,8 @@
 
 Synchronized with `memory/MEMORY.md` and `memory/SESSION_PLAN.md`.
 
+Start every session by reading `memory/MEMORY.md` and then the relevant file in `memory/`.
+
 ## Architecture & Module Tree
 - `design/`: Design tokens (`tokens.json`) and screen/component specs (`COMPONENT_SPECS.md`).
 - `packages/ui-kit/`: Design token pipeline (`tokens.json` → `tokens.css` & TypeScript definitions), theme presets, self-hosted WOFF2 fonts, 1.5px line icons, and accessible UI primitives.

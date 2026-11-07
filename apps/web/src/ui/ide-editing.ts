@@ -245,6 +245,13 @@ export function textStats(text: string): { lines: number; words: number; chars: 
   return { lines, words, chars: text.length };
 }
 
+/** Language hint from file extension — display only, no syntax highlighting. */
+export function languageForPath(path: string): string {
+  const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+  const map: Record<string, string> = { ts: 'TypeScript', tsx: 'TypeScript', js: 'JavaScript', jsx: 'JavaScript', py: 'Python', go: 'Go', rs: 'Rust', sh: 'Shell', md: 'Markdown', json: 'JSON', yaml: 'YAML', yml: 'YAML', css: 'CSS', html: 'HTML', toml: 'TOML' };
+  return map[ext] ?? 'Text';
+}
+
 export function formatBytes(size: number): string {
   if (!Number.isFinite(size) || size <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];

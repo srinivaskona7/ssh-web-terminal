@@ -14,6 +14,9 @@ export interface JobSession {
     command: string,
     timeoutMs?: number
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  /** Write a file over SFTP without passing contents in argv. Preferred over base64-in-exec. */
+  writeFile?: (path: string, content: Uint8Array) => Promise<void>;
+  chmod?: (path: string, mode: string) => Promise<void>;
   /** False when sudo cannot run non-interactively; recipes then plan accordingly. */
   executeAsRoot?: boolean;
   /** Whether the browser is currently attached to the SSH session. */
@@ -77,11 +80,26 @@ export async function startDetachedJob(
   id: string,
   script: string
 ): Promise<{ pid: number }> {
-  const setup = await session.execCommand(buildStartCommand(id, script), 30_000);
-  if (setup.exitCode !== 0) {
-    throw new Error(
-      `Failed to prepare remote job: ${(setup.stderr || setup.stdout).trim() || `exit ${setup.exitCode}`}`
-    );
+  // Prefer SFTP write so secrets never appear in `ps`/argv. Fall back to
+  // base64-in-exec only when the session has no writeFile (e.g. relay exec-only).
+  if (session.writeFile) {
+    const quotedDir = shellDir(id);
+    const mkdir = await session.execCommand(`mkdir -p ${quotedDir} && chmod 700 ${quotedDir} && rm -f ${quotedDir}/exit.code ${quotedDir}/stdout.log ${quotedDir}/stderr.log`, 30_000);
+    if (mkdir.exitCode !== 0) {
+      throw new Error(
+        `Failed to prepare remote job: ${(mkdir.stderr || mkdir.stdout).trim() || `exit ${mkdir.exitCode}`}`
+      );
+    }
+    const remoteRunSh = `~/.webssh/jobs/${id}/run.sh`;
+    await session.writeFile(remoteRunSh, new TextEncoder().encode(script));
+    if (session.chmod) await session.chmod(remoteRunSh, '700');
+  } else {
+    const setup = await session.execCommand(buildStartCommand(id, script), 30_000);
+    if (setup.exitCode !== 0) {
+      throw new Error(
+        `Failed to prepare remote job: ${(setup.stderr || setup.stdout).trim() || `exit ${setup.exitCode}`}`
+      );
+    }
   }
   const launch = await session.execCommand(buildLaunchCommand(id), 30_000);
   if (launch.exitCode !== 0) {
