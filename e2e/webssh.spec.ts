@@ -116,6 +116,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('remote-editor-textarea')).toHaveValue(/WebSSH Test Server/);
 
     // 8. Navigate through remaining IDE screens and verify accessibility
+    await page.getByTestId('nav-server-tools').click();
     await page.getByTestId('nav-overview').click();
     await expect(page.getByTestId('screen-overview')).toBeVisible();
     await expect(page.getByTestId('live-control')).toBeVisible();
@@ -124,7 +125,12 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('screen-tunnels')).toBeVisible();
     await expect(page.getByTestId('remote-web-preview-card')).toBeVisible();
 
-    await page.getByTestId('nav-features').click();
+    // Open Features via command palette (server tools are in the palette)
+    await page.keyboard.press('Control+k');
+    const paletteInput = page.getByTestId('command-palette-input');
+    await expect(paletteInput).toBeVisible();
+    await paletteInput.fill('capability');
+    await page.keyboard.press('Enter');
     await expect(page.getByTestId('screen-features')).toBeVisible();
     await expect(page.getByTestId('capability-table')).toBeVisible();
     const capabilityRows = await page.locator('[data-testid^="capability-"]').count();

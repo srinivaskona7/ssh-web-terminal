@@ -134,7 +134,7 @@ export function WelcomeScreen({
       <div className="webssh-aurora" aria-hidden="true" />
 
       {/* 1. Quick Connect — above the fold */}
-      <div className="webssh-welcome-quick-connect">
+      <div className="webssh-welcome-quick-connect" data-testid="welcome-quick-connect-card">
         <h2 className="webssh-welcome-heading">Connect to a server.</h2>
         <p className="webssh-welcome-subheading">
           Enter the host, username, and authentication method. Recent hosts appear below.

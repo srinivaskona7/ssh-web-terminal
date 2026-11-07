@@ -602,7 +602,10 @@ export function AppHeader({
         aria-label="View options"
         title="View options"
         data-testid="view-menu-btn"
-        onClick={() => setOpenMenu((m) => (m === 'view' ? null : 'view'))}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpenMenu((m) => (m === 'view' ? null : 'view'));
+        }}
       >
         <span aria-hidden="true">•••</span>
       </button>
