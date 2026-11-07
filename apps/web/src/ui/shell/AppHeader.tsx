@@ -1,8 +1,9 @@
+import { useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { Button, Icon, type ThemeId } from '@webssh/ui-kit';
 import type { ConnectionRegistry } from '../../session/connection-registry';
 import type { BrowserSshRelaySessionClient, LiveGatewaySessionClient } from '../../transport';
-import type { ConnectionState, PendingJump, ScreenId, SessionTabItem } from '../App';
+import type { ConnectionState, PendingJump, ResourceMetrics, ScreenId, SessionTabItem } from '../App';
 import type { Setter } from './types';
 
 export type MenuId = 'view' | null;
@@ -42,7 +43,7 @@ export interface HeaderConnection {
   connectedHost: string;
   environmentLabel: string;
   rttMs: number;
-  resourceMetrics: Map<string, { cpu: number; ram: number; disk: number; updatedAt: number }>;
+  resourceMetrics: Map<string, ResourceMetrics>;
   handleDisconnect: () => void;
   setPendingJump: Setter<PendingJump | null>;
   setConnectModalOpen: Setter<boolean>;
@@ -128,6 +129,8 @@ export function AppHeader({
   const isConnected = connectionState === 'connected' && Boolean(connectedHost);
   const isConnecting = connectionState === 'reconnecting';
   const metrics = activeTab?.connectionId ? resourceMetrics.get(activeTab.connectionId) : undefined;
+
+  const [hoveredMetric, setHoveredMetric] = useState<'cpu' | 'ram' | 'disk' | null>(null);
 
   const connectionLabel = isConnected
     ? `${connectedUser}@${connectedHost}`
@@ -296,40 +299,126 @@ export function AppHeader({
           {connectionState === 'connected' && connectedHost ? (
             <>
               <span className="webssh-resource-label">{connectedUser}@{connectedHost}</span>
-              <div className="webssh-resource-metric">
+              <div
+                className="webssh-resource-metric"
+                onClick={() => setActiveScreen('overview')}
+                onMouseEnter={() => setHoveredMetric('cpu')}
+                onMouseLeave={() => setHoveredMetric(null)}
+              >
                 <span className="webssh-resource-name">CPU</span>
                 <div className="webssh-resource-bar">
                   <div
                     className="webssh-resource-bar-fill"
-                    style={{ width: `${metrics?.cpu ?? 0}%` }}
+                    style={{ width: `${metrics?.cpuOverall ?? 0}%` }}
                   />
                 </div>
-                <span className="webssh-resource-value">{metrics?.cpu ?? '--'}%</span>
+                <span className="webssh-resource-value">{metrics?.cpuOverall ?? '--'}%</span>
               </div>
-              <div className="webssh-resource-metric">
+              <div
+                className="webssh-resource-metric"
+                onClick={() => setActiveScreen('overview')}
+                onMouseEnter={() => setHoveredMetric('ram')}
+                onMouseLeave={() => setHoveredMetric(null)}
+              >
                 <span className="webssh-resource-name">RAM</span>
                 <div className="webssh-resource-bar">
                   <div
                     className="webssh-resource-bar-fill"
-                    style={{ width: `${metrics?.ram ?? 0}%` }}
+                    style={{ width: `${metrics?.ramPercent ?? 0}%` }}
                   />
                 </div>
-                <span className="webssh-resource-value">{metrics?.ram ?? '--'}%</span>
+                <span className="webssh-resource-value">{metrics?.ramPercent ?? '--'}%</span>
               </div>
-              <div className="webssh-resource-metric">
+              <div
+                className="webssh-resource-metric"
+                onClick={() => setActiveScreen('overview')}
+                onMouseEnter={() => setHoveredMetric('disk')}
+                onMouseLeave={() => setHoveredMetric(null)}
+              >
                 <span className="webssh-resource-name">Disk</span>
                 <div className="webssh-resource-bar">
                   <div
                     className="webssh-resource-bar-fill"
-                    style={{ width: `${metrics?.disk ?? 0}%` }}
+                    style={{ width: `${metrics?.disk?.[0]?.percent ?? 0}%` }}
                   />
                 </div>
-                <span className="webssh-resource-value">{metrics?.disk ?? '--'}%</span>
+                <span className="webssh-resource-value">
+                  {metrics?.disk?.[0]?.percent ?? '--'}%
+                </span>
               </div>
               {metrics?.updatedAt && (
                 <span className="webssh-resource-updated">
                   updated {Math.floor((Date.now() - metrics.updatedAt) / 1000)}s ago
                 </span>
+              )}
+              {hoveredMetric === 'cpu' && metrics && (
+                <div className="webssh-resource-detail webssh-resource-detail--cpu">
+                  <div className="webssh-resource-detail-title">CPU Details</div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Overall:</span>
+                    <span className="webssh-resource-detail-value">{metrics.cpuOverall}%</span>
+                  </div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Load Avg (1m):</span>
+                    <span className="webssh-resource-detail-value">{metrics.loadAvg1}</span>
+                  </div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Cores:</span>
+                    <span className="webssh-resource-detail-value">{metrics.cpuPerCore.length}</span>
+                  </div>
+                  {metrics.cpuPerCore.length > 0 && (
+                    <div className="webssh-resource-detail-percore">
+                      <span className="webssh-resource-detail-label">Per-core:</span>
+                      {metrics.cpuPerCore.map((p, i) => (
+                        <span key={i} className="webssh-resource-detail-core">
+                          CPU{i}: {p}%
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {hoveredMetric === 'ram' && metrics && (
+                <div className="webssh-resource-detail webssh-resource-detail--ram">
+                  <div className="webssh-resource-detail-title">Memory Details</div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Usage:</span>
+                    <span className="webssh-resource-detail-value">{metrics.ramPercent}%</span>
+                  </div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Used:</span>
+                    <span className="webssh-resource-detail-value">{metrics.ramUsedMiB} MiB</span>
+                  </div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Total:</span>
+                    <span className="webssh-resource-detail-value">{metrics.ramTotalMiB} MiB</span>
+                  </div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Cache:</span>
+                    <span className="webssh-resource-detail-value">{metrics.ramCacheMiB} MiB</span>
+                  </div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Buffers:</span>
+                    <span className="webssh-resource-detail-value">{metrics.ramBuffersMiB} MiB</span>
+                  </div>
+                  <div className="webssh-resource-detail-row">
+                    <span className="webssh-resource-detail-label">Swap:</span>
+                    <span className="webssh-resource-detail-value">{metrics.ramSwapPercent}%</span>
+                  </div>
+                </div>
+              )}
+              {hoveredMetric === 'disk' && metrics && metrics.disk && (
+                <div className="webssh-resource-detail webssh-resource-detail--disk">
+                  <div className="webssh-resource-detail-title">Disk Details</div>
+                  {metrics.disk.map((d) => (
+                    <div key={d.mountpoint} className="webssh-resource-detail-row">
+                      <span className="webssh-resource-detail-label">{d.mountpoint}:</span>
+                      <span className="webssh-resource-detail-value">
+                        {d.usedMiB} / {d.totalMiB} MiB ({d.percent}%)
+                      </span>
+                    </div>
+                  ))}
+                </div>
               )}
             </>
           ) : (

@@ -178,6 +178,27 @@ function resolveTurnstileSiteKey(): string {
   }
 }
 
+export interface ResourceMetrics {
+  cpuOverall: number;
+  cpuPerCore: number[];
+  loadAvg1: number;
+  ramPercent: number;
+  ramUsedMiB: number;
+  ramTotalMiB: number;
+  ramCacheMiB: number;
+  ramBuffersMiB: number;
+  ramSwapPercent: number;
+  disk: Array<{
+    filesystem: string;
+    totalMiB: number;
+    usedMiB: number;
+    availableMiB: number;
+    percent: number;
+    mountpoint: string;
+  }>;
+  updatedAt: number;
+}
+
 export function App(): JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const terminalViewRef = useRef<HTMLDivElement | null>(null);
@@ -375,8 +396,28 @@ export function App(): JSX.Element {
   const [pendingJump, setPendingJump] = useState<PendingJump | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
-  /** Per-connection resource metrics: cpu percent, ram percent, disk percent, last updated. */
-  const [resourceMetrics, setResourceMetrics] = useState<Map<string, { cpu: number; ram: number; disk: number; updatedAt: number }>>(new Map());
+  /** Per-connection resource metrics. Collected via separate SSH exec channels. */
+  interface ResourceMetrics {
+    cpuOverall: number;          // Overall CPU % (0-100)
+    cpuPerCore: number[];        // Per-core CPU % array
+    loadAvg1: number;            // 1-minute load average
+    ramPercent: number;          // RAM % (0-100)
+    ramUsedMiB: number;          // Used memory in MiB
+    ramTotalMiB: number;         // Total memory in MiB
+    ramCacheMiB: number;         // Cached memory in MiB
+    ramBuffersMiB: number;       // Buffer memory in MiB
+    ramSwapPercent: number;      // Swap % (0-100)
+    disk: Array<{                  // Per-filesystem disk info
+      filesystem: string;
+      totalMiB: number;
+      usedMiB: number;
+      availableMiB: number;
+      percent: number;
+      mountpoint: string;
+    }>;
+    updatedAt: number;           // Timestamp of collection
+  }
+  const [resourceMetrics, setResourceMetrics] = useState<Map<string, ResourceMetrics>>(new Map());
   const resourcePollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resourceCollectingRef = useRef<Set<string>>(new Set());
   const documentVisibilityRef = useRef<boolean>(!document.hidden);
@@ -1611,43 +1652,86 @@ export function App(): JSX.Element {
 
   // ---- Resource metrics (CPU / RAM / Disk) collected via SSH exec ----
 
-  interface CpuSample { total: number; idle: number }
+  interface CpuSample { total: number; idle: number; perCoreTotal: number[]; perCoreIdle: number[] }
   const prevCpuRef = useRef<Map<string, CpuSample>>(new Map());
 
   function parseCpuStat(output: string): CpuSample | null {
-    const match = output.match(/^cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
-    if (!match) return null;
-    const user = Number(match[1] ?? '0');
-    const nice = Number(match[2] ?? '0');
-    const system = Number(match[3] ?? '0');
-    const idle = Number(match[4] ?? '0');
-    const iowait = Number(match[5] ?? '0');
-    const irq = Number(match[6] ?? '0');
-    const softirq = Number(match[7] ?? '0');
-    const steal = Number(match[8] ?? '0');
+    const lines = output.trim().split('\n');
+    const aggMatch = lines[0]?.match(/^cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+    if (!aggMatch) return null;
+    const user = Number(aggMatch[1] ?? '0');
+    const nice = Number(aggMatch[2] ?? '0');
+    const system = Number(aggMatch[3] ?? '0');
+    const idle = Number(aggMatch[4] ?? '0');
+    const iowait = Number(aggMatch[5] ?? '0');
+    const irq = Number(aggMatch[6] ?? '0');
+    const softirq = Number(aggMatch[7] ?? '0');
+    const steal = Number(aggMatch[8] ?? '0');
     const total = user + nice + system + idle + iowait + irq + softirq + steal;
-    return { total, idle };
+
+    const perCoreTotal: number[] = [];
+    const perCoreIdle: number[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const m = (lines[i] ?? '').match(/^cpu(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+      if (m) {
+        const pTotal = Number(m[2] ?? '0') + Number(m[3] ?? '0') + Number(m[4] ?? '0') + Number(m[5] ?? '0') + Number(m[6] ?? '0') + Number(m[7] ?? '0') + Number(m[8] ?? '0') + Number(m[9] ?? '0');
+        const pIdle = Number(m[5] ?? '0');
+        perCoreTotal.push(pTotal);
+        perCoreIdle.push(pIdle);
+      }
+    }
+    return { total, idle, perCoreTotal, perCoreIdle };
   }
 
-  function computeRamPercent(output: string): number {
+  function computeRamStats(output: string): { percent: number; usedMiB: number; totalMiB: number; cacheMiB: number; buffersMiB: number; swapPercent: number } {
     const memTotalMatch = output.match(/MemTotal:\s+(\d+)/);
     const memAvailableMatch = output.match(/MemAvailable:\s+(\d+)/);
-    if (!memTotalMatch || !memAvailableMatch) return 0;
-    const total = Number(memTotalMatch[1] ?? '0');
-    const available = Number(memAvailableMatch[1] ?? '0');
-    if (total <= 0) return 0;
-    return ((total - available) / total) * 100;
+    const memCachedMatch = output.match(/Cached:\s+(\d+)/);
+    const memBuffersMatch = output.match(/Buffers:\s+(\d+)/);
+    const swapTotalMatch = output.match(/SwapTotal:\s+(\d+)/);
+    const swapFreeMatch = output.match(/SwapFree:\s+(\d+)/);
+
+    const totalKiB = Number(memTotalMatch?.[1] ?? '0');
+    const availableKiB = Number(memAvailableMatch?.[1] ?? '0');
+    const cachedKiB = Number(memCachedMatch?.[1] ?? '0');
+    const buffersKiB = Number(memBuffersMatch?.[1] ?? '0');
+    const swapTotalKiB = Number(swapTotalMatch?.[1] ?? '0');
+    const swapFreeKiB = Number(swapFreeMatch?.[1] ?? '0');
+
+    const usedKiB = totalKiB - availableKiB;
+    const percent = totalKiB > 0 ? (usedKiB / totalKiB) * 100 : 0;
+    const swapPercent = swapTotalKiB > 0 ? ((swapTotalKiB - swapFreeKiB) / swapTotalKiB) * 100 : 0;
+
+    return {
+      percent: Math.round(percent),
+      usedMiB: Math.round(usedKiB / 1024),
+      totalMiB: Math.round(totalKiB / 1024),
+      cacheMiB: Math.round(cachedKiB / 1024),
+      buffersMiB: Math.round(buffersKiB / 1024),
+      swapPercent: Math.round(swapPercent)
+    };
   }
 
-  function computeDiskPercent(output: string): number {
-    // df -m / output: Filesystem 1M-blocks Used Available Use% Mounted-on
+  function computeDiskStats(output: string): Array<{ filesystem: string; totalMiB: number; usedMiB: number; availableMiB: number; percent: number; mountpoint: string }> {
     const lines = output.trim().split('\n');
-    if (lines.length < 2) return 0;
-    const parts = (lines[1] ?? '').trim().split(/\s+/);
-    const total = Number(parts[1] ?? '0');
-    const used = Number(parts[2] ?? '0');
-    if (total <= 0) return 0;
-    return (used / total) * 100;
+    const result: Array<{ filesystem: string; totalMiB: number; usedMiB: number; availableMiB: number; percent: number; mountpoint: string }> = [];
+    for (let i = 1; i < lines.length; i++) {
+      const parts = (lines[i] ?? '').trim().split(/\s+/);
+      if (parts.length < 6) continue;
+      const total = Number(parts[1] ?? '0');
+      const used = Number(parts[2] ?? '0');
+      const available = Number(parts[3] ?? '0');
+      const mountpoint = parts[5] ?? '/';
+      const filesystem = parts[0] ?? '';
+      const percent = total > 0 ? Math.round((used / total) * 100) : 0;
+      result.push({ filesystem, totalMiB: total, usedMiB: used, availableMiB: available, percent, mountpoint });
+    }
+    return result;
+  }
+
+  function computeLoadAvg(output: string): number {
+    const match = output.match(/^([\d.]+)/);
+    return match ? Number(match[1] ?? '0') : 0;
   }
 
   async function collectResourceMetrics(connectionId: string, client: LiveGatewaySessionClient | BrowserSshRelaySessionClient): Promise<void> {
@@ -1656,38 +1740,59 @@ export function App(): JSX.Element {
 
     try {
       // CPU: two samples of /proc/stat for delta calculation
-      const cpu1 = await client.execCommand('head -1 /proc/stat');
+      const cpu1 = await client.execCommand('cat /proc/stat');
       await new Promise(r => setTimeout(r, 1000));
-      const cpu2 = await client.execCommand('head -1 /proc/stat');
+      const cpu2 = await client.execCommand('cat /proc/stat');
 
-      let cpuPercent = 0;
+      let cpuOverallPercent = 0;
       const s1 = parseCpuStat(cpu1.stdout || '');
       const s2 = parseCpuStat(cpu2.stdout || '');
       if (s1 && s2) {
         const totalDelta = s2.total - s1.total;
         const idleDelta = s2.idle - s1.idle;
-        cpuPercent = totalDelta > 0 ? Math.max(0, (1 - idleDelta / totalDelta) * 100) : 0;
-      }
-      prevCpuRef.current.set(connectionId, s2 ?? { total: 0, idle: 0 });
+        cpuOverallPercent = totalDelta > 0 ? Math.max(0, (1 - idleDelta / totalDelta) * 100) : 0;
+        const perCorePercent: number[] = [];
+        for (let i = 0; i < s2.perCoreTotal.length; i++) {
+          const p1 = s1.perCoreTotal[i] ?? 0;
+          const p2 = s2.perCoreTotal[i] ?? 0;
+          const i1 = s1.perCoreIdle[i] ?? 0;
+          const i2 = s2.perCoreIdle[i] ?? 0;
+          const tDelta = p2 - p1;
+          const iDelta = i2 - i1;
+          perCorePercent.push(tDelta > 0 ? Math.max(0, (1 - iDelta / tDelta) * 100) : 0);
+        }
+        prevCpuRef.current.set(connectionId, s2);
 
-      // RAM
-      const mem = await client.execCommand('cat /proc/meminfo');
-      const ramPercent = computeRamPercent(mem.stdout || '');
+        // Load average
+        const load = await client.execCommand('cat /proc/loadavg');
+        const loadAvg1 = computeLoadAvg(load.stdout || '');
 
-      // Disk
-      const df = await client.execCommand('df -m /');
-      const diskPercent = computeDiskPercent(df.stdout || '');
+        // RAM
+        const mem = await client.execCommand('cat /proc/meminfo');
+        const ramStats = computeRamStats(mem.stdout || '');
 
-      setResourceMetrics(prev => {
-        const next = new Map(prev);
-        next.set(connectionId, {
-          cpu: Math.round(cpuPercent),
-          ram: Math.round(ramPercent),
-          disk: Math.round(diskPercent),
-          updatedAt: Date.now()
+        // Disk (all mounted filesystems)
+        const df = await client.execCommand('df -m');
+        const diskStats = computeDiskStats(df.stdout || '');
+
+        setResourceMetrics(prev => {
+          const next = new Map(prev);
+          next.set(connectionId, {
+            cpuOverall: Math.round(cpuOverallPercent),
+            cpuPerCore: perCorePercent.map(p => Math.round(p)),
+            loadAvg1: Math.round(loadAvg1 * 100) / 100,
+            ramPercent: ramStats.percent,
+            ramUsedMiB: ramStats.usedMiB,
+            ramTotalMiB: ramStats.totalMiB,
+            ramCacheMiB: ramStats.cacheMiB,
+            ramBuffersMiB: ramStats.buffersMiB,
+            ramSwapPercent: ramStats.swapPercent,
+            disk: diskStats,
+            updatedAt: Date.now()
+          });
+          return next;
         });
-        return next;
-      });
+      }
     } catch {
       // Metrics are best-effort; silently ignore failures
     } finally {
