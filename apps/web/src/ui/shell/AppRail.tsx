@@ -8,6 +8,10 @@ import type { Setter } from './types';
 export interface AppRailProps {
   activeScreen: ScreenId;
   setActiveScreen: Setter<ScreenId>;
+  connectedHost?: string;
+  connectedUser?: string;
+  connectedPort?: number;
+  onConnectAnother?: () => void;
   workspacePreset: WorkspacePreset;
   applyPreset: (preset: WorkspacePreset) => void;
   railWidth: number;
@@ -46,6 +50,10 @@ const SERVER_TOOL_SCREENS: readonly ScreenId[] = [
 export function AppRail({
   activeScreen,
   setActiveScreen,
+  connectedHost,
+  connectedUser,
+  connectedPort,
+  onConnectAnother,
   workspacePreset,
   applyPreset,
   railWidth,
@@ -61,6 +69,13 @@ export function AppRail({
   return (
     <>
       <nav className="webssh-rail" aria-label="Workspace navigation" style={{ width: `${railWidth}px`, transform: isRailOpen ? 'translateX(0)' : 'translateX(-100%)' }}>
+        <div style={{ padding: 'var(--space-2)', borderBottom: 'var(--border-hairline)' }} data-testid="host-switcher">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+            <span className="webssh-status-dot webssh-status-dot--connected" aria-hidden="true" />
+            <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{connectedHost ? `${connectedUser}@${connectedHost}:${connectedPort}` : 'No host'}</strong>
+          </div>
+          <Button variant="ghost" onClick={() => onConnectAnother?.()} testId="connect-another-btn">Connect another server</Button>
+        </div>
         <div className="webssh-rail-scroll">
           {/* Global */}
           <div className="webssh-rail-group" role="group" aria-label="Global">

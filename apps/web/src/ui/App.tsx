@@ -2773,6 +2773,10 @@ export function App(): JSX.Element {
           setShortcutsOpen(false);
           return;
         }
+        if (openMenu !== null) {
+          setOpenMenu(null);
+          return;
+        }
         setZenMode((wasZen) => {
           if (wasZen) {
             setActiveScreen('welcome');
@@ -3117,6 +3121,10 @@ export function App(): JSX.Element {
           <AppRail
             activeScreen={activeScreen}
             setActiveScreen={setActiveScreen}
+            connectedHost={connectedHost}
+            connectedUser={connectedUser}
+            connectedPort={Number.parseInt(connectPort, 10) || 22}
+            onConnectAnother={() => { setPendingJump(null); setConnectModalOpen(true); }}
             workspacePreset={workspacePreset}
             applyPreset={applyPreset}
             railWidth={railWidth}
