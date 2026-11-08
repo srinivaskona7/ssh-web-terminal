@@ -50,6 +50,8 @@ type Server struct {
 	openSessions atomic.Int64
 	requestLog   [][]string
 	signals      []string
+	cols         int
+	rows         int
 }
 
 func NewServer(rootDir string, password string, initialKeys []ssh.PublicKey) (*Server, error) {
@@ -309,6 +311,8 @@ type shellState struct {
 	cwd      string // virtual path starting at "/" (mapped to s.rootDir)
 	lastExit int
 	env      map[string]string
+	cols     int
+	rows     int
 
 	// done closes when the session channel closes; signals carries "signal"
 	// requests. Long-running builtins (sleep, tail -f) stop on either.
@@ -560,6 +564,13 @@ func (s *Server) evalSingleCommand(st *shellState, rawCmd string) (stdout string
 	case "whoami":
 		outBuf.WriteString(st.user + lf)
 
+	case "stty":
+		if len(args) == 0 || args[0] == "size" {
+			cols, rows := 80, 24
+			if st.cols > 0 { cols = st.cols }
+			if st.rows > 0 { rows = st.rows }
+			outBuf.WriteString(fmt.Sprintf("%d %d", cols, rows) + lf)
+		}
 	case "hostname":
 		outBuf.WriteString("testsshd" + lf)
 
@@ -1159,6 +1170,10 @@ func (s *Server) handleSessionChannel(user string, ch ssh.Channel, requests <-ch
 		s.logRequest(logIdx, req.Type)
 		switch req.Type {
 		case "pty-req", "window-change":
+			var win struct{ Width, Height, PxWidth, PxHeight uint32 }
+			if ssh.Unmarshal(req.Payload, &win) == nil && win.Width > 0 && win.Height > 0 {
+				st.cols, st.rows = int(win.Width), int(win.Height)
+			}
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}

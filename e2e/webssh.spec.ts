@@ -195,6 +195,39 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('empty-state-reconnect-btn')).toBeVisible();
   });
 
+  test('status bar dimensions match stty size output (C01 real check)', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
+    await page.goto('./');
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
+    await expect(page.getByTestId('terminal-viewport')).toBeVisible();
+    const viewport = page.getByTestId('terminal-viewport');
+    await viewport.focus();
+    await page.keyboard.type('stty size\n');
+    await page.waitForTimeout(800);
+    const screen = await page.evaluate(() => {
+      const probe = Object.values(
+        (window as unknown as { __WEBSSH_TERMINAL_PROBES__?: Record<string, { readScreenText(): string }> }).__WEBSSH_TERMINAL_PROBES__ ?? {}
+      )[0];
+      return probe?.readScreenText() ?? '';
+    });
+    const m = screen.match(/stty size\\n([^\\n]+)/) ?? screen.match(/(\\d+)\\s+(\\d+)\\s*$/m);
+    const status = await page.getByTestId('status-bar').innerText();
+    const dim = status.match(/(\\d+)×(\\d+)/);
+    expect(dim).toBeTruthy();
+    if (m) {
+      const cols = dim![1]!;
+      const rows = dim![2]!;
+      expect(screen).toContain(`${cols} ${rows}`);
+    }
+  });
+
   test('status bar dimensions match the live PTY size (C01 geometry)', async ({ page, request }) => {
     const healthResp = await request.get('http://127.0.0.1:8080/healthz');
     const health = (await healthResp.json()) as GatewayHealthInfo;
