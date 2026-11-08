@@ -6,6 +6,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { SerializeAddon } from '@xterm/addon-serialize';
 
 export type TerminalRendererMode = 'webgl' | 'canvas' | 'dom';
 
@@ -28,6 +29,7 @@ export class XtermPaneAdapter {
   public readonly terminal: Terminal;
   public readonly fitAddon: FitAddon;
   public readonly searchAddon: SearchAddon;
+  public readonly serializeAddon: SerializeAddon;
   private activeRenderer: TerminalRendererMode = 'dom';
   private resizeObserver: ResizeObserver | null = null;
   private readonly onRendererChange?: (mode: TerminalRendererMode) => void;
@@ -47,11 +49,13 @@ export class XtermPaneAdapter {
 
     this.fitAddon = new FitAddon();
     this.searchAddon = new SearchAddon();
+    this.serializeAddon = new SerializeAddon();
     const webLinksAddon = new WebLinksAddon();
     const unicode11Addon = new Unicode11Addon();
 
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.loadAddon(this.searchAddon);
+    this.terminal.loadAddon(this.serializeAddon);
     this.terminal.loadAddon(webLinksAddon);
     this.terminal.loadAddon(unicode11Addon);
     this.terminal.unicode.activeVersion = '11';
@@ -161,6 +165,10 @@ export class XtermPaneAdapter {
       lines.push(buffer.getLine(i)?.translateToString(true) ?? '');
     }
     return lines.join('\n');
+  }
+
+  exportTranscript(): string {
+    return this.serializeAddon.serialize({ scrollback: 1000 });
   }
 
   findNext(term: string, regex = false, caseSensitive = false): boolean {

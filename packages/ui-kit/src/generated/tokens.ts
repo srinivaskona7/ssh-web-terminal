@@ -179,26 +179,27 @@ export const TOKENS = {
         "brightMagenta": "#d2a8ff",
         "brightCyan": "#56d4dd",
         "brightWhite": "#ffffff"
-      }
+      },
+      "accentText": "#0B0D12"
     },
     "light": {
       "bgCanvas": "#F4F7FB",
       "bgSurface": "#FFFFFF",
-      "bgElevated": "#F0F3F6",
-      "bgOverlay": "rgba(255, 255, 255, 0.94)",
+      "bgElevated": "#EDF1F9",
+      "bgOverlay": "rgba(255, 255, 255, 0.96)",
       "fgPrimary": "#172033",
       "fgSecondary": "#4A5568",
       "fgMuted": "#5B6878",
       "borderSubtle": "#DCE3EE",
-      "borderStrong": "#8C959F",
+      "borderStrong": "#AAB8D4",
       "accentPrimary": "#3157C8",
-      "accentHover": "#2850AE",
+      "accentHover": "#2645A8",
       "statusSuccess": "#15731F",
       "statusWarning": "#7A4D00",
       "statusDanger": "#A30F1D",
-      "terminalBg": "#ffffff",
-      "terminalFg": "#1f2328",
-      "terminalCursor": "#0969da",
+      "terminalBg": "#FCFDFF",
+      "terminalFg": "#172033",
+      "terminalCursor": "#3157C8",
       "terminalSelection": "rgba(9, 105, 218, 0.22)",
       "ansi": {
         "black": "#24292f",
@@ -217,7 +218,8 @@ export const TOKENS = {
         "brightMagenta": "#a475f9",
         "brightCyan": "#3192aa",
         "brightWhite": "#8c959f"
-      }
+      },
+      "accentText": "#FFFFFF"
     },
     "high-contrast": {
       "bgCanvas": "#000000",
@@ -255,7 +257,8 @@ export const TOKENS = {
         "brightMagenta": "#dbb7ff",
         "brightCyan": "#56d4dd",
         "brightWhite": "#ffffff"
-      }
+      },
+      "accentText": "#000000"
     },
     "solarized": {
       "bgCanvas": "#002b36",

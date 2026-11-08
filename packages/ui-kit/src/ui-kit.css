@@ -32,15 +32,25 @@
 }
 
 .ui-btn--primary {
-  background: var(--color-accent-primary);
-  color: var(--color-bg-canvas);
-  border-color: var(--color-accent-primary);
+  background: linear-gradient(180deg, var(--color-accent-primary) 0%, var(--color-accent-hover) 100%);
+  color: var(--color-accent-text);
+  border-color: var(--color-accent-hover);
   font-weight: 600;
+  box-shadow: var(--elevation-1);
 }
 
 .ui-btn--primary:hover:not(:disabled) {
   background: var(--color-accent-hover);
   border-color: var(--color-accent-hover);
+  transform: translateY(-1px);
+}
+
+.ui-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-btn--primary:hover:not(:disabled) { transform: none; }
 }
 
 .ui-btn--danger,
