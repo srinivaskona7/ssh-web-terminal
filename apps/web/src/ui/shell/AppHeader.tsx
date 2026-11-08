@@ -15,6 +15,8 @@ export interface HeaderView {
   setZenMode: Setter<boolean>;
   isFullscreen: boolean;
   toggleFullscreen: () => void;
+  terminalFullscreen: boolean;
+  toggleTerminalFullscreen: () => void;
   activeTheme: ThemeId;
   setActiveTheme: Setter<ThemeId>;
   density: 'comfortable' | 'compact';
@@ -97,7 +99,7 @@ export function AppHeader({
   terminal,
   recorder
 }: AppHeaderProps): JSX.Element {
-  const { zenMode, setZenMode, isFullscreen, toggleFullscreen, activeTheme, setActiveTheme, density, setDensity, fontSize, setFontSize, isRailOpen, toggleRail } = view;
+  const { zenMode, setZenMode, isFullscreen, toggleFullscreen, terminalFullscreen, toggleTerminalFullscreen, activeTheme, setActiveTheme, density, setDensity, fontSize, setFontSize, isRailOpen, toggleRail } = view;
   const {
     tabs,
     setTabs,
@@ -578,6 +580,20 @@ export function AppHeader({
             >
               <span>{isFullscreen ? 'Exit Full Screen' : 'Full Screen'}</span>
               <span>F11</span>
+            </button>
+            <button
+              type="button"
+              className="webssh-view-menu-item"
+              role="menuitemcheckbox"
+              aria-checked={terminalFullscreen}
+              data-testid="toggle-terminal-fullscreen-btn"
+              onClick={() => {
+                toggleTerminalFullscreen();
+                setOpenMenu(null);
+              }}
+            >
+              <span>{terminalFullscreen ? 'Exit Terminal Full Screen' : 'Terminal Full Screen'}</span>
+              <span>Terminal</span>
             </button>
             <button
               type="button"

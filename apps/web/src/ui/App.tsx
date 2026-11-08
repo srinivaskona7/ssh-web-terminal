@@ -382,6 +382,8 @@ export function App(): JSX.Element {
   const [zenMode, setZenMode] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isPseudoFullscreen, setIsPseudoFullscreen] = useState(false);
+  const [terminalFullscreen, setTerminalFullscreen] = useState(false);
+  const studioContainerRef = useRef<HTMLDivElement | null>(null);
   const [showOverlayBar, setShowOverlayBar] = useState(false);
   const [showFullscreenToast, setShowFullscreenToast] = useState(false);
 
@@ -2728,6 +2730,55 @@ export function App(): JSX.Element {
     }
   };
 
+  const enterTerminalFullscreen = async (): Promise<void> => {
+    const el = studioContainerRef.current ?? terminalViewRef.current;
+    if (el && typeof el.requestFullscreen === 'function') {
+      try {
+        await el.requestFullscreen();
+        setTerminalFullscreen(true);
+      } catch {
+        setTerminalFullscreen(true);
+      }
+    } else {
+      setTerminalFullscreen(true);
+    }
+  };
+
+  const exitTerminalFullscreen = async (): Promise<void> => {
+    if (typeof document !== 'undefined' && document.fullscreenElement && typeof document.exitFullscreen === 'function') {
+      try {
+        await document.exitFullscreen();
+      } catch {
+        // Ignore exit error
+      }
+    }
+    setTerminalFullscreen(false);
+  };
+
+  const toggleTerminalFullscreen = (): void => {
+    if (terminalFullscreen) {
+      void exitTerminalFullscreen();
+    } else {
+      void enterTerminalFullscreen();
+    }
+  };
+
+  useEffect(() => {
+    const onFsChange = (): void => {
+      if (typeof document !== 'undefined' && !document.fullscreenElement) {
+        setTerminalFullscreen(false);
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('fullscreenchange', onFsChange);
+    }
+    return () => {
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('fullscreenchange', onFsChange);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const onFullscreenChange = (): void => {
       if (typeof document !== 'undefined') {
@@ -3057,6 +3108,8 @@ export function App(): JSX.Element {
             setZenMode,
             isFullscreen,
             toggleFullscreen,
+            terminalFullscreen,
+            toggleTerminalFullscreen,
             activeTheme,
             setActiveTheme,
             density,
@@ -3147,7 +3200,11 @@ export function App(): JSX.Element {
         <main className="webssh-main">
           {activeScreen === 'workspace' ? (
             <div className="webssh-studio-outer" data-testid="terminal-studio-outer">
-              <div className="webssh-studio-container" data-testid="terminal-studio-container">
+              <div
+                ref={studioContainerRef}
+                className={`webssh-studio-container ${terminalFullscreen ? 'webssh-studio-container--terminal-fullscreen' : ''}`.trim()}
+                data-testid="terminal-studio-container"
+              >
                 {termSearchOpen ? (
                   <div className="webssh-term-search" role="search" data-testid="terminal-search-bar">
                     <Icon name="search" />

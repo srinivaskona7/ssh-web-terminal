@@ -511,7 +511,7 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
-  padding: var(--space-3);
+  padding: 0;
   background-color: var(--studio-outer-bg);
 }
 
@@ -523,11 +523,11 @@
   min-width: 0;
   min-height: 0;
   background-color: var(--studio-container-bg);
-  border: var(--border-hairline);
-  border-radius: var(--radius-md);
-  padding: var(--space-2);
-  gap: var(--space-2);
-  box-shadow: var(--elevation-1);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0;
+  gap: 0;
+  box-shadow: none;
 }
 
 .webssh-studio-toolbar {
@@ -1062,8 +1062,8 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
-  padding: var(--space-4);
+  gap: var(--space-3);
+  padding: var(--space-3);
   overflow: auto;
   color: var(--color-fg-primary);
 }
@@ -1593,12 +1593,12 @@ button.webssh-rail-group-title {
 
 /* Tight frame around the terminal so the emulator gets the pixels. */
 .webssh-studio-outer {
-  padding: var(--space-2);
+  padding: 0;
 }
 
 .webssh-studio-container {
-  padding: var(--space-1);
-  gap: var(--space-1);
+  padding: 0;
+  gap: 0;
 }
 
 .webssh-rail-scroll {
