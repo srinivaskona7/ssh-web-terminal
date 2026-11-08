@@ -35,12 +35,11 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('screen-welcome')).toBeVisible();
     await expect(page.getByTestId('welcome-quick-connect-card')).toBeVisible();
 
-    // 2. Verify Zen mode via View menu and Esc returns to Welcome screen
-    await page.getByTestId('view-menu-btn').click();
-    await expect(page.getByTestId('toggle-zen-btn')).toBeVisible();
-    await page.getByTestId('toggle-zen-btn').click();
-    await expect(page.getByTestId('zen-mode-banner')).toBeVisible();
-    await page.keyboard.press('Escape');
+    // 2. Connection-first header: no View menu on welcome; Settings toggles and back navigates.
+    await expect(page.getByTestId('view-menu-btn')).toBeHidden();
+    await page.getByTestId('welcome-settings-btn').click();
+    await expect(page.getByTestId('screen-settings')).toBeVisible();
+    await page.getByTestId('header-settings-btn').click();
     await expect(page.getByTestId('screen-welcome')).toBeVisible();
 
     // 3. Test chmod 0644 permission warning in Quick Connect
