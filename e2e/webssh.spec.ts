@@ -154,11 +154,20 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     expect(consoleErrors).toEqual([]);
   });
 
-  test('opens the find bar with Ctrl+F, searches, and closes it with Escape', async ({ page }) => {
+  test('opens the find bar with Ctrl+F, searches, and closes it with Escape', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
     await page.goto('./');
     await expect(page.getByTestId('workspace-root')).toBeVisible();
 
-    await page.getByTestId('nav-terminal').click();
+    // Connection-first UI: connect on the welcome card to reach the workspace.
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
     await expect(page.getByTestId('terminal-viewport')).toBeVisible();
 
     // Ctrl+F from outside a text field opens the bar and takes the caret.
@@ -167,21 +176,30 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(searchBar).toBeVisible();
     await expect(page.getByTestId('terminal-search-input')).toBeFocused();
 
-    // No SSH session in this test, so the honest answer is that there is
-    // nothing to search rather than a fake "No match".
-    await page.getByTestId('terminal-search-input').fill('Linux');
+    // Connected workspace: search runs against the live terminal, never a fake.
+    // (Prompt contains the host; a gibberish query must report no match honestly.)
+    await page.getByTestId('terminal-search-input').fill('zzz-no-such-text-zzz');
     await page.keyboard.press('Enter');
-    await expect(page.getByTestId('terminal-search-status')).toContainText('No terminal to search');
+    await expect(page.getByTestId('terminal-search-status')).toContainText('No match');
 
     await page.keyboard.press('Escape');
     await expect(searchBar).toBeHidden();
   });
 
-  test('opens the split pane and toggles broadcast from the command palette', async ({ page }) => {
+  test('opens the split pane and toggles broadcast from the command palette', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
     await page.goto('./');
     await expect(page.getByTestId('workspace-root')).toBeVisible();
 
-    await page.getByTestId('nav-terminal').click();
+    // Connection-first UI: connect on the welcome card to reach the workspace.
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
     await expect(page.getByTestId('terminal-viewport')).toBeVisible();
 
     // The broadcast command opens the split and turns broadcast on in one step.
