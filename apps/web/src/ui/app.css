@@ -2558,6 +2558,10 @@ html {
   margin-bottom: var(--space-4);
 }
 
+@media (max-width: 860px) {
+  .webssh-landing { grid-template-columns: 1fr !important; }
+}
+
 .webssh-welcome-connect-card {
   width: min(640px, 100%);
   background-color: var(--color-bg-surface);

@@ -33,7 +33,8 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
       rules: { 'color-contrast': { enabled: false } }
     });
     expect(welcomeAxe.violations.map((v) => `${v.id}: ${v.help} (${v.nodes.map((n) => n.html).join(', ')})`)).toEqual([]);
-    expect(welcomeScreen?.textContent).toContain('Connect to a server');
+    expect(welcomeScreen?.textContent).toContain('Open your server workspace');
+    expect(welcomeScreen?.textContent).toContain('Connect to server');
     // Server tools is a navigation entry (always visible), not a feature gate.
     expect(container.querySelector('[data-testid="nav-server-tools"]')).toBeTruthy();
 
@@ -56,8 +57,9 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(container.querySelector('[data-testid="screen-welcome"]')).toBeTruthy();
 
     // 3. Test Private Key upload with chmod 0400 permission enforcement on Welcome screen
-    const keyAuthBtn = container.querySelector('[data-testid="welcome-auth-keyfile-btn"]') as HTMLButtonElement;
-    keyAuthBtn.click();
+    const authSelect = container.querySelector('[data-testid="welcome-auth-method-select"]') as HTMLSelectElement;
+    authSelect.value = 'Private Key (.pem / id_rsa)';
+    authSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="private-key-chmod-badge"]')?.textContent).toContain(
       'chmod 0400 — Enforced'

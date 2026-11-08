@@ -3360,9 +3360,11 @@ export function App(): JSX.Element {
           {activeScreen === 'workspace' && connectionState === 'disconnected' && (
             <div className="webssh-empty-state" data-testid="empty-disconnected-state">
               <div className="webssh-empty-state-icon">◐</div>
-              <h2 className="webssh-empty-state-title">No active connection</h2>
+              <div aria-hidden="true"><span className="webssh-status-dot webssh-status-dot--offline" style={{ display: 'inline-block', width: '10px', height: '10px', backgroundColor: 'var(--color-status-warning)' }} /></div>
+              <h2 className="webssh-empty-state-title">Connection interrupted</h2>
               <p className="webssh-empty-state-description">
-                Connect to an SSH server to open a terminal, browse files, and use the editor.
+                The connection dropped. Your tabs and terminal output are kept — reconnect to continue.
+                {connectedHost ? <span> {connectedUser}@{connectedHost}{connectedAt ? ` · last connected ${new Date(connectedAt).toLocaleTimeString()}` : ''}</span> : null}
               </p>
               <div className="webssh-empty-state-actions">
                 <Button
@@ -3938,13 +3940,16 @@ export function App(): JSX.Element {
                 onInput={(e) => setHostSearch((e.target as HTMLInputElement).value)}
                 aria-label="Filter hosts"
               />
-              <div className="webssh-grid">
+              <table data-testid="hosts-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead><tr><th>Host</th><th>Tag</th><th>Last connection</th><th /><th /></tr></thead>
+                <tbody>
                 {hosts
-                  .filter((h) => !hostSearch || h.alias.toLowerCase().includes(hostSearch.toLowerCase()))
+                  .filter((h) => !hostSearch || h.alias.toLowerCase().includes(hostSearch.toLowerCase()) || h.host.toLowerCase().includes(hostSearch.toLowerCase()) || h.tags.some((t) => t.toLowerCase().includes(hostSearch.toLowerCase())))
                   .map((h) => (
-                    <Card key={h.id} testId={`host-card-${h.alias}`}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <strong>{h.alias}</strong>
+                    <tr key={h.id} data-testid={`host-card-${h.alias}`} style={{ borderTop: 'var(--border-hairline)' }}>
+                      <td><Icon name="server" size={14} /> <strong>{h.alias}</strong> {h.user}@{h.host}:{h.port}</td>
+                      <td><span style={{ border: 'var(--border-hairline)', borderRadius: 'var(--radius-pill)', padding: '0 6px' }}>{h.folder}</span></td>
+                      <td>
                         <Badge
                   tone={
                     connectionRegistryRef.current.list().some((c) => c.host === h.host && c.user === h.user && c.port === h.port && c.client.isConnected)
@@ -3959,13 +3964,7 @@ export function App(): JSX.Element {
                       ? `Last seen ${formatAgo(h.lastConnectedAt)}`
                       : 'Never connected'}
                 </Badge>
-                      </div>
-                      <p>
-                        {h.user}@{h.host}:{h.port}
-                      </p>
-                      {h.jumpHops.length > 0 ? (
-                        <p>ProxyJump: {h.jumpHops.map((j) => `${j.user}@${j.host}:${j.port}`).join(' -> ')}</p>
-                      ) : null}
+                      </td><td>
                       <Button
                         variant="primary"
                         onClick={() => {
@@ -3982,9 +3981,14 @@ export function App(): JSX.Element {
                       >
                         Connect
                       </Button>
-                    </Card>
+                      </td><td>
+                      <details><summary>⋯</summary>
+                      <p style={{ fontSize: 'var(--font-size-xs)' }}>{h.jumpHops.length > 0 ? <p>ProxyJump: {h.jumpHops.map((j) => `${j.user}@${j.host}:${j.port}`).join(' -> ')}</p> : null}</p>
+                      </details>
+                      </td></tr>
                   ))}
-              </div>
+                </tbody>
+              </table>
               <Card>
                 <h2>Import ~/.ssh/config</h2>
                 <textarea
