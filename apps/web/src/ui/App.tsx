@@ -275,6 +275,7 @@ export function App(): JSX.Element {
 
   // 1 & 3. Default Font Size (+20% = 17px) & Font Family
   const [fontSize, setFontSize] = useState<number>(17);
+  const [lineHeight, setLineHeight] = useState<number>(1.25);
   const [fontFamily, setFontFamily] = useState<string>("'JetBrains Mono', 'Fira Code', monospace");
   const [cols, setCols] = useState<number>(80);
   const [rows, setRows] = useState<number>(24);
@@ -4220,7 +4221,6 @@ export function App(): JSX.Element {
                 ) : null}
               </Card>
               </div>
-
               <div className="webssh-grid">
                 <Card testId="chmod-matrix-card">
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -4624,6 +4624,8 @@ export function App(): JSX.Element {
                 setFontFamily,
                 fontSize,
                 setFontSize,
+                lineHeight,
+                setLineHeight,
                 activeTheme,
                 setActiveTheme,
                 layoutPreset,

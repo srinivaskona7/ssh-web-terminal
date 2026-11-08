@@ -1415,6 +1415,12 @@ button.webssh-rail-group-title {
   min-height: 0;
 }
 
+.webssh-terminal-pane-slot[data-active="true"] .webssh-xterm-pane {
+  outline: 2px solid var(--color-accent-primary);
+  outline-offset: -2px;
+  border-radius: var(--radius-md);
+}
+
 .webssh-xterm-pane {
   width: 100%;
   height: 100%;
