@@ -114,7 +114,7 @@ export function createDefaultPreferences(): UserPreferencesV2 {
       ligatures: false
     },
     layoutPreset: 'sidebar-left',
-    railWidthPx: 184,
+    railWidthPx: 220,
     workspacePreset: 'terminal',
     density: 'comfortable',
     surface: {
