@@ -219,7 +219,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     });
     const m = screen.match(/stty size\\n([^\\n]+)/) ?? screen.match(/(\\d+)\\s+(\\d+)\\s*$/m);
     const status = await page.getByTestId('status-bar').innerText();
-    const dim = status.match(/(\\d+)×(\\d+)/);
+    const dim = status.match(/([0-9]+)[^0-9]+([0-9]+)/);
     expect(dim).toBeTruthy();
     if (m) {
       const cols = dim![1]!;
