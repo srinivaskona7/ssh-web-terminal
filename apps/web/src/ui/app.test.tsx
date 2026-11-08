@@ -52,7 +52,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dracula');
     (container.querySelector('[data-testid="theme-btn-dark"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
-    (container.querySelector('[data-testid="nav-welcome"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="screen-welcome"]')).toBeTruthy();
 
@@ -330,7 +330,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(admin?.querySelector('[data-testid="welcome-transport-mode-select"]')).toBeTruthy();
     expect(admin?.querySelector('[data-testid="product-sign-in"]')).toBeTruthy();
     // Back to the connection page for the connect flow below.
-    (container.querySelector('[data-testid="nav-welcome"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
 
     // Connect acquires a guest ticket automatically instead of demanding a login.
@@ -627,7 +627,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     const gw = container.querySelector('[data-testid="welcome-gateway-url-input"]') as HTMLInputElement;
     gw.value = 'ws://127.0.0.1:8080/ws';
     gw.dispatchEvent(new Event('input', { bubbles: true }));
-    (container.querySelector('[data-testid="nav-welcome"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
 
     // Renaming has to show in the tab strip and the active-session label, and

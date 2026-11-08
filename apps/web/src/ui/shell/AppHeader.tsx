@@ -217,17 +217,15 @@ export function AppHeader({
             <Icon name="search" size={14} />
           </Button>
           ) : null}
-          {onConnectionPage ? (
           <Button
             variant="ghost"
-            ariaLabel="Settings"
-            title="Settings"
-            onClick={() => setActiveScreen('settings')}
+            ariaLabel={activeScreen === 'settings' ? 'Back' : 'Settings'}
+            title={activeScreen === 'settings' ? 'Back to connection/workspace' : 'Settings'}
+            onClick={() => setActiveScreen(activeScreen === 'settings' ? 'welcome' : 'settings')}
             testId="header-settings-btn"
           >
             <Icon name="settings" size={14} />
           </Button>
-          ) : null}
         </div>
       </header>
 

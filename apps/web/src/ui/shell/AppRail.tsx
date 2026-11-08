@@ -64,14 +64,7 @@ export function AppRail({
         <div className="webssh-rail-scroll">
           {/* Global */}
           <div className="webssh-rail-group" role="group" aria-label="Global">
-            <button type="button" className="webssh-rail-group-title" aria-expanded={!collapsed.global} data-testid="rail-toggle-global" onClick={() => toggle('global')}>Global {collapsed.global ? '▸' : '▾'}</button>
-            <Button
-              variant={activeScreen === 'welcome' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('welcome')}
-              testId="nav-welcome"
-            >
-              <Icon name="home" /> Welcome
-            </Button>
+            <span className="webssh-rail-group-title">Global</span>
             <Button
               variant={activeScreen === 'hosts' ? 'primary' : 'ghost'}
               onClick={() => setActiveScreen('hosts')}
@@ -169,27 +162,6 @@ export function AppRail({
                 Activity
               </Button>
               <Button
-                variant={activeScreen === 'diagrams' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('diagrams')}
-                testId="nav-diagrams"
-              >
-                <Icon name="command" /> Diagrams
-              </Button>
-              <Button
-                variant={activeScreen === 'devops' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('devops')}
-                testId="nav-devops"
-              >
-                <Icon name="command" /> DevOps
-              </Button>
-              <Button
-                variant={activeScreen === 'integrated' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('integrated')}
-                testId="nav-integrated"
-              >
-                <Icon name="command" /> Integrated
-              </Button>
-              <Button
                 variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}
                 onClick={() => setActiveScreen('tunnels')}
                 testId="nav-tunnels"
@@ -220,15 +192,6 @@ export function AppRail({
           </div>
         </div>
 
-        <div className="webssh-rail-footer">
-          <Button
-            variant={activeScreen === 'settings' ? 'primary' : 'ghost'}
-            onClick={() => setActiveScreen('settings')}
-            testId="nav-settings"
-          >
-            <Icon name="settings" /> Settings
-          </Button>
-        </div>
       </nav>
 
       <div
