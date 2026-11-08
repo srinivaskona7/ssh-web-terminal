@@ -104,11 +104,11 @@ export interface LegacyUserPreferencesV1 {
 export function createDefaultPreferences(): UserPreferencesV2 {
   return {
     schemaVersion: PREFERENCES_SCHEMA_VERSION,
-    activeThemeId: 'light',
+    activeThemeId: 'dark',
     customThemes: {},
     typography: {
       fontFamily: 'JetBrains Mono',
-      fontSize: 15,
+      fontSize: 17,
       lineHeight: 1.25,
       letterSpacing: 0,
       ligatures: false
