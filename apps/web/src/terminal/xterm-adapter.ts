@@ -145,8 +145,19 @@ export class XtermPaneAdapter {
     }
   }
 
+  private pendingBytes: Uint8Array[] = [];
+  private flushId: number | null = null;
+
   writeBytes(data: Uint8Array): void {
-    this.terminal.write(data);
+    this.pendingBytes.push(data);
+    if (this.flushId === null) {
+      this.flushId = requestAnimationFrame(() => {
+        this.flushId = null;
+        const chunks = this.pendingBytes;
+        this.pendingBytes = [];
+        for (const c of chunks) this.terminal.write(c);
+      });
+    }
   }
 
   writeText(text: string): void {

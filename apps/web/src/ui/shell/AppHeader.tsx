@@ -349,7 +349,7 @@ export function AppHeader({
                   />
                 </div>
                 <span className="webssh-resource-value">
-                  {metrics?.disk?.[0]?.percent ?? '--'}%
+                  {metrics ? `${metrics.disk?.[0]?.percent ?? '--'}% · ${metrics.disk?.[0]?.availableMiB ?? '--'} free / ${metrics.disk?.[0]?.totalMiB ?? '--'} total` : '--%'}
                 </span>
               </div>
               {metrics?.updatedAt && (
