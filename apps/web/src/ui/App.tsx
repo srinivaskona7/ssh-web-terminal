@@ -241,6 +241,7 @@ export function App(): JSX.Element {
     expiresAt: number;
   } | null>(null);
   const connectInFlightRef = useRef<boolean>(false);
+  const connectGenerationRef = useRef(0);
   const pendingConnectClientRef = useRef<{ close: () => void } | null>(null);
   const hostKeyDecisionResolverRef = useRef<((trusted: boolean) => void) | null>(null);
   const storageGuard = useMemo(() => new StorageGuard(), []);
@@ -1898,6 +1899,7 @@ export function App(): JSX.Element {
 
     if (connectInFlightRef.current) return;
     connectInFlightRef.current = true;
+    const gen = ++connectGenerationRef.current;
 
     void (async () => {
       try {
@@ -2148,6 +2150,7 @@ export function App(): JSX.Element {
 
       try {
         const meta = await client.connect();
+        if (gen !== connectGenerationRef.current) { void client.close?.(); return; }
         liveSessionRef.current = client;
         // Reuse the profile the user connected from (an SSH-config import
         // uses `host-<alias>` and may carry ProxyJump hops). Writing a fresh
@@ -2299,6 +2302,7 @@ export function App(): JSX.Element {
   };
 
   const handleCancelConnect = (): void => {
+    connectGenerationRef.current++;
     pendingConnectClientRef.current?.close();
     pendingConnectClientRef.current = null;
     setConnectionState('disconnected');

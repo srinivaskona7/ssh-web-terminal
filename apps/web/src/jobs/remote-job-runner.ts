@@ -80,6 +80,7 @@ export async function startDetachedJob(
   id: string,
   script: string
 ): Promise<{ pid: number }> {
+  if (!session.isAttached?.()) throw new Error('Disconnected — job start refused. Reconnect to proceed.');
   // Prefer SFTP write so secrets never appear in `ps`/argv. Fall back to
   // base64-in-exec only when the session has no writeFile (e.g. relay exec-only).
   if (session.writeFile) {

@@ -156,6 +156,27 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     expect(consoleErrors).toEqual([]);
   });
 
+  test('main and rail rectangles stay disjoint (C06)', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
+    await page.goto('./');
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
+    await expect(page.getByTestId('terminal-viewport')).toBeVisible();
+    const rects = await page.evaluate(() => {
+      const rail = document.querySelector('.webssh-rail')!.getBoundingClientRect();
+      const main = document.querySelector('.webssh-main')!.getBoundingClientRect();
+      return { rail, main };
+    });
+    const overlap = Math.min(rects.rail.right, rects.main.right) - Math.max(rects.rail.left, rects.main.left);
+    expect(overlap).toBeLessThanOrEqual(0);
+  });
+
   test('opens the find bar with Ctrl+F, searches, and closes it with Escape', async ({ page, request }) => {
     const healthResp = await request.get('http://127.0.0.1:8080/healthz');
     const health = (await healthResp.json()) as GatewayHealthInfo;

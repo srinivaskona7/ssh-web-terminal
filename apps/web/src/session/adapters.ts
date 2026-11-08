@@ -208,6 +208,7 @@ export function createRemoteSession(
       return read.bytes;
     };
     session.writeFile = async (path, data) => {
+      if (!session.isConnected()) throw new Error('Disconnected — file write refused. Reconnect to proceed.');
       if (data.byteLength > CHUNKED_WRITE_THRESHOLD) {
         await chunkedWrite(path, data);
         return;
