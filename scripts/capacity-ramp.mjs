@@ -1,7 +1,7 @@
 // Capacity ramp harness (J06). Opens N gateway WebSocket connections against
 // a running gateway (default http://127.0.0.1:8080) and records setup latency
 // + close reasons. Usage: GATEWAY_WS=ws://127.0.0.1:8080/ws node scripts/capacity-ramp.mjs 20
-import { WebSocket } from 'undici';
+// Uses the global WebSocket (Node 22+) — no extra deps.
 
 const n = Number(process.argv[2] ?? '20');
 const url = process.env.GATEWAY_WS ?? 'ws://127.0.0.1:8080/ws';
@@ -11,9 +11,9 @@ const started = Date.now();
 await Promise.allSettled(Array.from({ length: n }, (_, i) => new Promise((resolve) => {
   const t0 = Date.now();
   const ws = new WebSocket(url);
-  const timer = setTimeout(() => { fail++; ws.terminate(); resolve(); }, 10000);
-  ws.once('open', () => { clearTimeout(timer); lat.push(Date.now() - t0); ok++; ws.close(); resolve(); });
-  ws.once('error', () => { clearTimeout(timer); fail++; resolve(); });
+  const timer = setTimeout(() => { fail++; ws.close(); resolve(); }, 10000);
+  ws.addEventListener('open', () => { clearTimeout(timer); lat.push(Date.now() - t0); ok++; ws.close(); resolve(); });
+  ws.addEventListener('error', () => { clearTimeout(timer); fail++; resolve(); });
 })));
 lat.sort((a, b) => a - b);
 const pct = (p) => lat[Math.min(lat.length - 1, Math.floor(p * lat.length))] ?? 0;
