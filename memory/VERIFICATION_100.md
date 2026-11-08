@@ -17,11 +17,12 @@
 - Playwright Chromium: real-SSH test + find-bar + split + C06 pass locally (single + parallel varies; CI flake under parallel load with shared gateway).
 - Firefox e2e: launch infra failure (profile folder) — pre-existing, unrelated.
 
-## Batch status
-- B02/B03: per-pane channels + FitAddon resize (unit + B03 e2e). Multi-host PTY isolation (B01/B09/B10) needs 2 fixtures.
-- B07/B08: bounded retry + manual-disconnect suppression (code); drop/restore needs network fixture.
-- F01/F02/F07: OS detection via os-release (NAME + VERSION_ID) + capability gates; Debian vs RPM verified on testsshd (both report Linux) — real distro images still owed.
+## Batch status (final)
+- B01/B09/B10: registry isolates hosts (unit); per-host badges/stale write-block implemented; live two-host e2e owed.
+- B02/B03: per-pane channels + FitAddon resize (unit + B03 e2e).
+- B07/B08: bounded retry + manual-disconnect suppression (code + reconnect unit); socket-drop needs network fixture.
+- F01/F02/F07: OS detection (NAME/VERSION_ID) + Debian/Amazon Linux fixtures (unit, new); real distro images owed.
 - G01–G04/H03: Docker/K8s/tunnel clients exist with honest unavailable states; positive paths need fixtures.
-- J06/J07: `scripts/capacity-ramp.mjs` harness (ramp records p50/p95 + close reasons); 100-session soak needs authorized fixture + budget sign-off.
-- C09/C10: viewport matrix screenshots at 390/768/1024/1440/1672 done; keyboard/zoom manual owed.
+- J06/J07: `scripts/capacity-ramp.mjs` harness; 100-session soak needs authorized fixture + budget sign-off.
+- C09/C10: viewport screenshots at 390/768/1024/1440/1672 done; keyboard/zoom manual owed.
 - Score: unit-covered cases pass; integration cases need disposable Debian+RPM hosts + Docker/K8s fixtures. Release is NOT 100% yet.

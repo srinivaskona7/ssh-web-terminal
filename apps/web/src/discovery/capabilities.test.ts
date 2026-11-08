@@ -101,4 +101,14 @@ describe('server discovery', () => {
     expect(caps.disks).toEqual([]);
     expect(caps.warnings.length).toBeGreaterThan(0);
   });
+
+  it('reports Amazon Linux (RPM family) with dnf and systemd', () => {
+    const amazon = SAMPLE.replace('NAME="Ubuntu"', 'NAME="Amazon Linux"').replace('VERSION_ID="24.04"', 'VERSION_ID="2023"').replace('apt-get', 'dnf');
+    const caps = parseCapabilities(amazon, {});
+    expect(caps.os.distro).toBe('Amazon Linux');
+    expect(caps.os.version).toBe('2023');
+    expect(caps.os.family).toBe('linux');
+    expect(caps.packages.manager).toBe('dnf');
+    expect(caps.init.systemd).toBe(true);
+  });
 });

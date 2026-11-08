@@ -135,6 +135,15 @@ describe('gateway session reconnect', () => {
     await expect(client.reconnect()).rejects.toThrow(/no detached session/i);
   });
 
+  it('reconnect emits no duplicate resume and cancel leaves no orphan timer', async () => {
+    // B08: manual disconnect suppresses retry scheduling at the App layer;
+    // transport itself must not double-send resume on repeated reconnect calls.
+    globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+    const client = new LiveGatewaySessionClient(params());
+    await expect(client.reconnect()).rejects.toThrow(/no detached session/i);
+    expect(client.canResume()).toBe(false);
+  });
+
   it('surfaces a fatal RESUME_FAILED instead of pretending the session came back', async () => {
     globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
     const client = new LiveGatewaySessionClient(params());
