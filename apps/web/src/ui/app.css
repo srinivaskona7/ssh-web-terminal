@@ -387,6 +387,17 @@
   left: 0;
 }
 
+/* Connection page: hide workspace chrome (kept in DOM for tests/drawer) */
+.webssh-workspace-body--connection .webssh-rail,
+.webssh-workspace-body--connection .webssh-rail-resizer,
+.webssh-workspace-body--connection .webssh-special-keys {
+  display: none;
+}
+
+.webssh-workspace-body--connection .webssh-session-strip {
+  display: none;
+}
+
 /* Mobile: collapse resource strip into single button */
 @media (max-width: 820px) {
   .webssh-resource-strip {

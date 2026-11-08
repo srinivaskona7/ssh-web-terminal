@@ -616,28 +616,33 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     render(<App />, container);
+    // Configure the gateway endpoint up front (welcome card has no gateway field).
+    (container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    (container.querySelector('[data-testid="settings-tab-administrator"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    (container.querySelector('[data-testid="welcome-transport-mode-select"]') as HTMLSelectElement).value = 'go-gateway';
+    (container.querySelector('[data-testid="welcome-transport-mode-select"]') as HTMLSelectElement).dispatchEvent(new Event('change', { bubbles: true }));
+    const gw = container.querySelector('[data-testid="welcome-gateway-url-input"]') as HTMLInputElement;
+    gw.value = 'ws://127.0.0.1:8080/ws';
+    gw.dispatchEvent(new Event('input', { bubbles: true }));
+    (container.querySelector('[data-testid="nav-welcome"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
 
     // Renaming has to show in the tab strip and the active-session label, and
     // that label is rendered by the status bar only while connected.
-    const newConnBtn = container.querySelector('[data-testid="header-connect-btn"]') as HTMLButtonElement;
-    newConnBtn.click();
-    await new Promise((r) => setTimeout(r, 150));
-
-    const gwInput = container.querySelector('[data-testid="gateway-url-input"]') as HTMLInputElement;
-    gwInput.value = 'ws://127.0.0.1:8080/ws';
-    gwInput.dispatchEvent(new Event('input', { bubbles: true }));
-    const hostInput2 = container.querySelector('[data-testid="connect-host-input"]') as HTMLInputElement;
-    hostInput2.value = '127.0.0.1';
-    hostInput2.dispatchEvent(new Event('input', { bubbles: true }));
-    const userInput2 = container.querySelector('[data-testid="connect-user-input"]') as HTMLInputElement;
-    userInput2.value = 'ubuntu';
-    userInput2.dispatchEvent(new Event('input', { bubbles: true }));
-    const passInput = container.querySelector('[data-testid="connect-password-input"]') as HTMLInputElement;
-    passInput.value = 'testpass123';
-    passInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 150));
-    (container.querySelector('[data-testid="connect-modal-submit-btn"]') as HTMLButtonElement).click();
-    await new Promise((r) => setTimeout(r, 500));
+    // Connection-first UI: the welcome card is the connect form (no header button).
+    (container.querySelector('[data-testid="welcome-host-input"]') as HTMLInputElement).value = '127.0.0.1';
+    (container.querySelector('[data-testid="welcome-host-input"]') as HTMLInputElement).dispatchEvent(new Event('input', { bubbles: true }));
+    (container.querySelector('[data-testid="welcome-user-input"]') as HTMLInputElement).value = 'ubuntu';
+    (container.querySelector('[data-testid="welcome-user-input"]') as HTMLInputElement).dispatchEvent(new Event('input', { bubbles: true }));
+    const wp = container.querySelector('[data-testid="welcome-password-input"]') as HTMLInputElement;
+    wp.value = 'testpass123';
+    wp.dispatchEvent(new Event('input', { bubbles: true }));
+    wp.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    (container.querySelector('[data-testid="welcome-connect-form"]') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 2000));
 
     const tab = (): HTMLElement => container.querySelector('[data-testid="tab-session-1"]') as HTMLElement;
     const statusBar = (): HTMLElement => container.querySelector('[data-testid="status-bar"]') as HTMLElement;

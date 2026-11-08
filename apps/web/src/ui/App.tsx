@@ -2955,6 +2955,10 @@ export function App(): JSX.Element {
   };
 
   const quotaSnap = storageGuard.snapshot();
+  // Connection-first redesign: the pre-connect page is a clean, standalone form.
+  // Workspace chrome (header, rail, session strip, meters, special keys, status footer)
+  // is only for the post-connect workspace. Saved Hosts / Settings stay reachable from the card.
+  const showWorkspaceShell = !(activeScreen === 'welcome' && connectionState !== 'connected');
 
   const statusDotClass =
     connectionState === 'reconnecting'
@@ -3089,7 +3093,7 @@ export function App(): JSX.Element {
       <div
         className={`webssh-workspace-body ${
           layoutPreset === 'sidebar-right' ? 'webssh-workspace-body--right' : ''
-        }`.trim()}
+        } ${!showWorkspaceShell ? 'webssh-workspace-body--connection' : ''}`.trim()}
       >
         {!isFullscreen && !zenMode ? (
           <AppRail
@@ -4622,7 +4626,7 @@ export function App(): JSX.Element {
             />
           ) : null}
 
-          {!isFullscreen && !zenMode ? (
+          {!isFullscreen && !zenMode && showWorkspaceShell ? (
             <div className="webssh-special-keys" role="toolbar" aria-label="Mobile and Tablet Special Keys">
               {SPECIAL_KEYS_ROW.map((keyLabel) => (
                 <Button key={keyLabel} variant="ghost" testId={`special-key-${keyLabel}`}>
@@ -4676,7 +4680,7 @@ export function App(): JSX.Element {
         </div>
       ) : null}
 
-      {!isFullscreen && !zenMode ? (
+      {!isFullscreen && !zenMode && showWorkspaceShell ? (
         <footer className="webssh-statusbar" role="contentinfo" data-testid="status-bar">
           <span className="webssh-statusbar-health">
             <button

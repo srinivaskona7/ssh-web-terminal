@@ -124,6 +124,7 @@ export function AppHeader({
   const { splitPanes, setSplitPanes, broadcastInput, setBroadcastInput } = terminal;
   const { recording, startRecording, stopRecording, setReconnectNotice } = recorder;
 
+  const onConnectionPage = activeScreen === 'welcome' && connectionState !== 'connected';
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const activeConnection = connectionRegistryRef.current.get(activeTab?.connectionId);
   const isConnected = connectionState === 'connected' && Boolean(connectedHost);
@@ -156,6 +157,7 @@ export function AppHeader({
           <span className="webssh-header-workspace">WebSSH Studio</span>
         </div>
 
+        {!onConnectionPage ? (
         <div className="webssh-header-connection">
           <span
             className={`webssh-status-dot ${statusDotClass} ${isConnecting ? 'webssh-status-dot--reconnecting' : ''}`}
@@ -199,6 +201,7 @@ export function AppHeader({
             </Button>
           )}
         </div>
+        ) : null}
 
         <div className="webssh-header-actions">
           <Button
@@ -237,7 +240,8 @@ export function AppHeader({
         />
       ) : null}
 
-      {/* 2. Session strip: tabs + new tab + split controls */}
+      {/* 2. Session strip: tabs + new tab + split controls (workspace only) */}
+      {!onConnectionPage ? (
       <div className="webssh-session-strip">
         <div className="webssh-session-tabs" role="tablist" aria-label="Active SSH sessions">
           {tabs.map((tab) => {
@@ -499,6 +503,7 @@ export function AppHeader({
           )}
         </div>
       </div>
+      ) : null}
 
       {/* 3. View display menu (font, theme, density, fullscreen, zen, rare actions) */}
       {openMenu === 'view' ? (
