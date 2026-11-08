@@ -3,6 +3,8 @@ package session
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -73,5 +75,38 @@ func TestManagerLifecycleAndGraceExpiry(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if _, _, _, _, _, _, err := mgr.Resume(s1.ID, s1.ResumeToken, 0); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected expired session after grace period, got %v", err)
+	}
+}
+
+func TestConcurrentSessionCreatesIsolate(t *testing.T) {
+	mgr := NewManager(1024, time.Minute, 100)
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	ids := make(chan string, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			s, err := mgr.Create("alice", fmt.Sprintf("host%d.example.com", n), 22, "ubuntu")
+			if err != nil {
+				errs <- err
+				return
+			}
+			s.Buffer.Append(1, []byte(fmt.Sprintf("marker-%d", n)))
+			ids <- s.ID
+		}(i)
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent create failed: %v", err)
+	}
+	got := make(map[string]bool)
+	for id := range ids {
+		got[id] = true
+	}
+	if len(got) != 20 {
+		t.Fatalf("expected 20 distinct sessions, got %d", len(got))
 	}
 }
