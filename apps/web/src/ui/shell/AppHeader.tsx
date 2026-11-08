@@ -170,7 +170,7 @@ export function AppHeader({
             ) : null}
           </div>
           {isConnected && rttMs > 0 ? (
-            <span className="webssh-header-connection-rtt">{rttMs} ms</span>
+            <span className="webssh-header-connection-rtt" title="Round-trip time to the gateway or relay (SSH socket), sampled on channel operations">RTT {rttMs} ms</span>
           ) : null}
           {connectionState === 'connected' ? (
             <Button

@@ -3943,13 +3943,13 @@ export function App(): JSX.Element {
                         <strong>{h.alias}</strong>
                         <Badge
                   tone={
-                    connectedHost === h.host && connectedUser === h.user && connected
+                    connectionRegistryRef.current.list().some((c) => c.host === h.host && c.user === h.user && c.port === h.port && c.client.isConnected)
                       ? 'success'
                       : 'neutral'
                   }
                   testId={`host-badge-${h.alias}`}
                 >
-                  {connectedHost === h.host && connectedUser === h.user && connected
+                  {connectionRegistryRef.current.list().some((c) => c.host === h.host && c.user === h.user && c.port === h.port && c.client.isConnected)
                     ? 'Connected'
                     : h.lastConnectedAt
                       ? `Last seen ${formatAgo(h.lastConnectedAt)}`

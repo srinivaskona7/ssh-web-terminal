@@ -110,8 +110,11 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('transfer-status-badge')).toContainText('Applied chmod');
 
     // Test Remote File Editor loading and saving README.md over real SFTP
+    // (Editor starts empty; load explicitly — no auto-load on connect.)
     await page.getByTestId('nav-editor').click();
     await expect(page.getByTestId('screen-editor')).toBeVisible();
+    await page.getByTestId('editor-filepath-input').fill('README.md');
+    await page.getByTestId('load-remote-file-btn').click();
     await expect(page.getByTestId('remote-editor-textarea')).toHaveValue(/WebSSH Test Server/);
 
     // 8. Navigate through remaining IDE screens and verify accessibility

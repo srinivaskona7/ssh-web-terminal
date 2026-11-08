@@ -218,6 +218,7 @@ export function OverviewPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
       ) : null}
       {caps ? (
         <>
+          <p className="ws-mod-muted">Inspected {Math.max(0, Math.floor((Date.now() - caps.collectedAt) / 1000))}s ago {ctx.session && !ctx.session.isConnected() ? '(stale — disconnected)' : ''}</p>
           {caps.warnings.length > 0 ? (
             <ul className="ws-mod-warnings">
               {caps.warnings.map((warning) => (

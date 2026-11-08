@@ -248,6 +248,7 @@ export async function controlService(
   action: ServiceAction,
   asRoot: boolean
 ): Promise<string> {
+  if (!session.isConnected?.()) throw new Error('Disconnected — service action refused. Reconnect to proceed.');
   const trimmed = name.trim();
   if (!SERVICE_NAME.test(trimmed)) {
     throw new Error(`Invalid service name "${name}"`);
@@ -300,6 +301,7 @@ export async function powerAction(
   action: 'reboot' | 'poweroff',
   asRoot: boolean
 ): Promise<string> {
+  if (!session.isConnected?.()) throw new Error('Disconnected — power action refused. Reconnect to proceed.');
   const command = `${asRoot ? 'sudo -n ' : ''}systemctl ${action}`;
   const result = await session.exec(command, { timeoutMs: 20_000 });
   if (result.exitCode !== 0) {
