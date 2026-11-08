@@ -864,6 +864,8 @@ export function App(): JSX.Element {
     }
     try {
       const res = await sessionClient.sftpOp({ op: 'list', path: targetPath });
+      if (liveSessionRef.current !== sessionClient) return;
+      if (connectionRegistryRef.current.get(tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.connectionId)?.client !== sessionClient) return;
       if (res.ok && res.entries) {
         setSftpCurrentPath(targetPath);
         setSftpRawEntries(res.entries);
@@ -1294,7 +1296,14 @@ export function App(): JSX.Element {
       setTransferStatus(`Saved ${editorFilePath} over SFTP`);
       void refreshSftpDirectory(sftpCurrentPath, activeClient);
     } catch (err) {
-      setEditorError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      // If the connection fell during the write, the byte state is unknown:
+      // the draft is kept, remote state must be checked before retry.
+      if (!activeClient.isConnected) {
+        setEditorError(`Outcome unknown: the connection dropped during save (${msg}). Local edits are kept — reload the file to check remote state before retrying.`);
+      } else {
+        setEditorError(msg);
+      }
     }
   };
 

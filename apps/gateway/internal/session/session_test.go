@@ -78,6 +78,22 @@ func TestManagerLifecycleAndGraceExpiry(t *testing.T) {
 	}
 }
 
+func TestCloseReturnsQuotaToBaseline(t *testing.T) {
+	mgr := NewManager(1024, time.Minute, 2)
+	s1, err := mgr.Create("alice", "host1.example.com", 22, "ubuntu")
+	if err != nil {
+		t.Fatalf("Create s1 failed: %v", err)
+	}
+	mgr.Close(s1.ID)
+	if mgr.ActiveCount() != 0 {
+		t.Fatalf("expected 0 active after Close, got %d", mgr.ActiveCount())
+	}
+	// Quota slot must be reusable — teardown reports back to baseline.
+	if _, err := mgr.Create("alice", "host2.example.com", 22, "ubuntu"); err != nil {
+		t.Fatalf("Create after Close failed: %v", err)
+	}
+}
+
 func TestConcurrentSessionCreatesIsolate(t *testing.T) {
 	mgr := NewManager(1024, time.Minute, 100)
 	var wg sync.WaitGroup
