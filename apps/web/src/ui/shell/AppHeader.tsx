@@ -477,20 +477,12 @@ export function AppHeader({
               testId="toggle-recording-btn"
             >
               <span className="webssh-rec-dot" aria-hidden="true" />
-              Stop Recording
+              Recording · Stop
             </Button>
-          ) : (
-            <Button
-              variant="ghost"
-              disabled={!isConnected}
-              onClick={startRecording}
-              testId="toggle-recording-btn"
-              title={isConnected ? 'Record this terminal session' : 'Connect to a host to record'}
-            >
-              <Icon name="play" size={14} />
-              Record
-            </Button>
-          )}
+          ) : null}
+          <Button variant="ghost" ariaLabel="View and session options" title="View and session options" testId="view-menu-btn" onClick={(e) => { e.stopPropagation(); setOpenMenu((m) => (m === 'view' ? null : 'view')); }}>
+            <Icon name="settings" size={14} />
+          </Button>
         </div>
       </div>
       ) : null}
@@ -587,26 +579,17 @@ export function AppHeader({
               <span>{isFullscreen ? 'Exit Full Screen' : 'Full Screen'}</span>
               <span>F11</span>
             </button>
+            <button
+              type="button"
+              className="webssh-view-menu-item"
+              data-testid="toggle-recording-btn"
+              disabled={!isConnected || recording}
+              onClick={() => { startRecording(); setOpenMenu(null); }}
+            >
+              <span>Record</span>
+            </button>
           </div>
         </div>
-      ) : null}
-
-      {/* View options live in the workspace (View menu). The connection page keeps
-          the header minimal (brand + Settings) so it stays clean. */}
-      {!onConnectionPage ? (
-      <button
-        type="button"
-        className="webssh-view-menu-trigger"
-        aria-label="View options"
-        title="View options"
-        data-testid="view-menu-btn"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpenMenu((m) => (m === 'view' ? null : 'view'));
-        }}
-      >
-        <span aria-hidden="true">•••</span>
-      </button>
       ) : null}
     </>
   );

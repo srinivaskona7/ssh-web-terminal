@@ -5068,6 +5068,23 @@ export function App(): JSX.Element {
             </div>
           </div>
 
+          {activeJumpHops?.length ? (
+            <details data-testid="jump-hosts-advanced">
+              <summary>Advanced → Jump hosts</summary>
+              <p className="ws-mod-muted">Each hop reuses the target credential unless you pick per-hop credentials. Reuse is explicit, never silent.</p>
+              {activeJumpHops.map((hop, i) => (
+                <div key={i} style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-1)' }}>
+                  <strong>{hop.user}@{hop.host}:{hop.port}</strong>
+                  <select aria-label={`Credential for hop ${i + 1}`} className="ui-select" defaultValue="reuse" data-testid={`jump-cred-${i}`}>
+                    <option value="reuse">Reuse target credential</option>
+                    <option value="password">Password</option>
+                    <option value="private_key">Private key</option>
+                  </select>
+                </div>
+              ))}
+            </details>
+          ) : null}
+
           {connectErrorMsg ? (
             <Badge tone="danger" testId="modal-connect-error-badge">
               {connectErrorMsg}

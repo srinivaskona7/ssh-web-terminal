@@ -19,9 +19,17 @@ describe('Session recording UI', () => {
     document.body.appendChild(container);
     render(<App />, container);
 
+    (container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 150));
+
     (container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 
+    // Idle Record moved into the View overflow menu (recording · Stop stays direct).
+    (container.querySelector('[data-testid="view-menu-btn"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
     const recordBtn = container.querySelector('[data-testid="toggle-recording-btn"]') as HTMLButtonElement;
     expect(recordBtn).toBeTruthy();
     expect(recordBtn.disabled).toBe(true);
