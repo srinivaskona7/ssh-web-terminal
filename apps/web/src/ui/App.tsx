@@ -3232,7 +3232,7 @@ export function App(): JSX.Element {
                               label={`${tab.title} terminal`}
                               fontFamily={fontFamily}
                               fontSize={fontSize}
-                              lineHeight={1.45}
+                              lineHeight={prefsStore.get().typography.lineHeight}
                               cursorStyle={cursorShape}
                               cursorBlink
                               scrollback={10000}
@@ -3249,6 +3249,7 @@ export function App(): JSX.Element {
                               }}
                               onAdapter={registerPaneAdapter}
                               onRendererChange={handleRendererChange}
+                              onDimensions={(_id, c, r) => { setCols(c); setRows(r); }}
                               testId="xterm-engine-mount"
                             />
                           </div>
@@ -3273,7 +3274,7 @@ export function App(): JSX.Element {
                             label={`${sessionTabLabel} split terminal`}
                             fontFamily={fontFamily}
                             fontSize={fontSize}
-                            lineHeight={1.45}
+                            lineHeight={prefsStore.get().typography.lineHeight}
                             cursorStyle={cursorShape}
                             cursorBlink
                             scrollback={10000}

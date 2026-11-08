@@ -108,13 +108,13 @@ export function createDefaultPreferences(): UserPreferencesV2 {
     customThemes: {},
     typography: {
       fontFamily: 'JetBrains Mono',
-      fontSize: 13,
-      lineHeight: 1.45,
+      fontSize: 15,
+      lineHeight: 1.25,
       letterSpacing: 0,
-      ligatures: true
+      ligatures: false
     },
     layoutPreset: 'sidebar-left',
-    railWidthPx: 168,
+    railWidthPx: 184,
     workspacePreset: 'terminal',
     density: 'comfortable',
     surface: {

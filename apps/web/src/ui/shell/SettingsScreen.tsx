@@ -107,6 +107,11 @@ export function SettingsScreen({
         <>
       <Card>
         <h2>Terminal Font</h2>
+        <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', marginBottom: 'var(--space-2)' }}>
+          <Button variant="ghost" testId="font-preset-compact" onClick={() => setFontSize(14)}>Compact 14px</Button>
+          <Button variant="ghost" testId="font-preset-default" onClick={() => setFontSize(15)}>Default 15px</Button>
+          <Button variant="ghost" testId="font-preset-teaching" onClick={() => setFontSize(18)}>Teaching 18px</Button>
+        </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
     <select
         className="ui-select"

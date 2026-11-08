@@ -100,8 +100,8 @@ describe('PreferencesStore, theme editor, per-host overrides, and v1->v2 migrati
     expect(recovered.activeThemeId).toBe('light');
     expect(recovered.layoutPreset).toBe('sidebar-left');
     expect(recovered.typography.fontFamily).toBe('Fira Code');
-    expect(recovered.typography.fontSize).toBe(13);
-    expect(recovered.typography.lineHeight).toBe(1.45);
+    expect(recovered.typography.fontSize).toBe(15);
+    expect(recovered.typography.lineHeight).toBe(1.25);
     expect(recovered.surface.cursorShape).toBe('block');
     expect(recovered.storageLimits.maxScrollbackLines).toBe(10_000);
   });

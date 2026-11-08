@@ -176,7 +176,7 @@ export function AppHeader({
             <Button
               variant="ghost"
               onClick={handleDisconnect}
-              testId="header-disconnect-btn"
+              testId="disconnect-btn"
             >
               Disconnect
             </Button>
@@ -463,18 +463,6 @@ export function AppHeader({
               <Icon name="split-h" size={14} />
             </Button>
           )}
-          {connectionState === 'connected' ? (
-            <button
-              type="button"
-              className="webssh-session-disconnect"
-              onClick={handleDisconnect}
-              data-testid="disconnect-btn"
-              title="End this SSH session"
-            >
-              <span className="webssh-stop-square" data-testid="stop-red-square" aria-hidden="true" />
-              <span>Disconnect</span>
-            </button>
-          ) : null}
           {recording ? (
             <Button
               variant="primary"

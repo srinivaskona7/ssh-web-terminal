@@ -33,6 +33,7 @@ export interface TerminalPaneProps {
   /** Optional tap for session recording; runs before the bytes are sent. */
   onUserInput?: (data: string) => void;
   onRendererChange?: (paneId: string, mode: TerminalRendererMode) => void;
+  onDimensions?: (paneId: string, cols: number, rows: number) => void;
   onFocusChange?: (paneId: string) => void;
   testId?: string;
 }
@@ -97,6 +98,7 @@ export function TerminalPane(props: TerminalPaneProps): JSX.Element {
       onResize: (cols, rows) => {
         const { channelId, transport } = propsRef.current;
         if (disposed || cols <= 0 || rows <= 0) return;
+        propsRef.current.onDimensions?.(current.paneId, cols, rows);
         if (channelId === null || !transport || !transport.isConnected) return;
         transport.resizeChannel(channelId, cols, rows);
       },
