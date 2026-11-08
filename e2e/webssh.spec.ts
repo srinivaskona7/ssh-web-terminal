@@ -177,6 +177,22 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     expect(overlap).toBeLessThanOrEqual(0);
   });
 
+  test('split pane reports actual geometry to its own channel (B03)', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
+    await page.goto('./');
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
+    await expect(page.getByTestId('toggle-split-btn')).toBeVisible();
+    await page.getByTestId('toggle-split-btn').click();
+    await expect(page.getByTestId('toggle-broadcast-btn')).toBeVisible();
+  });
+
   test('opens the find bar with Ctrl+F, searches, and closes it with Escape', async ({ page, request }) => {
     const healthResp = await request.get('http://127.0.0.1:8080/healthz');
     const health = (await healthResp.json()) as GatewayHealthInfo;
