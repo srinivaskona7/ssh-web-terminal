@@ -108,7 +108,7 @@ export function createDefaultPreferences(): UserPreferencesV2 {
     customThemes: {},
     typography: {
       fontFamily: 'JetBrains Mono',
-      fontSize: 17,
+      fontSize: 15,
       lineHeight: 1.25,
       letterSpacing: 0,
       ligatures: false

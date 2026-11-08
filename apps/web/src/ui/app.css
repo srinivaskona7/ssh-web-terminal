@@ -2416,9 +2416,10 @@ html {
 }
 
 .webssh-session-tab--active {
-  background-color: var(--color-bg-elevated);
+  background-color: color-mix(in srgb, var(--color-accent-primary) 10%, var(--color-bg-elevated));
   color: var(--color-fg-primary);
-  border-color: var(--color-border-strong);
+  border-color: var(--color-accent-primary);
+  border-bottom-width: 2px;
 }
 
 .webssh-session-tab .webssh-status-dot {

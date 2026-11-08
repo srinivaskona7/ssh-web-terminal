@@ -66,6 +66,13 @@
   border-color: transparent;
 }
 
+.ui-btn--ghost[aria-pressed="true"],
+.webssh-rail-group .ui-btn--primary {
+  background-color: color-mix(in srgb, var(--color-accent-primary) 10%, transparent);
+  color: var(--color-accent-primary);
+  border-color: transparent;
+}
+
 .ui-btn--ghost:hover:not(:disabled) {
   background: var(--color-bg-elevated);
 }
