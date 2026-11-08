@@ -3062,6 +3062,10 @@ export function App(): JSX.Element {
           setZenMode(false);
           setActiveScreen('welcome');
         }
+        if (e.key === 'Escape' && terminalFullscreen) {
+          e.preventDefault();
+          void exitTerminalFullscreen();
+        }
       }}
       onClick={() => {
         if (openMenu !== null) setOpenMenu(null);
