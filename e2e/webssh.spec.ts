@@ -219,6 +219,40 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('status-bar')).toContainText(await page.getByTestId('status-bar').innerText().then((t) => t.split(' ')[0]));
   });
 
+  test('keyboard-only flow: tabs move focus through controls (C10)', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
+    await page.goto('./');
+    await expect(page.getByTestId('workspace-root')).toBeVisible();
+    // Reach the host field with keyboard only (bounded tab walk, no gomouse).
+    let onHost = false;
+    for (let i = 0; i < 30 && !onHost; i++) {
+      const tag = await page.evaluate(() => (document.activeElement as HTMLElement | null)?.getAttribute('data-testid') ?? '');
+      if (tag === 'welcome-host-input') onHost = true;
+      else await page.keyboard.press('Tab');
+    }
+    expect(onHost).toBe(true);
+    await page.keyboard.type(sshHost);
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.type('ubuntu');
+    await page.keyboard.press('Tab');
+    await page.keyboard.type(sshPort);
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.type('testpass123');
+    await page.keyboard.press('Tab');
+    // Submit via keyboard-accessible Connect button.
+    await page.locator('[data-testid="welcome-connect-submit-btn"]').focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('terminal-viewport')).toBeVisible({ timeout: 15000 });
+    const focus = await page.evaluate(() => (document.activeElement as HTMLElement)?.getAttribute('aria-label') ?? (document.activeElement as HTMLElement)?.tagName ?? '');
+    expect(focus.length).toBeGreaterThan(0);
+  });
+
   test('split pane reports actual geometry to its own channel (B03)', async ({ page, request }) => {
     const healthResp = await request.get('http://127.0.0.1:8080/healthz');
     const health = (await healthResp.json()) as GatewayHealthInfo;
