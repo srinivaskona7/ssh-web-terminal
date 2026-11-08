@@ -3852,13 +3852,10 @@ export function App(): JSX.Element {
           {activeScreen === 'hosts' ? (
             <div className="webssh-panel-content" data-testid="screen-hosts">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h1>Saved Hosts & ProxyJump Chains</h1>
+                <h1>Saved Hosts</h1>
                 <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                   <Button variant="default" onClick={() => setHostKeyModal('tofu')} testId="trigger-tofu-modal-btn">
                     Verify Host Key (TOFU)
-                  </Button>
-                  <Button variant="danger" onClick={() => setHostKeyModal('mismatch')} testId="trigger-mismatch-modal-btn">
-                    Preview mismatch dialog
                   </Button>
                   <Button
                     variant="default"

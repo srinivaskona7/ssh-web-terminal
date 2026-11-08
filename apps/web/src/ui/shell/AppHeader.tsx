@@ -211,21 +211,23 @@ export function AppHeader({
             title="Command Palette (Cmd+K)"
             testId="header-palette-btn"
             onClick={() => {
-              // Handled globally in App.tsx via Cmd+K; this button is a fallback.
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
             }}
           >
             <Icon name="search" size={14} />
           </Button>
           ) : null}
+          {onConnectionPage ? (
           <Button
             variant="ghost"
-            ariaLabel={activeScreen === 'settings' ? 'Back' : 'Settings'}
-            title={activeScreen === 'settings' ? 'Back to connection/workspace' : 'Settings'}
-            onClick={() => setActiveScreen(activeScreen === 'settings' ? 'welcome' : 'settings')}
+            ariaLabel="Settings"
+            title="Settings"
+            onClick={() => setActiveScreen('settings')}
             testId="header-settings-btn"
           >
             <Icon name="settings" size={14} />
           </Button>
+          ) : null}
         </div>
       </header>
 

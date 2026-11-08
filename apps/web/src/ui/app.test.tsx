@@ -52,7 +52,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dracula');
     (container.querySelector('[data-testid="theme-btn-dark"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
-    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="nav-welcome"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="screen-welcome"]')).toBeTruthy();
 
