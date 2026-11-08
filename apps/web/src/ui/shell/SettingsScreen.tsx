@@ -112,6 +112,10 @@ export function SettingsScreen({
           <Button variant="ghost" testId="font-preset-default" onClick={() => setFontSize(15)}>Default 15px</Button>
           <Button variant="ghost" testId="font-preset-teaching" onClick={() => setFontSize(18)}>Teaching 18px</Button>
         </div>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: `${fontSize}px`, marginTop: 'var(--space-2)', border: 'var(--border-hairline)', borderRadius: 'var(--radius-md)', padding: 'var(--space-2)' }} data-testid="font-preview">
+          <span>Sample terminal</span>
+          <div style={{ fontSize: 'var(--font-size-xs)' }}>AaBbGg 0123456789 $ stty size</div>
+        </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
     <select
         className="ui-select"

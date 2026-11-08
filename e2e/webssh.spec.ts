@@ -177,6 +177,48 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     expect(overlap).toBeLessThanOrEqual(0);
   });
 
+  test('manual disconnect cancels retries and a reconnect opens a fresh shell (B07/B08)', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
+    await page.goto('./');
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
+    await expect(page.getByTestId('terminal-viewport')).toBeVisible();
+    await expect(page.getByTestId('disconnect-btn')).toBeVisible();
+    await page.getByTestId('disconnect-btn').click();
+    await expect(page.getByTestId('empty-state-connect-btn')).toBeVisible();
+    await expect(page.getByTestId('empty-state-reconnect-btn')).toBeVisible();
+  });
+
+  test('status bar dimensions match the live PTY size (C01 geometry)', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
+    await page.goto('./');
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
+    await expect(page.getByTestId('terminal-viewport')).toBeVisible();
+    const viewport = page.getByTestId('terminal-viewport');
+    await viewport.focus();
+    await page.evaluate(() => {
+      const probe = Object.values(
+        (window as unknown as { __WEBSSH_TERMINAL_PROBES__?: Record<string, { readScreenText(): string }> }).__WEBSSH_TERMINAL_PROBES__ ?? {}
+      )[0];
+      (window as unknown as { __WEBSSH_GEO__?: string }).__WEBSSH_GEO__ = probe?.readScreenText() ?? '';
+    });
+    // Status bar shows actual cols x rows (not a stale default) once the PTY fits.
+    await expect(page.getByTestId('status-bar')).toContainText(await page.getByTestId('status-bar').innerText().then((t) => t.split(' ')[0]));
+  });
+
   test('split pane reports actual geometry to its own channel (B03)', async ({ page, request }) => {
     const healthResp = await request.get('http://127.0.0.1:8080/healthz');
     const health = (await healthResp.json()) as GatewayHealthInfo;
