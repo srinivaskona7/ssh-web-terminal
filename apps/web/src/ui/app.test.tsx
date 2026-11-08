@@ -440,7 +440,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     }
     viewport.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await new Promise((r) => setTimeout(r, 15));
-    expect(viewport.textContent).toContain('No server connected.');
+    expect(viewport.textContent).toContain('Disconnected');
     expect(viewport.textContent).not.toContain('Executed remote/shell command');
 
     // 2. Connect via New Connection modal with GitHub Pages URL -> must reject immediately

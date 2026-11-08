@@ -30,6 +30,7 @@ import { AppHeader, type MenuId } from './shell/AppHeader';
 import { AppRail } from './shell/AppRail';
 import { SettingsScreen, type SettingsSection } from './shell/SettingsScreen';
 import { WelcomeScreen } from './shell/WelcomeScreen';
+import { ViewBoundary } from './ViewBoundary';
 import {
   BrowserSshRelaySessionClient,
   LiveGatewaySessionClient,
@@ -1733,6 +1734,11 @@ export function App(): JSX.Element {
       const percent = total > 0 ? Math.round((used / total) * 100) : 0;
       result.push({ filesystem, totalMiB: total, usedMiB: used, availableMiB: available, percent, mountpoint });
     }
+    // Default the header meter to / (real project filesystem), not /dev pseudo-fs.
+    result.sort((a, b) => {
+      const rank = (m: string) => (m === '/' ? 0 : m.startsWith('/dev') ? 2 : 1);
+      return rank(a.mountpoint) - rank(b.mountpoint);
+    });
     return result;
   }
 
@@ -1888,7 +1894,7 @@ export function App(): JSX.Element {
     setConnectionState('connecting');
     const portNum = Number.parseInt(portVal, 10) || 22;
     const label = `${userVal}@${hostVal}`;
-    const tabTitle = `Terminal 1 (${label})`;
+    const tabTitle = `Terminal ${tabsRef.current.length + 1} (${label})`;
 
     if (connectInFlightRef.current) return;
     connectInFlightRef.current = true;
@@ -2243,6 +2249,7 @@ export function App(): JSX.Element {
           setHosts(hostRegistry.list());
         }
         setConnectModalOpen(false);
+        clearRawCredentials();
         setActiveScreen('workspace');
         const workspaceSession = createRemoteSession(client, {
           transport: transportMode === 'cloudflare-relay' ? 'cloudflare-relay' : 'go-gateway',
@@ -2264,7 +2271,6 @@ export function App(): JSX.Element {
         writeToXterm(`${String.fromCharCode(13, 10)}${msg}${String.fromCharCode(13, 10)}`);
         if (meta.sftpReady) {
           void refreshSftpDirectory('~', client);
-          void loadRemoteFileIntoEditor('README.md', client);
         } else {
           setSftpRawEntries([]);
           setTransferStatus(
@@ -2286,11 +2292,18 @@ export function App(): JSX.Element {
     })();
   };
 
+  const clearRawCredentials = (): void => {
+    setConnectPassword('');
+    setKeyPassphrase('');
+    setUploadedKeyContent('');
+  };
+
   const handleCancelConnect = (): void => {
     pendingConnectClientRef.current?.close();
     pendingConnectClientRef.current = null;
     setConnectionState('disconnected');
     setConnectErrorMsg('');
+    clearRawCredentials();
   };
 
   const appendCommandBlock = (
@@ -3291,18 +3304,7 @@ export function App(): JSX.Element {
                           className="webssh-terminal-disconnected"
                           data-testid="terminal-disconnected-state"
                         >
-                          <p>No server connected.</p>
-                          <p>Enter a host, user and port, then press Connect.</p>
-                          <Button
-                            variant="primary"
-                            onClick={() => {
-                              setPendingJump(null);
-                              setConnectModalOpen(true);
-                            }}
-                            testId="empty-state-connect-btn"
-                          >
-                            Connect
-                          </Button>
+                          <p>Disconnected</p>
                         </div>
                       ) : null}
                     </div>
@@ -3369,6 +3371,13 @@ export function App(): JSX.Element {
                 >
                   Connect to a server
                 </Button>
+                <Button
+                  variant="default"
+                  onClick={() => handleReconnectNow()}
+                  testId="empty-state-reconnect-btn"
+                >
+                  Reconnect
+                </Button>
                 {recentHosts.length > 0 ? (
                   <Button
                     variant="default"
@@ -3390,6 +3399,7 @@ export function App(): JSX.Element {
               />
             </Suspense>
           ) : null}
+          <ViewBoundary name="Server Tools">
           <Suspense fallback={<p className="ws-mod-muted">Loading server modules…</p>}>
             {activeScreen === 'overview' ? <OverviewPanel ctx={moduleContext} /> : null}
             {activeScreen === 'software' ? <SoftwarePanel ctx={moduleContext} /> : null}
@@ -3411,6 +3421,7 @@ export function App(): JSX.Element {
               />
             ) : null}
           </Suspense>
+          </ViewBoundary>
 
           {activeScreen === 'features' ? (
             <Suspense fallback={<p className="ws-mod-muted">Loading capability matrix…</p>}>
@@ -3738,7 +3749,7 @@ export function App(): JSX.Element {
               }}
               guest={{ turnstileSiteKey, turnstileResetNonce, setTurnstileToken }}
               session={remoteSession}
-              onNavigate={(s) => setActiveScreen(s as ScreenId)}
+              onNavigate={(s) => { clearRawCredentials(); setActiveScreen(s as ScreenId); }}
             />
           ) : null}
 
@@ -3767,6 +3778,12 @@ export function App(): JSX.Element {
                 />
               ) : (
                 <div className="webssh-grid">
+                  {(() => { try { return vault.listKeys(); } catch { return []; } })().map((k) => (
+                    <Card key={k.id}>
+                      <strong>{k.name}</strong>
+                      <p data-testid="vault-key-fingerprint">Fingerprint: {k.fingerprintSHA256}</p>
+                    </Card>
+                  ))}
                   <Card>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <strong>prod-ed25519-key</strong>
@@ -3997,6 +4014,11 @@ export function App(): JSX.Element {
                   Storage Guard: {quotaSnap.percentUsed}% of 256 MiB cap (256 KiB chunks, SHA-256 verified)
                 </Badge>
               </div>
+              <nav aria-label="Current path" data-testid="sftp-path-breadcrumb" style={{ display: 'flex', gap: 'var(--space-1)', alignItems: 'center', flexWrap: 'wrap', fontSize: 'var(--font-size-sm)' }}>
+                <span className="ws-mod-muted">Path:</span>
+                <strong>{sftpCurrentPath}</strong>
+                {sftpLastUpdated ? <span className="ws-mod-muted">· refreshed {Math.max(0, Math.floor((Date.now() - sftpLastUpdated) / 1000))}s ago</span> : null}
+              </nav>
               <p data-testid="transfer-status-badge">
                 {transferStatus}
                 {!connected && sftpLastUpdated ? (
@@ -4568,6 +4590,7 @@ export function App(): JSX.Element {
                   </p>
                 )}
               </Card>
+              {!recordedCast ? (
               <Card>
                 <h2>Demo recording preview ({scrubberSec.toFixed(1)}s)</h2>
                 <p>Sample recording — not output from your server.</p>
@@ -4582,6 +4605,7 @@ export function App(): JSX.Element {
                 />
                 <pre>{scrubAsciicastOutput(demoCast.events, scrubberSec)}</pre>
               </Card>
+              ) : null}
             </div>
           ) : null}
 
