@@ -2394,11 +2394,12 @@ html {
   align-items: center;
   gap: var(--space-1);
   padding: var(--space-1) var(--space-2);
+  min-height: 36px;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
   background-color: var(--color-bg-canvas);
   color: var(--color-fg-secondary);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-md);
   font-family: var(--font-font-sans);
   font-weight: 500;
   cursor: pointer;
