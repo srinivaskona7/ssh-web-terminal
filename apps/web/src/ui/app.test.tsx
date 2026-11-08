@@ -37,23 +37,22 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     // Server tools is a navigation entry (always visible), not a feature gate.
     expect(container.querySelector('[data-testid="nav-server-tools"]')).toBeTruthy();
 
-    // 2. Enter Zen Mode from the menubar View menu and press Escape -> returns to Welcome screen with chrome restored
-    // Nothing to disconnect yet, so the header offers no Disconnect control.
+    // 2. Connection-first header: no View menu / Disconnect on the welcome page.
+    // Appearance lives in Settings (theme persists); Zen lives in the workspace View menu.
     expect(container.querySelector('[data-testid="disconnect-btn"]')).toBeNull();
-    // The View menu is always available in the simplified header.
-    expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeTruthy();
-    (container.querySelector('[data-testid="view-menu-btn"]') as HTMLButtonElement).click();
+    expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeNull();
+    // Rail stays in the DOM (drawer/tests) but is visually hidden on this page.
+    expect((container.querySelector('[data-testid="nav-terminal"]') as HTMLElement).offsetParent).toBe(null);
+    (container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
-    const zenBtn = container.querySelector('[data-testid="toggle-zen-btn"]') as HTMLButtonElement;
-    zenBtn.click();
+    expect(container.querySelector('[data-testid="screen-settings"]')).toBeTruthy();
+    (container.querySelector('[data-testid="theme-btn-dracula"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dracula');
+    (container.querySelector('[data-testid="theme-btn-dark"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
-    expect(container.querySelector('[data-testid="zen-mode-banner"]')?.textContent).toContain(
-      'Zen Mode Active — Press Esc to return'
-    );
-    const rootEl = container.querySelector('[data-testid="workspace-root"]') as HTMLElement;
-    rootEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
-    expect(container.querySelector('[data-testid="zen-mode-banner"]')).toBeNull();
     expect(container.querySelector('[data-testid="screen-welcome"]')).toBeTruthy();
 
     // 3. Test Private Key upload with chmod 0400 permission enforcement on Welcome screen
@@ -700,7 +699,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.body.removeChild(container);
   });
 
-  it('applies a theme chosen in the menubar View menu to the document root and persists the choice', async () => {
+  it('applies a theme chosen in Settings to the document root and persists the choice', async () => {
     const initialTheme = document.documentElement.getAttribute('data-theme');
 
     const container = document.createElement('div');
@@ -708,17 +707,13 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     render(<App />, container);
     await new Promise((r) => setTimeout(r, 150));
 
-    (container.querySelector('[data-testid="view-menu-btn"]') as HTMLButtonElement).click();
+    // Theme lives in Settings -> Appearance on the connection-first flow.
+    (container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
-    const select = container.querySelector('[data-testid="theme-quick-switch"]') as HTMLSelectElement;
-    expect(select).toBeTruthy();
-    expect(select.value).toBe('dark');
-
-    select.value = 'dracula';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    (container.querySelector('[data-testid="theme-btn-dracula"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 10));
     await new Promise((r) => setTimeout(r, 150));
 
-    expect(select.value).toBe('dracula');
     expect(document.documentElement.getAttribute('data-theme')).toBe('dracula');
     const stored = JSON.parse(localStorage.getItem('webssh.preferences.v2') ?? '{}') as {
       activeThemeId?: string;

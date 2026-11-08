@@ -204,6 +204,7 @@ export function AppHeader({
         ) : null}
 
         <div className="webssh-header-actions">
+          {!onConnectionPage ? (
           <Button
             variant="ghost"
             ariaLabel="Open command palette"
@@ -215,11 +216,12 @@ export function AppHeader({
           >
             <Icon name="search" size={14} />
           </Button>
+          ) : null}
           <Button
             variant="ghost"
-            ariaLabel="Settings"
-            title="Settings"
-            onClick={() => setActiveScreen('settings')}
+            ariaLabel={activeScreen === 'settings' ? 'Back' : 'Settings'}
+            title={activeScreen === 'settings' ? 'Back to connection/workspace' : 'Settings'}
+            onClick={() => setActiveScreen(activeScreen === 'settings' ? 'welcome' : 'settings')}
             testId="header-settings-btn"
           >
             <Icon name="settings" size={14} />
@@ -601,7 +603,9 @@ export function AppHeader({
         </div>
       ) : null}
 
-      {/* View menu trigger button (⋯) placed at the right edge of the header bar */}
+      {/* View options live in the workspace (View menu). The connection page keeps
+          the header minimal (brand + Settings) so it stays clean. */}
+      {!onConnectionPage ? (
       <button
         type="button"
         className="webssh-view-menu-trigger"
@@ -615,6 +619,7 @@ export function AppHeader({
       >
         <span aria-hidden="true">•••</span>
       </button>
+      ) : null}
     </>
   );
 }

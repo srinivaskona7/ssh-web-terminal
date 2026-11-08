@@ -92,7 +92,7 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
 
   return (
     <div className="webssh-panel-content webssh-welcome" data-testid="screen-welcome" style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-4)' }}>
-      <div className="webssh-welcome-connect-card" data-testid="welcome-quick-connect-card" style={{ width: 'min(640px, 100%)', margin: 'auto' }}>
+      <div className="webssh-welcome-connect-card" data-testid="welcome-quick-connect-card" style={{ margin: 'auto' }}>
         <h1 className="webssh-welcome-heading">WebSSH Studio</h1>
         <p className="webssh-welcome-subheading">Connect to a server to open your terminal workspace.</p>
 
