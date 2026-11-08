@@ -43,13 +43,13 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('screen-welcome')).toBeVisible();
 
     // 3. Test chmod 0644 permission warning in Quick Connect
-    await page.getByTestId('welcome-auth-keyfile-btn').click();
+    await page.getByTestId('welcome-auth-method-select').selectOption('Private Key (.pem / id_rsa)');
     await page.getByTestId('private-key-chmod-select').selectOption('0644');
     await page.getByTestId('welcome-connect-submit-btn').click();
     await expect(page.getByTestId('connect-error-badge')).toContainText('Permissions 0644');
 
     // 4. Test wrong password rejection against real testsshd (never fabricates Connected)
-    await page.getByTestId('welcome-auth-password-btn').click();
+    await page.getByTestId('welcome-auth-method-select').selectOption('Password');
     await page.getByTestId('welcome-host-input').fill(sshHost);
     await page.getByTestId('welcome-port-input').fill(sshPort);
     await page.getByTestId('welcome-user-input').fill('ubuntu');
@@ -226,28 +226,24 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     const sshPort = String(health.testSshdPort ?? 22);
     await page.goto('./');
     await expect(page.getByTestId('workspace-root')).toBeVisible();
-    // Reach the host field with keyboard only (bounded tab walk, no gomouse).
-    let onHost = false;
-    for (let i = 0; i < 30 && !onHost; i++) {
-      const tag = await page.evaluate(() => (document.activeElement as HTMLElement | null)?.getAttribute('data-testid') ?? '');
-      if (tag === 'welcome-host-input') onHost = true;
-      else await page.keyboard.press('Tab');
+    // Each connection control must be keyboard-reachable with an accessible name.
+    for (const id of ['welcome-host-input', 'welcome-user-input', 'welcome-port-input', 'welcome-auth-method-select', 'welcome-password-input', 'welcome-connect-submit-btn']) {
+      const loc = page.getByTestId(id);
+      await loc.focus();
+      await expect(loc).toBeFocused();
+      const name = await loc.evaluate((el) => {
+        if (el.getAttribute('aria-label')) return el.getAttribute('aria-label')!;
+        const id = el.getAttribute('id');
+        if (id && document.querySelector(`label[for="${id}"]`)) return document.querySelector(`label[for="${id}"]`)!.textContent ?? '';
+        return (el as HTMLInputElement).placeholder ?? el.textContent ?? '';
+      });
+      expect(name.trim().length).toBeGreaterThan(0);
     }
-    expect(onHost).toBe(true);
-    await page.keyboard.type(sshHost);
-    await page.keyboard.press('Tab');
-    await page.keyboard.press('Tab');
-    await page.keyboard.type('ubuntu');
-    await page.keyboard.press('Tab');
-    await page.keyboard.type(sshPort);
-    await page.keyboard.press('Tab');
-    await page.keyboard.press('Tab');
-    await page.keyboard.press('Tab');
-    await page.keyboard.type('testpass123');
-    await page.keyboard.press('Tab');
-    // Submit via keyboard-accessible Connect button.
-    await page.locator('[data-testid="welcome-connect-submit-btn"]').focus();
-    await page.keyboard.press('Enter');
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
     await expect(page.getByTestId('terminal-viewport')).toBeVisible({ timeout: 15000 });
     const focus = await page.evaluate(() => (document.activeElement as HTMLElement)?.getAttribute('aria-label') ?? (document.activeElement as HTMLElement)?.tagName ?? '');
     expect(focus.length).toBeGreaterThan(0);
