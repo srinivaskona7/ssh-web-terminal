@@ -575,7 +575,8 @@ export function App(): JSX.Element {
     capabilities,
     onDiscover: () => discoverForSession(remoteSession),
     discoveryBusy,
-    discoveryError
+    discoveryError,
+    onNavigate: (screen) => setActiveScreen(screen as ScreenId)
   };
   const [pendingInputBytes, setPendingInputBytes] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -721,7 +722,7 @@ export function App(): JSX.Element {
   const [newTunnelLocalPort, setNewTunnelLocalPort] = useState<string>('8080');
   const [newTunnelRemotePort, setNewTunnelRemotePort] = useState<string>('80');
 
-  const [chmodTargetFile, setChmodTargetFile] = useState<string>('~/.ssh/id_ed25519');
+  const [chmodTargetFile, setChmodTargetFile] = useState<string>('');
   const [chmodPerms, setChmodPerms] = useState<ChmodPermissions>({
     ownerRead: true,
     ownerWrite: false,
@@ -4205,43 +4206,83 @@ export function App(): JSX.Element {
                   data-testid="sftp-remote-dropzone"
                 >
                 <p className="ws-mod-muted">Drop files here to upload them into {sftpCurrentPath}.</p>
-                <ul>
-                  {sftpEntries.map((entry) => (
-                    <li key={entry.path} data-testid={`sftp-row-${entry.name}`}>
-                      <strong>{entry.isDir ? `[DIR] ${entry.name}` : entry.name}</strong> — {entry.size} bytes ({entry.mode}){' '}
-                      {entry.isDir ? null : (
-                        <>
-                          <Button variant="ghost" onClick={() => void downloadRemoteFile(entry.path)}>
-                            Download
-                          </Button>
-                          {localDirHandle ? (
+                <div style={{ overflowX: 'auto' }}>
+                <table className="ws-mod-table" data-testid="sftp-remote-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Size</th>
+                      <th>Modified</th>
+                      <th>Permissions</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sftpEntries.map((entry) => (
+                      <tr key={entry.path} data-testid={`sftp-row-${entry.name}`}>
+                        <td>
+                          <button
+                            type="button"
+                            onClick={() => (entry.isDir ? void refreshSftpDirectory(entry.path) : void loadRemoteFileIntoEditor(entry.path))}
+                            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, font: 'inherit' }}
+                            data-testid={`sftp-open-${entry.name}`}
+                          >
+                            {entry.isDir ? `[DIR] ${entry.name}` : entry.name}
+                          </button>
+                        </td>
+                        <td>{entry.size} bytes</td>
+                        <td>{entry.modTime ? new Date(entry.modTime * 1000).toLocaleString() : '—'}</td>
+                        <td>{entry.mode}</td>
+                        <td>
+                          <div style={{ display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }}>
+                            {!entry.isDir ? (
+                              <>
+                                <Button variant="ghost" onClick={() => void downloadRemoteFile(entry.path)} data-testid={`sftp-download-${entry.name}`}>
+                                  Download
+                                </Button>
+                                {localDirHandle ? (
+                                  <Button
+                                    variant="ghost"
+                                    onClick={() => void downloadToLocalDirectory(entry.path)}
+                                    testId={`sftp-to-local-${entry.name}`}
+                                  >
+                                    To local
+                                  </Button>
+                                ) : null}
+                                <Button variant="ghost" onClick={() => void loadRemoteFileIntoEditor(entry.path)} disabled={!connected}>
+                                  Open in Editor
+                                </Button>
+                              </>
+                            ) : null}
                             <Button
                               variant="ghost"
-                              onClick={() => void downloadToLocalDirectory(entry.path)}
-                              testId={`sftp-to-local-${entry.name}`}
+                              onClick={() => setRenameTarget({ path: entry.path, name: entry.name })}
+                              disabled={!connected}
                             >
-                              Download to local
+                              Rename
                             </Button>
-                          ) : null}
-                        </>
-                      )}
-                      <Button
-                        variant="ghost"
-                        onClick={() => setRenameTarget({ path: entry.path, name: entry.name })}
-                        disabled={!connected}
-                      >
-                        Rename
-                      </Button>
-                      <Button
-                        variant="danger"
-                        onClick={() => setDeleteTarget({ path: entry.path, name: entry.name })}
-                        disabled={!connected}
-                      >
-                        Delete
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
+                            <Button
+                              variant="ghost"
+                              onClick={() => setChmodTargetFile(entry.path)}
+                              disabled={!connected}
+                            >
+                              Permissions
+                            </Button>
+                            <Button
+                              variant="danger"
+                              onClick={() => setDeleteTarget({ path: entry.path, name: entry.name })}
+                              disabled={!connected}
+                              data-testid={`sftp-delete-${entry.name}`}
+                            >
+                              Delete
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                </div>
                 </div>
                 {renameTarget ? (
                   <div className="ws-mod-plan" role="group" aria-label="Rename entry">

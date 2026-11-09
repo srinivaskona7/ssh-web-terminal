@@ -62,9 +62,7 @@ export function AppRail({
   prefsStore,
   isRailOpen
 }: AppRailProps): JSX.Element {
-  const showServerTools = SERVER_TOOL_SCREENS.includes(activeScreen as ScreenId) || activeScreen === 'server-tools';
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const toggle = (id: string) => setCollapsed((prev) => ({ ...prev, [id]: !prev[id] }));
+  // Server tools are now reached through the Server Health view's capability sections.
 
   return (
     <>
@@ -89,9 +87,9 @@ export function AppRail({
             </Button>
           </div>
 
-          {/* Connection */}
-          <div className="webssh-rail-group" role="group" aria-label="Connection">
-            <span className="webssh-rail-group-title">Connection</span>
+          {/* Workspace */}
+          <div className="webssh-rail-group" role="group" aria-label="Workspace">
+            <span className="webssh-rail-group-title">Workspace</span>
             <Button
               variant={activeScreen === 'workspace' ? 'primary' : 'ghost'}
               onClick={() => setActiveScreen('workspace')}
@@ -107,78 +105,22 @@ export function AppRail({
               <Icon name="folder" /> Files
             </Button>
             <Button
-              variant={SERVER_TOOL_SCREENS.includes(activeScreen as ScreenId) ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('overview')}
-              testId="nav-server-tools"
+              variant={activeScreen === 'editor' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('editor')}
+              testId="nav-editor"
             >
-              <Icon name="settings" /> Server tools
+              <Icon name="file" /> Editor
+            </Button>
+            <Button
+              variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('overview')}
+              testId="nav-server-health"
+            >
+              <Icon name="server" /> Server Health
             </Button>
           </div>
 
-          {/* Server tools (expanded when any server tool screen is active) */}
-          {showServerTools ? (
-            <div className="webssh-rail-group" role="group" aria-label="Server tools">
-              <button type="button" className="webssh-rail-group-title" aria-expanded={!collapsed.server} data-testid="rail-toggle-server-tools" onClick={() => toggle('server')}>Server tools {collapsed.server ? '▸' : '▾'}</button>
-              <div style={{ display: collapsed.server ? 'none' : 'contents' }}>
-              <Button
-                variant={activeScreen === 'overview' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('overview')}
-                testId="nav-overview"
-              >
-                <Icon name="server" /> Overview
-              </Button>
-              <Button
-                variant={activeScreen === 'software' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('software')}
-                testId="nav-software"
-              >
-                Software
-              </Button>
-              <Button
-                variant={activeScreen === 'containers' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('containers')}
-                testId="nav-containers"
-              >
-                <Icon name="server" /> Containers
-              </Button>
-              <Button
-                variant={activeScreen === 'kubernetes' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('kubernetes')}
-                testId="nav-kubernetes"
-              >
-                <Icon name="server" /> Kubernetes
-              </Button>
-              <Button
-                variant={activeScreen === 'automations' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('automations')}
-                testId="nav-automations"
-              >
-                Automations
-              </Button>
-              <Button
-                variant={activeScreen === 'deployments' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('deployments')}
-                testId="nav-deployments"
-              >
-                Deployments
-              </Button>
-              <Button
-                variant={activeScreen === 'activity' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('activity')}
-                testId="nav-activity"
-              >
-                Activity
-              </Button>
-              <Button
-                variant={activeScreen === 'tunnels' ? 'primary' : 'ghost'}
-                onClick={() => setActiveScreen('tunnels')}
-                testId="nav-tunnels"
-              >
-                <Icon name="command" /> Tunnels
-              </Button>
-              </div>
-            </div>
-          ) : null}
+          {/* Server Health capability sections are reached via the Server Health view's tabs. */}
 
           {/* Settings footer entry */}
           <div className="webssh-rail-group" role="group" aria-label="Settings">

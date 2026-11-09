@@ -118,12 +118,11 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('remote-editor-textarea')).toHaveValue(/WebSSH Test Server/);
 
     // 8. Navigate through remaining IDE screens and verify accessibility
-    await page.getByTestId('nav-server-tools').click();
-    await page.getByTestId('nav-overview').click();
+    await page.getByTestId('nav-server-health').click();
     await expect(page.getByTestId('screen-overview')).toBeVisible();
     await expect(page.getByTestId('live-control')).toBeVisible();
 
-    await page.getByTestId('nav-tunnels').click();
+    await page.getByTestId('health-open-tunnels').click();
     await expect(page.getByTestId('screen-tunnels')).toBeVisible();
     await expect(page.getByTestId('remote-web-preview-card')).toBeVisible();
 

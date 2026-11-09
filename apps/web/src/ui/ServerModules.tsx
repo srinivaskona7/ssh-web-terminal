@@ -64,6 +64,7 @@ export interface ModuleContext {
   onDiscover: () => Promise<ServerCapabilities | null>;
   discoveryBusy: boolean;
   discoveryError: string | null;
+  onNavigate?: (screen: string) => void;
 }
 
 type Async<T> =
@@ -192,7 +193,7 @@ export function OverviewPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
     <section className="ws-mod" data-testid="screen-overview">
       <header className="ws-mod-head">
         <div>
-          <h2>Server overview</h2>
+          <h2>Server Health</h2>
           <p className="ws-mod-muted">
             Read-only inspection. Discovery installs nothing, edits no configuration and reads no
             secret files.
@@ -292,6 +293,13 @@ export function OverviewPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
         </>
       ) : null}
 
+      <div className="ws-mod-actions" style={{ flexWrap: 'wrap' }}>
+        <Button variant="default" onClick={() => ctx.onNavigate?.('containers')} testId="health-open-containers">Containers</Button>
+        <Button variant="default" onClick={() => ctx.onNavigate?.('kubernetes')} testId="health-open-kubernetes">Kubernetes</Button>
+        <Button variant="default" onClick={() => ctx.onNavigate?.('automations')} testId="health-open-automations">Automations</Button>
+        <Button variant="default" onClick={() => ctx.onNavigate?.('deployments')} testId="health-open-deployments">Deployments</Button>
+        <Button variant="default" onClick={() => ctx.onNavigate?.('tunnels')} testId="health-open-tunnels">Tunnels</Button>
+      </div>
       {ctx.session ? <LiveControl session={ctx.session} /> : null}
     </section>
   );

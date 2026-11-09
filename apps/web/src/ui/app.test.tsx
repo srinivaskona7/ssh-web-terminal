@@ -36,7 +36,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(welcomeScreen?.textContent).toContain('Open your server workspace');
     expect(welcomeScreen?.textContent).toContain('Connect to server');
     // Server tools is a navigation entry (always visible), not a feature gate.
-    expect(container.querySelector('[data-testid="nav-server-tools"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="nav-server-health"]')).toBeTruthy();
 
     // 2. Connection-first header: no View menu / Disconnect on the welcome page.
     // Appearance lives in Settings (theme persists); Zen lives in the workspace View menu.
@@ -234,11 +234,11 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     // Help output goes to the terminal PTY, not a separate inspector.
 
     // 4. Port Tunnels & Custom Rule creation
-    const navServerTools = container.querySelector('[data-testid="nav-server-tools"]') as HTMLButtonElement;
-    navServerTools.click();
+    const navServerHealth = container.querySelector('[data-testid="nav-server-health"]') as HTMLButtonElement;
+    navServerHealth.click();
     await new Promise((r) => setTimeout(r, 10));
-    const navTunnels = container.querySelector('[data-testid="nav-tunnels"]') as HTMLButtonElement;
-    navTunnels.click();
+    const openTunnels = container.querySelector('[data-testid="health-open-tunnels"]') as HTMLButtonElement;
+    openTunnels.click();
     await new Promise((r) => setTimeout(r, 10));
     const addTunnelBtn = container.querySelector('[data-testid="add-tunnel-btn"]') as HTMLButtonElement;
     addTunnelBtn.click();
