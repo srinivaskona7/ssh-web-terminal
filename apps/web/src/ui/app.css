@@ -399,7 +399,11 @@
 }
 
 /* Mobile: collapse resource strip into single button */
-@media (max-width: 820px) {
+@media (max-width: 899px) {
+  [data-testid='terminal-split-pane-2'] {
+    display: none !important;
+  }
+
   .webssh-resource-strip {
     padding: var(--space-1) var(--space-2);
   }
@@ -422,7 +426,7 @@
 }
 
 /* Desktop: hide mobile button */
-@media (min-width: 821px) {
+@media (min-width: 900px) {
   .webssh-resource-mobile-btn {
     display: none;
   }
@@ -462,7 +466,7 @@
 
 /* Desktop: rail and main must occupy disjoint rectangles. The rail is a
    fixed-width sidebar that never overlaps the main content area. */
-@media (min-width: 821px) {
+@media (min-width: 900px) {
   .webssh-rail {
     position: static !important;
     transform: none !important;
@@ -1520,7 +1524,7 @@ button.webssh-rail-group-title {
 
 /* The special-keys row is a touch affordance; on a desktop pointer it is
    permanently visible chrome that eats terminal height. */
-@media (min-width: 821px) and (pointer: fine) {
+@media (min-width: 900px) and (pointer: fine) {
   .webssh-special-keys {
     display: none;
   }
@@ -2854,7 +2858,7 @@ html {
 }
 
 /* Desktop: hide hamburger toggle and backdrop */
-@media (min-width: 821px) {
+@media (min-width: 900px) {
   .webssh-header-menu-toggle {
     display: none;
   }
@@ -2867,7 +2871,7 @@ html {
 /* ========================================================================
    Narrow layout: drawer-style sidebar
    ======================================================================== */
-@media (max-width: 820px) {
+@media (max-width: 899px) {
   .webssh-rail {
     position: absolute;
     top: 0;

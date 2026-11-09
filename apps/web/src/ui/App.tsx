@@ -3246,7 +3246,7 @@ export function App(): JSX.Element {
                       zIndex: 9999,
                       padding: '4px 8px',
                       background: 'rgba(0,0,0,0.6)',
-                      color: '#fff',
+                      color: 'var(--color-fg-primary)',
                       border: 'none',
                       borderRadius: '4px',
                       cursor: 'pointer'
