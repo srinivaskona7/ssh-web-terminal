@@ -111,6 +111,12 @@
   border-radius: var(--radius-panel);
   padding: var(--space-4);
   box-shadow: var(--elevation-1);
+  transition: transform var(--motion-fast), box-shadow var(--motion-fast);
+}
+
+.ui-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--elevation-2);
 }
 
 .ui-card--danger {

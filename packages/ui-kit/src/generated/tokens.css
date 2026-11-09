@@ -24,7 +24,7 @@
   --border-danger: 1px solid var(--color-status-danger);
   --border-focus-ring: 2px solid var(--color-accent-primary);
   --elevation-0: none;
-  --elevation-1: 0 2px 8px rgba(0, 0, 0, 0.24);
+  --elevation-1: 0 4px 12px rgba(0, 0, 0, 0.32);
   --elevation-2: 0 8px 24px rgba(0, 0, 0, 0.36);
   --elevation-3: 0 16px 48px rgba(0, 0, 0, 0.52);
   --motion-fast: 120ms cubic-bezier(0.16, 1, 0.3, 1);

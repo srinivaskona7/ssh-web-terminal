@@ -98,7 +98,7 @@ export const TOKENS = {
   },
   "elevation": {
     "0": "none",
-    "1": "0 2px 8px rgba(0, 0, 0, 0.24)",
+    "1": "0 4px 12px rgba(0, 0, 0, 0.32)",
     "2": "0 8px 24px rgba(0, 0, 0, 0.36)",
     "3": "0 16px 48px rgba(0, 0, 0, 0.52)"
   },
