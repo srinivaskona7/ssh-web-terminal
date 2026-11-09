@@ -3234,6 +3234,27 @@ export function App(): JSX.Element {
                 className={`webssh-studio-container ${terminalFullscreen ? 'webssh-studio-container--terminal-fullscreen' : ''}`.trim()}
                 data-testid="terminal-studio-container"
               >
+                {terminalFullscreen ? (
+                  <button
+                    type="button"
+                    data-testid="terminal-fullscreen-exit-btn"
+                    onClick={() => void exitTerminalFullscreen()}
+                    style={{
+                      position: 'fixed',
+                      top: '8px',
+                      right: '8px',
+                      zIndex: 9999,
+                      padding: '4px 8px',
+                      background: 'rgba(0,0,0,0.6)',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Exit
+                  </button>
+                ) : null}
                 {termSearchOpen ? (
                   <div className="webssh-term-search" role="search" data-testid="terminal-search-bar">
                     <Icon name="search" />
