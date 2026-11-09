@@ -4939,8 +4939,11 @@ export function App(): JSX.Element {
       {/* 5. Server Connection & Argon2id Auth Modal */}
       <Modal
         open={connectModalOpen}
-        title="New SSH Connection & Argon2id Credentials"
-        onClose={() => setConnectModalOpen(false)}
+        title="New connection"
+        onClose={() => {
+          setConnectModalOpen(false);
+          setTimeout(() => terminalViewRef.current?.focus(), 0);
+        }}
         testId="connect-modal"
       >
         <form onSubmit={handleConnectSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
@@ -4951,7 +4954,10 @@ export function App(): JSX.Element {
               the Go gateway dials the chain, the Cloudflare relay refuses it.
             </p>
           ) : null}
-          <div>
+          <details style={{ border: 'var(--border-hairline)', borderRadius: 'var(--radius-md)', padding: 'var(--space-2)' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Advanced / Administrator settings</summary>
+            <div style={{ marginTop: 'var(--space-2)' }}>
+            <div>
             <label htmlFor="modal-transport-mode-select">SSH Transport Mode</label>
             <select
               id="modal-transport-mode-select"
@@ -5031,6 +5037,8 @@ export function App(): JSX.Element {
               data-testid="gateway-token-input"
             />
           </div>
+            </div>
+          </details>
           <div>
             <label htmlFor="connect-host-input">Host (IP or domain)</label>
             <input
