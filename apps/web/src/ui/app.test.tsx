@@ -211,7 +211,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     for (const ch of 'telemetry') sendKey(ch);
     sendKey('Enter');
     // Server modules are a lazy chunk; jsdom needs a longer settle.
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 300));
     expect(container.querySelector('[data-testid="screen-overview"]')).toBeTruthy();
     expect(viewport.textContent).not.toContain('telemetry');
     navTerminal.click();

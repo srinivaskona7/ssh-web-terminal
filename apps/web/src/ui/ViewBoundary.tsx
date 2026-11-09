@@ -2,7 +2,7 @@ import { Component, type ComponentChildren } from 'preact';
 import { Button, Card } from '@webssh/ui-kit';
 import { repairApplicationAssetCaches } from './ErrorBoundary';
 
-interface Props { name: string; children: ComponentChildren }
+interface Props { name: string; resetKey?: string; children: ComponentChildren }
 interface State { error: Error | null }
 
 /** Per-view error boundary: a failed tool must not take the whole workspace down. */
@@ -10,6 +10,11 @@ export class ViewBoundary extends Component<Props, State> {
   state: State = { error: null };
   static getDerivedStateFromError(error: Error): State { return { error }; }
   componentDidCatch(): void {}
+  componentDidUpdate(prevProps: Props): void {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
   render(): ComponentChildren {
     if (!this.state.error) return this.props.children;
     return (

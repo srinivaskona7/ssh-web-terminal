@@ -107,8 +107,8 @@ export function AppRail({
               <Icon name="folder" /> Files
             </Button>
             <Button
-              variant={activeScreen === 'server-tools' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('server-tools')}
+              variant={SERVER_TOOL_SCREENS.includes(activeScreen as ScreenId) ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('overview')}
               testId="nav-server-tools"
             >
               <Icon name="settings" /> Server tools

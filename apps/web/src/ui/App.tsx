@@ -450,6 +450,13 @@ export function App(): JSX.Element {
 
   useEffect(() => () => clearReconnectTimer(), []);
 
+  // "Server tools" is a group, not a screen: bounce any stale value to Overview.
+  useEffect(() => {
+    if (activeScreen === 'server-tools') setActiveScreen('overview');
+  }, [activeScreen]);
+
+
+
   useEffect(() => {
     try {
       localStorage?.setItem('webssh.termSearch.lastQuery', termSearchQuery);
@@ -3506,7 +3513,7 @@ export function App(): JSX.Element {
               />
             </Suspense>
           ) : null}
-          <ViewBoundary key={activeScreen} name="Server Tools">
+          <ViewBoundary name="Server Tools" resetKey={activeScreen}>
           <Suspense fallback={<p className="ws-mod-muted">Loading server modules…</p>}>
             {activeScreen === 'overview' ? <OverviewPanel ctx={moduleContext} /> : null}
             {activeScreen === 'software' ? <SoftwarePanel ctx={moduleContext} /> : null}
@@ -3738,70 +3745,6 @@ export function App(): JSX.Element {
                 </p>
                 <pre data-testid="tunnel-preview-output">{tunnelPreviewOutput}</pre>
               </Card>
-            </div>
-          ) : null}
-
-          {activeScreen === 'server-tools' ? (
-            <div className="webssh-panel-content" data-testid="screen-server-tools">
-              <h1>Server tools</h1>
-              <p className="ws-mod-muted">
-                Containers, Kubernetes, services, and automation for the active connection.
-              </p>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 'var(--space-3)', marginTop: 'var(--space-3)' }}>
-                <Card>
-                  <h3>Overview</h3>
-                  <p className="ws-mod-muted">Live CPU, memory, disk, uptime, processes, and services.</p>
-                  <Button variant="default" onClick={() => setActiveScreen('overview')} testId="server-tools-overview">
-                    Open Overview
-                  </Button>
-                </Card>
-                <Card>
-                  <h3>Software</h3>
-                  <p className="ws-mod-muted">Installed packages and software inventory.</p>
-                  <Button variant="default" onClick={() => setActiveScreen('software')} testId="server-tools-software">
-                    Open Software
-                  </Button>
-                </Card>
-                <Card>
-                  <h3>Containers</h3>
-                  <p className="ws-mod-muted">Docker container management.</p>
-                  <Button variant="default" onClick={() => setActiveScreen('containers')} testId="server-tools-containers">
-                    Open Containers
-                  </Button>
-                </Card>
-                <Card>
-                  <h3>Kubernetes</h3>
-                  <p className="ws-mod-muted">kubectl cluster inspection.</p>
-                  <Button variant="default" onClick={() => setActiveScreen('kubernetes')} testId="server-tools-kubernetes">
-                    Open Kubernetes
-                  </Button>
-                </Card>
-                <Card>
-                  <h3>Automations</h3>
-                  <p className="ws-mod-muted">Python automation templates and job runner.</p>
-                  <Button variant="default" onClick={() => setActiveScreen('automations')} testId="server-tools-automations">
-                    Open Automations
-                  </Button>
-                </Card>
-                <Card>
-                  <h3>Deployments</h3>
-                  <p className="ws-mod-muted">Git plan, preview, and deploy workflows.</p>
-                  <Button variant="default" onClick={() => setActiveScreen('deployments')} testId="server-tools-deployments">
-                    Open Deployments
-                  </Button>
-                </Card>
-                <Card>
-                  <h3>Activity</h3>
-                  <p className="ws-mod-muted">Session history and job states.</p>
-                  <Button variant="default" onClick={() => setActiveScreen('activity')} testId="server-tools-activity">
-                    Open Activity
-                  </Button>
-                </Card>
-              </div>
-              <p className="ws-mod-muted" style={{ marginTop: 'var(--space-4)' }}>
-                Some tools require the Go SSH/SFTP Gateway mode and may report &ldquo;not reported&rdquo;
-                when a capability probe has not yet run.
-              </p>
             </div>
           ) : null}
 
