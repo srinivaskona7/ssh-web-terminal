@@ -44,7 +44,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeNull();
     // Rail stays in the DOM (drawer/tests) but is visually hidden on this page.
     expect((container.querySelector('[data-testid="nav-terminal"]') as HTMLElement).offsetParent).toBe(null);
-    (container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="screen-settings"]')).toBeTruthy();
     (container.querySelector('[data-testid="theme-btn-dracula"]') as HTMLButtonElement).click();
@@ -92,7 +92,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     let termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
-    expect(termViewport.style.fontSize).toBe('17px');
+    expect(termViewport.style.fontSize).toBe('15px');
     expect(termViewport.style.fontFamily).toContain('JetBrains Mono');
 
     // Local command output lives in the inspector, never duplicated inside the
@@ -110,13 +110,13 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: '=', ctrlKey: true, bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
-    expect(termViewport.style.fontSize).toBe('18px');
+    expect(termViewport.style.fontSize).toBe('16px');
 
     // Decrease font via the global keyboard handler (Cmd+-).
     document.dispatchEvent(new KeyboardEvent('keydown', { key: '-', ctrlKey: true, bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
-    expect(termViewport.style.fontSize).toBe('17px');
+    expect(termViewport.style.fontSize).toBe('15px');
 
     // 5. Test 'connect root@10.0.0.5' command opening simple Connection modal
     for (const ch of 'connect root@10.0.0.5') {
@@ -253,9 +253,14 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="chmod-octal-badge"]')?.textContent).toContain('0400 (-r--------)');
 
-    const navEditor = container.querySelector('[data-testid="nav-editor"]') as HTMLButtonElement;
-    navEditor.click();
-    await new Promise((r) => setTimeout(r, 10));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const paletteInput = container.querySelector('[data-testid="command-palette-input"]') as HTMLInputElement;
+    paletteInput.value = 'editor';
+    paletteInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
     // Editor starts empty; verify empty state is shown
     expect(container.querySelector('[data-testid="editor-filepath-input"]')).toBeTruthy();
     // Type a path and attempt load (will fail without connection, but button should respond)
@@ -268,9 +273,14 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     // 6. FIDO2 Hardware Key & SSH CA Certificate Viewer
-    const navVault = container.querySelector('[data-testid="nav-vault"]') as HTMLButtonElement;
-    navVault.click();
-    await new Promise((r) => setTimeout(r, 10));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    const vaultPaletteInput = container.querySelector('[data-testid="command-palette-input"]') as HTMLInputElement;
+    vaultPaletteInput.value = 'vault';
+    vaultPaletteInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
+    vaultPaletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 150));
     expect(container.querySelector('[data-testid="fido2-hardware-card"]')?.textContent).toContain(
       'Browsers cannot create OpenSSH FIDO2 keys'
     );
@@ -319,7 +329,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     const outerSignIn = container.querySelector('[data-testid="product-sign-in"]');
 
     // Relay internals and the optional account form live in Settings -> Administrator.
-    const settingsNav = container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement;
+    const settingsNav = container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement;
     settingsNav.click();
     await new Promise((r) => setTimeout(r, 10));
     (container.querySelector('[data-testid="settings-tab-administrator"]') as HTMLButtonElement).click();
@@ -618,7 +628,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.body.appendChild(container);
     render(<App />, container);
     // Configure the gateway endpoint up front (welcome card has no gateway field).
-    (container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     (container.querySelector('[data-testid="settings-tab-administrator"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
@@ -710,7 +720,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     await new Promise((r) => setTimeout(r, 150));
 
     // Theme lives in Settings -> Appearance on the connection-first flow.
-    (container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     (container.querySelector('[data-testid="theme-btn-dracula"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));

@@ -274,7 +274,7 @@ export function App(): JSX.Element {
   );
 
   // 1 & 3. Default Font Size (+20% = 17px) & Font Family
-  const [fontSize, setFontSize] = useState<number>(17);
+  const [fontSize, setFontSize] = useState<number>(15);
   const [lineHeight, setLineHeight] = useState<number>(1.25);
   const [fontFamily, setFontFamily] = useState<string>("'JetBrains Mono', 'Fira Code', monospace");
   const [cols, setCols] = useState<number>(80);
@@ -2945,6 +2945,24 @@ export function App(): JSX.Element {
       }
     });
     reg.register({
+      id: 'nav.editor',
+      title: 'Open Remote Editor',
+      category: 'Files',
+      run: () => {
+        setActiveScreen('editor');
+        setPaletteOpen(false);
+      }
+    });
+    reg.register({
+      id: 'nav.snippets',
+      title: 'Open Snippets & Session Replay',
+      category: 'Terminal',
+      run: () => {
+        setActiveScreen('snippets');
+        setPaletteOpen(false);
+      }
+    });
+    reg.register({
       id: 'terminal.find',
       title: 'Find in terminal output',
       category: 'Terminal',
@@ -3447,23 +3465,26 @@ export function App(): JSX.Element {
                 {connectedHost ? <span> {connectedUser}@{connectedHost}{connectedAt ? ` · last connected ${new Date(connectedAt).toLocaleTimeString()}` : ''}</span> : null}
               </p>
               <div className="webssh-empty-state-actions">
-                <Button
-                  variant="primary"
-                  onClick={() => {
-                    setPendingJump(null);
-                    setConnectModalOpen(true);
-                  }}
-                  testId="empty-state-connect-btn"
-                >
-                  Connect to a server
-                </Button>
-                <Button
-                  variant="default"
-                  onClick={() => handleReconnectNow()}
-                  testId="empty-state-reconnect-btn"
-                >
-                  Reconnect
-                </Button>
+                {connectedHost ? (
+                  <Button
+                    variant="primary"
+                    onClick={() => handleReconnectNow()}
+                    testId="empty-state-reconnect-btn"
+                  >
+                    Reconnect
+                  </Button>
+                ) : (
+                  <Button
+                    variant="primary"
+                    onClick={() => {
+                      setPendingJump(null);
+                      setConnectModalOpen(true);
+                    }}
+                    testId="empty-state-connect-btn"
+                  >
+                    Connect to a server
+                  </Button>
+                )}
                 {recentHosts.length > 0 ? (
                   <Button
                     variant="default"
@@ -3485,7 +3506,7 @@ export function App(): JSX.Element {
               />
             </Suspense>
           ) : null}
-          <ViewBoundary name="Server Tools">
+          <ViewBoundary key={activeScreen} name="Server Tools">
           <Suspense fallback={<p className="ws-mod-muted">Loading server modules…</p>}>
             {activeScreen === 'overview' ? <OverviewPanel ctx={moduleContext} /> : null}
             {activeScreen === 'software' ? <SoftwarePanel ctx={moduleContext} /> : null}
@@ -3517,7 +3538,7 @@ export function App(): JSX.Element {
 
           {activeScreen === 'tunnels' ? (
             <div className="webssh-panel-content" data-testid="screen-tunnels">
-              <h1>Port Forwarding & Network Tunneling Studio (-L / -R / -D SOCKS5)</h1>
+              <h1>Port Forwarding</h1>
               <Card>
                 <h2>Create Custom SSH Port Forward Rule</h2>
                 <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -3678,6 +3699,7 @@ export function App(): JSX.Element {
                     </Badge>
                     <Button
                       variant="primary"
+                      disabled={connectionState !== 'connected'}
                       testId="probe-http-preview-btn"
                       onClick={() => {
                         const activeClient = liveSessionRef.current;

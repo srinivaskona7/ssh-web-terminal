@@ -37,7 +37,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
 
     // 2. Connection-first header: no View menu on welcome; Settings toggles and back navigates.
     await expect(page.getByTestId('view-menu-btn')).toBeHidden();
-    await page.getByTestId('welcome-settings-btn').click();
+    await page.getByTestId('header-settings-btn').click();
     await expect(page.getByTestId('screen-settings')).toBeVisible();
     await page.getByTestId('header-settings-btn').click();
     await expect(page.getByTestId('screen-welcome')).toBeVisible();

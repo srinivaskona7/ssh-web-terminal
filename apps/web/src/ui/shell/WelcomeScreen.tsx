@@ -178,7 +178,6 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
               {isConnecting ? <Button variant="ghost" type="button" onClick={() => onCancel?.()} testId="welcome-cancel-btn">Cancel</Button> : null}
               <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', justifyContent: 'flex-end' }}>
                 <Button variant="ghost" type="button" onClick={() => onNavigate('hosts')} testId="welcome-saved-hosts-btn">Saved Hosts</Button>
-                <Button variant="ghost" type="button" onClick={() => onNavigate('settings')} testId="welcome-settings-btn">Settings</Button>
               </div>
             </div>
             <p className="ws-mod-muted" style={{ fontSize: 'var(--font-size-xs)' }}>Relay and gateway configuration lives under Settings → Administrator.</p>

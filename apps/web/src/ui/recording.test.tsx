@@ -19,7 +19,7 @@ describe('Session recording UI', () => {
     document.body.appendChild(container);
     render(<App />, container);
 
-    (container.querySelector('[data-testid="welcome-settings-btn"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
@@ -34,7 +34,7 @@ describe('Session recording UI', () => {
     expect(recordBtn).toBeTruthy();
     expect(recordBtn.disabled).toBe(true);
 
-    (container.querySelector('[data-testid="nav-snippets"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="open-snippets-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 
     const panel = container.querySelector('[data-testid="screen-snippets"]');

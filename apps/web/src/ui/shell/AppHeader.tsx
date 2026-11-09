@@ -244,8 +244,8 @@ export function AppHeader({
         />
       ) : null}
 
-      {/* 2. Session strip: tabs + new tab + split controls (workspace only) */}
-      {!onConnectionPage ? (
+      {/* 2. Session strip: tabs + new tab + split controls (Terminal only) */}
+      {activeScreen === 'workspace' ? (
       <div className="webssh-session-strip">
         <div className="webssh-session-tabs" role="tablist" aria-label="Active SSH sessions">
           {tabs.map((tab) => {
@@ -603,6 +603,17 @@ export function AppHeader({
               onClick={() => { startRecording(); setOpenMenu(null); }}
             >
               <span>Record</span>
+            </button>
+            <button
+              type="button"
+              className="webssh-view-menu-item"
+              data-testid="open-snippets-btn"
+              onClick={() => {
+                setActiveScreen('snippets');
+                setOpenMenu(null);
+              }}
+            >
+              <span>Snippets & Replay</span>
             </button>
           </div>
         </div>

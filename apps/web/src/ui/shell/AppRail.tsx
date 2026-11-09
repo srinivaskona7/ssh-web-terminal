@@ -85,7 +85,7 @@ export function AppRail({
               onClick={() => setActiveScreen('hosts')}
               testId="nav-hosts"
             >
-              <Icon name="server" /> Hosts
+              <Icon name="server" /> Saved Hosts
             </Button>
           </div>
 
@@ -105,13 +105,6 @@ export function AppRail({
               testId="nav-files"
             >
               <Icon name="folder" /> Files
-            </Button>
-            <Button
-              variant={activeScreen === 'editor' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('editor')}
-              testId="nav-editor"
-            >
-              <Icon name="file" /> Editor
             </Button>
             <Button
               variant={activeScreen === 'server-tools' ? 'primary' : 'ghost'}
@@ -187,22 +180,14 @@ export function AppRail({
             </div>
           ) : null}
 
-          {/* Vault + snippets (security/productivity, always available) */}
-          <div className="webssh-rail-group" role="group" aria-label="Security & productivity">
-            <span className="webssh-rail-group-title">Security & productivity</span>
+          {/* Settings footer entry */}
+          <div className="webssh-rail-group" role="group" aria-label="Settings">
             <Button
-              variant={activeScreen === 'vault' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('vault')}
-              testId="nav-vault"
+              variant={activeScreen === 'settings' ? 'primary' : 'ghost'}
+              onClick={() => setActiveScreen('settings')}
+              testId="nav-settings"
             >
-              <Icon name="key" /> Key Vault
-            </Button>
-            <Button
-              variant={activeScreen === 'snippets' ? 'primary' : 'ghost'}
-              onClick={() => setActiveScreen('snippets')}
-              testId="nav-snippets"
-            >
-              Snippets & Replay
+              <Icon name="settings" /> Settings
             </Button>
           </div>
         </div>
