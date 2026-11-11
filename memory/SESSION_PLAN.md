@@ -56,3 +56,10 @@ See synchronized plan in `/Users/sr20536224wipro.com/.apple-gemini/.gemini/tmp/t
   - [x] **20.6 — Workspace presets**: Terminal / Develop / Operate persist through `PreferencesStore.workspacePreset`; layout changes persist too.
   - [x] **20.7 — Verification**: `npm test` 18 files / 100 tests green; `apps/web` typecheck clean; `server-control.test.ts` covers metric deltas, blank-on-missing, service-name injection rejection and `sudo -n` behaviour.
   - [ ] **20.8 — Pending (needs disposable host)**: real-server runs for recipes, Docker, Kubernetes, Git/deploy, Python cron and service actions; Playwright cross-browser pass; screenshots. Do not mark these Verified until they run.
+
+- [x] **Step 21 — UI Shell Upgrades: Two-Tier Header, Collapsible Rail Groups, Live Settings Preview (2026-11-11)**:
+  - **21.1 — Two-tier header** (`apps/web/src/ui/shell/AppHeader.tsx`): Tier 1 (brand + connection + actions) always visible; Tier 2 (session strip + live CPU/RAM/Disk resource meters) shown only when connected. Resource detail hover panels (CPU per-core, RAM breakdown, disk per-mount) preserved.
+  - **21.2 — Collapsible rail groups + recent hosts** (`apps/web/src/ui/shell/AppRail.tsx`): Global, Workspace, Recents, and Settings groups are collapsible with chevron toggle. Server Tools shows count badge. Recent Hosts section lists `user@host:port` shortcuts for quick reconnect.
+  - **21.3 — Live terminal preview in Settings** (`apps/web/src/ui/shell/SettingsScreen.tsx`): Theme selector shows colored swatch dots; Live Terminal Preview card renders a sample terminal with current theme, font, cursor shape, and connection context. `app.css` gained `.webssh-header--tier-1/2`, `.webssh-rail-group-*`, `.webssh-rail-nav-*`, `.webssh-theme-swatch/dot`, `.webssh-terminal-preview-*` styles.
+  - **21.4 — Wiring**: `App.tsx` passes `recentHosts` to `AppRail`.
+  - **Verification**: `npm run lint` (0 violations), `npm run typecheck` (clean), `npm run build` (verified production build, 108 assets).

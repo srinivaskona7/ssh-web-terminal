@@ -143,8 +143,8 @@ export function AppHeader({
 
   return (
     <>
-      {/* 1. Header bar: workspace name + active connection + actions */}
-      <header className="webssh-header" role="banner">
+      {/* TIER 1: Header bar — brand + active connection + quick actions */}
+      <header className="webssh-header webssh-header--tier-1" role="banner">
         <div className="webssh-header-brand">
           <button
             type="button"
@@ -228,83 +228,75 @@ export function AppHeader({
           >
             <Icon name="settings" size={14} />
           </Button>
+          <Button variant="ghost" ariaLabel="View and session options" title="View and session options" testId="view-menu-btn" onClick={(e) => { e.stopPropagation(); setOpenMenu((m) => (m === 'view' ? null : 'view')); }}>
+            <Icon name="settings" size={14} />
+          </Button>
         </div>
       </header>
 
-      {/* Rail backdrop (mobile drawer open) */}
-      {isRailOpen ? (
-        <div
-          className="webssh-rail-backdrop"
-          onClick={toggleRail}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') toggleRail();
-          }}
-          tabIndex={-1}
-          aria-hidden="true"
-        />
-      ) : null}
+      {/* TIER 2: Session strip — tabs + resource meters (shown when connected) + always-visible session controls */}
+      <div className="webssh-header webssh-header--tier-2">
+        <div className="webssh-session-strip">
+          {/* Session tabs — only meaningful when connected */}
+          {isConnected && connectedHost ? (
+            <div className="webssh-session-tabs" role="tablist" aria-label="Active SSH sessions">
+              {tabs.map((tab) => {
+                const isActive = tab.id === activeTabId;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={`webssh-session-tab ${isActive ? 'webssh-session-tab--active' : ''}`.trim()}
+                    onClick={() => {
+                      setActiveTabId(tab.id);
+                      setSessionTabLabel(tab.title);
+                      setActiveScreen('workspace');
+                      liveSessionRef.current =
+                        connectionRegistryRef.current.get(tab.connectionId)?.client ?? null;
+                    }}
+                    onDblClick={(e) => {
+                      e.preventDefault();
+                      const next = window.prompt('Rename session tab', tab.title)?.trim();
+                      if (!next) return;
+                      setTabs((prev) =>
+                        prev.map((item) => (item.id === tab.id ? { ...item, title: next } : item))
+                      );
+                      if (tab.id === activeTabIdRef.current) setSessionTabLabel(next);
+                    }}
+                    title="Double-click to rename"
+                    data-testid={tab.id === 'tab-1' ? 'tab-session-1' : `tab-session-${tabs.indexOf(tab) + 1}`}
+                  >
+                    <span
+                      className={`webssh-status-dot ${
+                        tab.status === 'error'
+                          ? 'webssh-status-dot--offline'
+                          : tab.status === 'opening'
+                            ? 'webssh-status-dot--reconnecting'
+                            : tab.status === 'idle'
+                              ? 'webssh-status-dot--disconnected'
+                              : statusDotClass
+                      }`.trim()}
+                      aria-hidden="true"
+                    />
+                    <span>{tab.title}</span>
+                    <span
+                      aria-hidden="true"
+                      className="webssh-tab-close"
+                      data-testid={`close-tab-${tab.id}`}
+                      onClick={(e) => handleCloseTab(tab.id, e)}
+                    >
+                      ×
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
 
-      {/* 2. Session strip: tabs + new tab + split controls (Terminal only) */}
-      {activeScreen === 'workspace' ? (
-      <div className="webssh-session-strip">
-        <div className="webssh-session-tabs" role="tablist" aria-label="Active SSH sessions">
-          {tabs.map((tab) => {
-            const isActive = tab.id === activeTabId;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                aria-selected={isActive && activeScreen === 'workspace'}
-                className={`webssh-session-tab ${isActive && activeScreen === 'workspace' ? 'webssh-session-tab--active' : ''}`.trim()}
-                onClick={() => {
-                  setActiveTabId(tab.id);
-                  setSessionTabLabel(tab.title);
-                  setActiveScreen('workspace');
-                  liveSessionRef.current =
-                    connectionRegistryRef.current.get(tab.connectionId)?.client ?? null;
-                }}
-                onDblClick={(e) => {
-                  e.preventDefault();
-                  const next = window.prompt('Rename session tab', tab.title)?.trim();
-                  if (!next) return;
-                  setTabs((prev) =>
-                    prev.map((item) => (item.id === tab.id ? { ...item, title: next } : item))
-                  );
-                  if (tab.id === activeTabIdRef.current) setSessionTabLabel(next);
-                }}
-                title="Double-click to rename"
-                data-testid={tab.id === 'tab-1' ? 'tab-session-1' : `tab-session-${tabs.indexOf(tab) + 1}`}
-              >
-                <span
-                  className={`webssh-status-dot ${
-                    tab.status === 'error'
-                      ? 'webssh-status-dot--offline'
-                      : tab.status === 'opening'
-                        ? 'webssh-status-dot--reconnecting'
-                        : tab.status === 'idle'
-                          ? 'webssh-status-dot--disconnected'
-                          : statusDotClass
-                  }`.trim()}
-                  aria-hidden="true"
-                />
-                <span>{tab.title}</span>
-                <span
-                  aria-hidden="true"
-                  className="webssh-tab-close"
-                  data-testid={`close-tab-${tab.id}`}
-                  onClick={(e) => handleCloseTab(tab.id, e)}
-                >
-                  ×
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Resource strip: CPU / RAM / Disk for the active connection */}
-        <div className="webssh-resource-strip">
-          {connectionState === 'connected' && connectedHost ? (
+          {/* Resource strip: CPU / RAM / Disk for the active connection */}
+          {isConnected && connectedHost ? (
             <>
               <span className="webssh-resource-label">{connectedUser}@{connectedHost}</span>
               <div
@@ -429,64 +421,71 @@ export function AppHeader({
                 </div>
               )}
             </>
-          ) : (
-            <span className="webssh-resource-empty">No active connection</span>
-          )}
-        </div>
-        <Button variant="ghost" className="webssh-resource-mobile-btn" onClick={() => setActiveScreen('overview')} testId="resource-overview-btn">Resources</Button>
-        <div className="webssh-session-controls">
-          <Button
-            variant="ghost"
-            ariaLabel="New terminal tab"
-            title="New Terminal Tab"
-            testId="add-tab-btn"
-            onClick={handleAddTab}
-          >
-            <Icon name="plus" size={14} />
-          </Button>
-          {splitPanes > 1 ? (
-            <Button
-              variant={broadcastInput ? 'primary' : 'ghost'}
-              ariaPressed={broadcastInput}
-              ariaLabel="Send input to every pane in this session"
-              testId="toggle-broadcast-btn"
-              onClick={() => setBroadcastInput((v) => !v)}
-            >
-              <Icon name="broadcast" size={14} />
-            </Button>
-          ) : (
+          ) : null}
+          <Button variant="ghost" className="webssh-resource-mobile-btn" onClick={() => setActiveScreen('overview')} testId="resource-overview-btn">Resources</Button>
+          <div className="webssh-session-controls">
             <Button
               variant="ghost"
-              ariaLabel="Split terminal pane"
-              title="Split Terminal"
-              testId="toggle-split-btn"
-              onClick={() => setSplitPanes((n) => (n === 1 ? 2 : 1))}
+              ariaLabel="New terminal tab"
+              title="New Terminal Tab"
+              testId="add-tab-btn"
+              onClick={handleAddTab}
             >
-              <Icon name="split-h" size={14} />
+              <Icon name="plus" size={14} />
             </Button>
-          )}
-          {recording ? (
-            <Button
-              variant="primary"
-              onClick={() => {
-                const events = stopRecording();
-                setReconnectNotice(
-                  events > 0
-                    ? `Recording stopped — ${events} event(s) captured.`
-                    : 'Recording stopped with no output captured.'
-                );
-              }}
-              testId="toggle-recording-btn"
-            >
-              <span className="webssh-rec-dot" aria-hidden="true" />
-              Recording · Stop
-            </Button>
-          ) : null}
-          <Button variant="ghost" ariaLabel="View and session options" title="View and session options" testId="view-menu-btn" onClick={(e) => { e.stopPropagation(); setOpenMenu((m) => (m === 'view' ? null : 'view')); }}>
-            <Icon name="settings" size={14} />
-          </Button>
+            {splitPanes > 1 ? (
+              <Button
+                variant={broadcastInput ? 'primary' : 'ghost'}
+                ariaPressed={broadcastInput}
+                ariaLabel="Send input to every pane in this session"
+                testId="toggle-broadcast-btn"
+                onClick={() => setBroadcastInput((v) => !v)}
+              >
+                <Icon name="broadcast" size={14} />
+              </Button>
+            ) : (
+              <Button
+                variant="ghost"
+                ariaLabel="Split terminal pane"
+                title="Split Terminal"
+                testId="toggle-split-btn"
+                onClick={() => setSplitPanes((n) => (n === 1 ? 2 : 1))}
+              >
+                <Icon name="split-h" size={14} />
+              </Button>
+            )}
+            {recording ? (
+              <Button
+                variant="primary"
+                onClick={() => {
+                  const events = stopRecording();
+                  setReconnectNotice(
+                    events > 0
+                      ? `Recording stopped — ${events} event(s) captured.`
+                      : 'Recording stopped with no output captured.'
+                  );
+                }}
+                testId="toggle-recording-btn"
+              >
+                <span className="webssh-rec-dot" aria-hidden="true" />
+                Recording · Stop
+              </Button>
+            ) : null}
+          </div>
         </div>
       </div>
+
+      {/* Rail backdrop (mobile drawer open) */}
+      {isRailOpen ? (
+        <div
+          className="webssh-rail-backdrop"
+          onClick={toggleRail}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') toggleRail();
+          }}
+          tabIndex={-1}
+          aria-hidden="true"
+        />
       ) : null}
 
       {/* 3. View display menu (font, theme, density, fullscreen, zen, rare actions) */}

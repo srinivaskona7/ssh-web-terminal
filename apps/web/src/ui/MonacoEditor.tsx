@@ -21,16 +21,6 @@ export function MonacoEditor({ value, language = 'plaintext', onChange, readOnly
     (async () => {
       try {
         const monaco = await import('monaco-editor');
-        // Configure workers for Vite.
-        (self as unknown as { MonacoEnvironment?: unknown }).MonacoEnvironment = {
-          getWorker(_moduleId: string, label: string) {
-            if (label === 'json') return new Worker(new URL('monaco-editor/esm/vs/language/json/json.worker?worker', import.meta.url), { type: 'module' });
-            if (label === 'css' || label === 'scss' || label === 'less') return new Worker(new URL('monaco-editor/esm/vs/language/css/css.worker?worker', import.meta.url), { type: 'module' });
-            if (label === 'html' || label === 'handlebars' || label === 'razor') return new Worker(new URL('monaco-editor/esm/vs/language/html/html.worker?worker', import.meta.url), { type: 'module' });
-            if (label === 'typescript' || label === 'javascript') return new Worker(new URL('monaco-editor/esm/vs/language/typescript/ts.worker?worker', import.meta.url), { type: 'module' });
-            return new Worker(new URL('monaco-editor/esm/vs/editor/editor.worker?worker', import.meta.url), { type: 'module' });
-          }
-        };
         if (disposed || !hostRef.current) return;
         const editor = monaco.editor.create(hostRef.current, {
           value,
@@ -44,7 +34,8 @@ export function MonacoEditor({ value, language = 'plaintext', onChange, readOnly
           if (onChange) onChange(editor.getValue());
         });
       } catch {
-        // Monaco unavailable; render nothing extra (parent keeps textarea fallback).
+        // Monaco unavailable (e.g. web workers blocked); render nothing extra
+        // so the parent falls back to the textarea editor.
       }
     })();
     return () => {

@@ -387,6 +387,28 @@ export function App(): JSX.Element {
   const [showOverlayBar, setShowOverlayBar] = useState(false);
   const [showFullscreenToast, setShowFullscreenToast] = useState(false);
 
+  // Toast notifications: stacked, auto-dismissing messages that never overlap
+  // other chrome. Each toast has an id, tone, message, and optional dismiss timeout.
+  type ToastTone = 'neutral' | 'success' | 'warning' | 'danger';
+  interface ToastItem {
+    id: string;
+    tone: ToastTone;
+    message: string;
+    duration?: number;
+  }
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastIdRef = useRef(0);
+
+  const showToast = (message: string, tone: ToastTone = 'neutral', duration = 4000): void => {
+    const id = String(++toastIdRef.current);
+    setToasts((prev) => [...prev, { id, tone, message, duration }]);
+    if (duration > 0) {
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, duration);
+    }
+  };
+
   // 3. Fresh Default State (Zero Pre-Populated Mock Data)
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [rttMs, setRttMs] = useState(0);
@@ -545,6 +567,37 @@ export function App(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
   const [connectedHost, setConnectedHost] = useState<string>('');
+  // Keep the document title meaningful for the current screen (bookmarks,
+  // browser tabs, and search-engine snippets of the public landing page).
+  const screenTitle = (screen: ScreenId): string => {
+    const base = 'WebSSH Studio';
+    switch (screen) {
+      case 'welcome': return `Welcome — ${base}`;
+      case 'workspace': return `Terminal${connectedHost ? ` · ${connectedUser}@${connectedHost}` : ''} — ${base}`;
+      case 'settings': return `Settings — ${base}`;
+      case 'hosts': return `Saved Hosts — ${base}`;
+      case 'files': return `Files — ${base}`;
+      case 'editor': return `Editor — ${base}`;
+      case 'vault': return `SSH Key Vault — ${base}`;
+      case 'snippets': return `Snippets & Replay — ${base}`;
+      case 'features': return `Capability Matrix — ${base}`;
+      case 'overview': return `Server Health — ${base}`;
+      case 'software': return `Software — ${base}`;
+      case 'containers': return `Containers — ${base}`;
+      case 'kubernetes': return `Kubernetes — ${base}`;
+      case 'automations': return `Automations — ${base}`;
+      case 'deployments': return `Deployments — ${base}`;
+      case 'activity': return `Activity — ${base}`;
+      case 'diagrams': return `Diagrams — ${base}`;
+      case 'devops': return `DevOps — ${base}`;
+      case 'integrated': return `Integrated Workspace — ${base}`;
+      case 'tunnels': return `Tunnels — ${base}`;
+      default: return base;
+    }
+  };
+  useEffect(() => {
+    document.title = screenTitle(activeScreen);
+  }, [activeScreen, connectedHost, connectedUser]);
   const [remoteSession, setRemoteSession] = useState<WorkspaceRemoteSession | null>(null);
   const [capabilities, setCapabilities] = useState<ServerCapabilities | null>(null);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
@@ -2712,7 +2765,7 @@ export function App(): JSX.Element {
       setIsFullscreen(true);
     }
     setShowFullscreenToast(true);
-    setTimeout(() => setShowFullscreenToast(false), 3000);
+    void showToast('Immersive full-screen — Press F11 or Esc to exit', 'neutral', 3000);
     terminalViewRef.current?.focus();
   };
 
@@ -2868,8 +2921,17 @@ export function App(): JSX.Element {
 
   // Modal content is mounted whether or not it is open, so `autoFocus` alone
   // does not move the caret; focus explicitly each time the palette opens.
+  // A deferred retry guards against jsdom lagging `document.activeElement`
+  // under parallel test load while the modal DOM commits.
   useEffect(() => {
-    if (paletteOpen) paletteInputRef.current?.focus();
+    if (!paletteOpen) return;
+    const input = paletteInputRef.current;
+    if (!input) return;
+    input.focus();
+    const timer = setTimeout(() => {
+      if (paletteInputRef.current === input) input.focus();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [paletteOpen]);
 
   // `autoFocus` alone is unreliable once xterm holds focus, so the find bar
@@ -3127,6 +3189,29 @@ export function App(): JSX.Element {
         </div>
       ) : null}
 
+      {/* Toast notification stack: bottom-right, auto-dismissing, never overlaps chrome */}
+      <div className="webssh-toast-container" role="region" aria-label="Notifications" data-testid="toast-container">
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            className={`webssh-toast webssh-toast--${t.tone}`}
+            data-testid={`toast-${t.id}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="webssh-toast-message">{t.message}</span>
+            <button
+              type="button"
+              className="webssh-toast-dismiss"
+              aria-label="Dismiss notification"
+              onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+
       {!isFullscreen && !zenMode ? (
         <AppHeader
           activeScreen={activeScreen}
@@ -3224,6 +3309,7 @@ export function App(): JSX.Element {
             layoutPreset={layoutPreset}
             prefsStore={prefsStore}
             isRailOpen={railOpen}
+            recentHosts={recentHosts}
           />
         ) : null}
 

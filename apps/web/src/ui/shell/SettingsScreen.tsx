@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
-import { Badge, Button, Card, THEME_IDS, type ThemeId } from '@webssh/ui-kit';
+import { useMemo } from 'preact/hooks';
+import { Badge, Button, Card, THEME_IDS, THEMES, type ThemeId } from '@webssh/ui-kit';
 import type { CursorShape, LayoutPreset, PreferencesStore } from '../../prefs';
 import { repairApplicationAssetCaches } from '../ErrorBoundary';
 import type { KeybindingRegistry } from '../productivity';
@@ -163,17 +164,69 @@ export function SettingsScreen({
       </Card>
       <Card>
         <h2>Theme Selector</h2>
-        <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-          {THEME_IDS.map((id) => (
-            <Button
-              key={id}
-              variant={id === activeTheme ? 'primary' : 'default'}
-              onClick={() => setActiveTheme(id)}
-              testId={`theme-btn-${id}`}
-            >
-              {id}
-            </Button>
-          ))}
+        <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', marginBottom: 'var(--space-3)' }}>
+          {THEME_IDS.map((id) => {
+            return (
+              <Button
+                key={id}
+                variant={id === activeTheme ? 'primary' : 'default'}
+                onClick={() => setActiveTheme(id)}
+                testId={`theme-btn-${id}`}
+                className="webssh-theme-swatch"
+              >
+                <span
+                  className="webssh-theme-dot"
+                  style={{
+                    background: 'var(--color-accent-primary)',
+                    boxShadow: `0 0 0 1px var(--color-border-strong)`
+                  }}
+                  aria-hidden="true"
+                />
+                {id}
+              </Button>
+            );
+          })}
+        </div>
+      </Card>
+      <Card>
+        <h2>Live Terminal Preview</h2>
+        <p className="ws-mod-muted">See how your theme, font, and cursor look in a sample terminal before you leave Settings.</p>
+        <div className="webssh-terminal-preview">
+          <div className="webssh-terminal-preview-header">
+            <span style={{ display: 'inline-flex', gap: '6px' }}>
+              <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: 'var(--ansi-red)' }} />
+              <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: 'var(--ansi-yellow)' }} />
+              <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: 'var(--ansi-green)' }} />
+            </span>
+            <span className="webssh-terminal-preview-title" style={{ marginLeft: 'auto', fontSize: 'var(--font-size-xs)', color: 'var(--color-fg-muted)' }}>
+              webssh.studio · {activeTheme}
+            </span>
+          </div>
+          <div
+            className="webssh-terminal-preview-body"
+            style={{
+              fontFamily: fontFamily,
+              fontSize: `${fontSize}px`,
+              lineHeight: '1.35',
+              background: 'var(--color-terminal-bg)',
+              color: 'var(--color-terminal-fg)',
+              padding: 'var(--space-3)',
+              borderRadius: 'var(--radius-md)',
+              overflow: 'auto',
+              minHeight: '140px'
+            }}
+          >
+            <div style={{ color: 'var(--color-prompt-user)' }}>webssh</div>
+            <div style={{ color: 'var(--color-prompt-host)', display: 'inline', marginLeft: '1px' }}>localhost</div>
+            <div style={{ color: 'var(--color-prompt-dir)', display: 'inline', marginLeft: '1px' }}>{':~/projects'}</div>
+            <div style={{ color: 'var(--color-prompt-arrow)', display: 'inline', marginLeft: '1px' }}> $</div>
+            <div style={{ marginTop: 'var(--space-2)', color: 'var(--ansi-green)' }}>✔ Connected via WebSocket (wss)</div>
+            <div style={{ marginTop: 'var(--space-1)', color: 'var(--ansi-blue)' }}>→ load average: 0.12, 0.08, 0.05</div>
+            <div style={{ marginTop: 'var(--space-1)', color: 'var(--ansi-yellow)' }}>→ 3 containers running · 2 pods ready</div>
+            <div style={{ marginTop: 'var(--space-3)', borderTop: 'var(--border-hairline)', paddingTop: 'var(--space-2)', color: 'var(--color-fg-muted)', fontSize: 'var(--font-size-xs)' }}>
+              Cursor: {cursorShape} · Theme: {activeTheme} · Font: {fontSize}px
+            </div>
+          </div>
         </div>
       </Card>
       <Card>

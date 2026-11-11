@@ -36,14 +36,14 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect(welcomeScreen?.textContent).toContain('Open your server workspace');
     expect(welcomeScreen?.textContent).toContain('Connect to server');
     // Server tools is a navigation entry (always visible), not a feature gate.
-    expect(container.querySelector('[data-testid="nav-server-health"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="nav-server-tools"]')).toBeTruthy();
 
-    // 2. Connection-first header: no View menu / Disconnect on the welcome page.
-    // Appearance lives in Settings (theme persists); Zen lives in the workspace View menu.
+    // 2. Connection-first header: no Disconnect on the welcome page.
+    // The View menu is always available in Tier 1 (appearance lives in Settings; Zen in the View menu).
     expect(container.querySelector('[data-testid="disconnect-btn"]')).toBeNull();
-    expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeNull();
+    expect(container.querySelector('[data-testid="view-menu-btn"]')).toBeTruthy();
     // Rail stays in the DOM (drawer/tests) but is visually hidden on this page.
-    expect((container.querySelector('[data-testid="nav-terminal"]') as HTMLElement).offsetParent).toBe(null);
+    expect((container.querySelector('[data-testid="nav-workspace"]') as HTMLElement).offsetParent).toBe(null);
     (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 10));
     expect(container.querySelector('[data-testid="screen-settings"]')).toBeTruthy();
@@ -87,7 +87,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     );
 
     // 4. Switch to Terminal and test interactive shell, 17px default font size, and commands
-    const navWorkspace = container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement;
+    const navWorkspace = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
     navWorkspace.click();
     await new Promise((r) => setTimeout(r, 10));
 
@@ -199,7 +199,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     render(<App />, container);
 
     // Switch to Terminal
-    const navTerminal = container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement;
+    const navTerminal = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
     navTerminal.click();
     await new Promise((r) => setTimeout(r, 10));
 
@@ -234,7 +234,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     // Help output goes to the terminal PTY, not a separate inspector.
 
     // 4. Port Tunnels & Custom Rule creation
-    const navServerHealth = container.querySelector('[data-testid="nav-server-health"]') as HTMLButtonElement;
+    const navServerHealth = container.querySelector('[data-testid="nav-server-tools"]') as HTMLButtonElement;
     navServerHealth.click();
     await new Promise((r) => setTimeout(r, 10));
     const openTunnels = container.querySelector('[data-testid="health-open-tunnels"]') as HTMLButtonElement;
@@ -442,7 +442,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     render(<App />, container);
 
     // 1. Switch to terminal while disconnected and run uname -s -> must NOT fake success
-    const openTermBtn = container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement;
+    const openTermBtn = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
     openTermBtn.click();
     await new Promise((r) => setTimeout(r, 10));
 
@@ -532,7 +532,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.body.appendChild(container);
     render(<App />, container);
 
-    (container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 
     // Ctrl+F works from anywhere outside a text field, not only with the
@@ -699,7 +699,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
 
     // Inside the terminal `?` is a real command character, so the shell must
     // not steal it for the cheatsheet.
-    (container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
     const viewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
     expect(viewport.classList.contains('webssh-terminal-viewport')).toBe(true);

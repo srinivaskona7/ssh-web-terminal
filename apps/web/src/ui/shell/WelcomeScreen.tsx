@@ -6,6 +6,7 @@ import type { AuthMethod, KeyPermissionMode, PendingJump } from '../App';
 import type { WorkspaceRemoteSession } from '../../session/adapters';
 import { TurnstileWidget } from './TurnstileWidget';
 import type { Setter } from './types';
+import './welcome-screen.css';
 
 export interface WelcomeQuickConnect {
   connectHost: string;
@@ -90,21 +91,21 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
     connectErrorMsg && connectErrorMsg.toLowerCase().includes(part) ? connectErrorMsg : null;
 
   return (
-    <div className="webssh-panel-content webssh-welcome" data-testid="screen-welcome" style={{ padding: 'var(--space-4)', backgroundColor: 'var(--color-bg-canvas)' }}>
-      <div className="webssh-landing" data-testid="welcome-quick-connect-card" style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 'var(--space-6)', alignItems: 'center', maxWidth: '1100px', margin: 'auto' }}>
+    <div className="webssh-panel-content webssh-welcome webssh-welcome-container" data-testid="screen-welcome">
+      <div className="webssh-landing webssh-welcome-landing" data-testid="welcome-quick-connect-card">
         <section aria-label="Introduction">
-          <h1 className="webssh-welcome-heading" style={{ fontSize: 'var(--font-size-2xl)' }}>Open your server workspace</h1>
+          <h1 className="webssh-welcome-heading webssh-welcome-heading">Open your server workspace</h1>
           <p className="webssh-welcome-subheading">Connect over SSH and open a terminal, files, and tools — keys stay in your browser.</p>
         </section>
-        <div className="webssh-welcome-connect-card" style={{ margin: 'auto', width: '100%' }}>
-          <h2 style={{ margin: '0 0 var(--space-3)' }}>New connection</h2>
+        <div className="webssh-welcome-connect-card webssh-welcome-new-connection">
+          <h2>New connection</h2>
           <form onSubmit={handleConnectSubmit} className="webssh-welcome-connect-form" data-testid="welcome-connect-form" noValidate>
             <div className="webssh-welcome-field">
               <label htmlFor="welcome-host-input">Host</label>
               <input id="welcome-host-input" type="text" autoComplete="off" className="ui-input" placeholder="server.example.com or 203.0.113.10" value={connectHost} aria-invalid={fieldError('host') ? 'true' : undefined} onInput={(e) => { setConnectHost((e.target as HTMLInputElement).value); setConnectErrorMsg(''); }} data-testid="welcome-host-input" />
               {fieldError('host') ? <p role="alert">{connectErrorMsg}</p> : null}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 96px', gap: 'var(--space-2)' }}>
+            <div className="webssh-welcome-user-port-row">
               <div className="webssh-welcome-field">
                 <label htmlFor="welcome-user-input">Username</label>
                 <input id="welcome-user-input" type="text" autoComplete="username" className="ui-input" placeholder="ubuntu" value={connectUser} aria-invalid={fieldError('user') ? 'true' : undefined} onInput={(e) => { setConnectUser((e.target as HTMLInputElement).value); setConnectErrorMsg(''); }} data-testid="welcome-user-input" />
@@ -132,10 +133,10 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
             ) : null}
 
             {authMethod === 'Private Key (.pem / id_rsa)' ? (
-              <div className="webssh-welcome-field" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+              <div className="webssh-welcome-field webssh-welcome-key-field">
                 <label htmlFor="welcome-key-file-input">Private key</label>
-                <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
-                  <input id="welcome-key-file-input" type="file" accept=".pem,.key,.pub,*" onChange={(e) => void handlePrivateKeyFileUpload(e)} data-testid="private-key-file-input" style={{ flex: 1 }} />
+                <div className="webssh-welcome-key-row">
+                  <input id="welcome-key-file-input" type="file" accept=".pem,.key,.pub,*" onChange={(e) => void handlePrivateKeyFileUpload(e)} data-testid="private-key-file-input" className="webssh-welcome-key-file-input" />
                   <Badge tone={keyPermissionMode === '0644' ? 'danger' : 'success'} testId="private-key-chmod-badge">{keyPermissionMode === '0644' ? 'UNPROTECTED KEY (0644)' : `chmod ${keyPermissionMode} — Enforced`}</Badge>
                   <select aria-label="Private key chmod" className="ui-select" value={keyPermissionMode} onChange={(e) => setKeyPermissionMode((e.currentTarget as HTMLSelectElement).value as KeyPermissionMode)} data-testid="private-key-chmod-select">
                     <option value="0400">chmod 0400</option>
@@ -148,7 +149,7 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
                   <summary>Paste key instead</summary>
                   <textarea className="ui-input" rows={3} placeholder="Paste -----BEGIN OPENSSH PRIVATE KEY----- content" aria-label="Private key content" value={uploadedKeyContent} onInput={(e) => { setUploadedKeyContent((e.target as HTMLTextAreaElement).value); setKeyPermissionMode('0400'); setConnectErrorMsg(''); }} data-testid="private-key-textarea" />
                 </details>
-                <input id="welcome-key-passphrase-input" type="password" autoComplete="off" className="ui-input" placeholder="Key passphrase (leave blank if unencrypted)" value={keyPassphrase} onInput={(e) => setKeyPassphrase((e.target as HTMLInputElement).value)} data-testid="welcome-key-passphrase-input" style={{ maxWidth: '320px' }} />
+                <input id="welcome-key-passphrase-input" type="password" autoComplete="off" className="ui-input webssh-welcome-passphrase" placeholder="Key passphrase (leave blank if unencrypted)" value={keyPassphrase} onInput={(e) => setKeyPassphrase((e.target as HTMLInputElement).value)} data-testid="welcome-key-passphrase-input" />
               </div>
             ) : null}
 
@@ -159,28 +160,28 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
               </div>
             ) : null}
 
-            <div style={{ minHeight: '80px' }} aria-live="polite">
+            <div className="webssh-welcome-challenge-spacer" aria-live="polite">
               {transportMode === 'cloudflare-relay' && turnstileSiteKey ? (
                 <div data-testid="guest-challenge" className="webssh-welcome-guest-challenge">
-                  <p className="ws-mod-muted" style={{ margin: 0 }}>Complete the human check, then connect. A short-lived ticket is issued for this host and port.</p>
+                  <p className="ws-mod-muted webssh-welcome-challenge-text">Complete the human check, then connect. A short-lived ticket is issued for this host and port.</p>
                   <TurnstileWidget siteKey={turnstileSiteKey} resetNonce={turnstileResetNonce} onToken={setTurnstileToken} />
                 </div>
               ) : (
-                <p className="ws-mod-muted" style={{ margin: 0, visibility: 'hidden' }}>Human check placeholder — keeps layout stable.</p>
+                <p className="ws-mod-muted webssh-welcome-challenge-text webssh-welcome-challenge-placeholder">Human check placeholder — keeps layout stable.</p>
               )}
             </div>
 
             {connectErrorMsg && !(fieldError('host') || fieldError('user')) ? <Badge tone="danger" testId="connect-error-badge">{connectErrorMsg}</Badge> : null}
             {gatewayProbeStatus ? <Badge tone={gatewayProbeStatus.ok ? 'success' : 'danger'} testId="gateway-probe-badge">{gatewayProbeStatus.message}</Badge> : null}
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-              <div style={{ width: '100%' }}><Button variant="primary" type="submit" testId="welcome-connect-submit-btn" disabled={isConnecting}>Connect to server</Button></div>
+            <div className="webssh-welcome-actions-column">
+              <div className="webssh-welcome-submit-wrapper"><Button variant="primary" type="submit" testId="welcome-connect-submit-btn" disabled={isConnecting}>Connect to server</Button></div>
               {isConnecting ? <Button variant="ghost" type="button" onClick={() => onCancel?.()} testId="welcome-cancel-btn">Cancel</Button> : null}
-              <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', justifyContent: 'flex-end' }}>
+              <div className="webssh-welcome-saved-hosts-row">
                 <Button variant="ghost" type="button" onClick={() => onNavigate('hosts')} testId="welcome-saved-hosts-btn">Saved Hosts</Button>
               </div>
             </div>
-            <p className="ws-mod-muted" style={{ fontSize: 'var(--font-size-xs)' }}>Relay and gateway configuration lives under Settings → Administrator.</p>
+            <p className="ws-mod-muted webssh-welcome-footer-note">Relay and gateway configuration lives under Settings → Administrator.</p>
           </form>
         </div>
       </div>

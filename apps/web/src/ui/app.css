@@ -12,6 +12,21 @@
   overflow: hidden;
 }
 
+/* ---- Z-index layering (prevents overlapping chrome) ---- */
+/* Order: base content < term search < conn panel < resource detail < dropdown < modal < fullscreen overlays < rail drawer */
+:root {
+  --z-term-search: 10;
+  --z-conn-panel: 60;
+  --z-resource-detail: 200;
+  --z-dropdown-menu: 500;
+  --z-modal-backdrop: 1000;
+  --z-modal-content: 1010;
+  --z-fullscreen-hover-zone: 10000;
+  --z-fullscreen-overlay-bar: 10001;
+  --z-fullscreen-toast: 10002;
+  --z-rail-backdrop: 10003;
+}
+
 .webssh-app--pseudo-fullscreen {
   position: fixed;
   inset: 0;
@@ -128,7 +143,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-0);
-  z-index: 2000;
+  z-index: var(--z-dropdown-menu);
 }
 
 .webssh-menu-item {
@@ -325,7 +340,7 @@
   position: absolute;
   top: calc(100% + var(--space-1));
   left: 0;
-  z-index: 200;
+  z-index: var(--z-resource-detail);
   min-width: 200px;
   background-color: var(--color-bg-surface);
   border: var(--border-strong);
@@ -852,7 +867,7 @@
   position: absolute;
   bottom: calc(100% + var(--space-2));
   left: 0;
-  z-index: 60;
+  z-index: var(--z-conn-panel);
   min-width: 20rem;
   max-width: calc(100vw - var(--space-6));
   padding: var(--space-3);
@@ -937,7 +952,7 @@
   left: 0;
   right: 0;
   height: var(--space-3);
-  z-index: 10000;
+  z-index: var(--z-fullscreen-hover-zone);
 }
 
 .webssh-fullscreen-overlay-bar {
@@ -953,7 +968,7 @@
   background-color: var(--color-bg-overlay);
   border: var(--border-strong);
   box-shadow: var(--elevation-2);
-  z-index: 10001;
+  z-index: var(--z-fullscreen-overlay-bar);
 }
 
 .webssh-fullscreen-toast {
@@ -968,7 +983,103 @@
   color: var(--color-fg-primary);
   font-size: var(--font-size-sm);
   box-shadow: var(--elevation-2);
-  z-index: 10002;
+  z-index: var(--z-fullscreen-toast);
+}
+
+/* Toast notification stack — bottom-right, auto-dismissing, never overlaps chrome */
+.webssh-toast-container {
+  position: fixed;
+  bottom: var(--space-5);
+  right: var(--space-5);
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--space-2);
+  z-index: var(--z-fullscreen-toast);
+  pointer-events: none;
+}
+
+.webssh-toast {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: var(--border-strong);
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-font-sans);
+  box-shadow: var(--elevation-3);
+  min-width: 220px;
+  max-width: 360px;
+  pointer-events: auto;
+  animation: webssh-toast-slide var(--motion-fast) ease forwards;
+}
+
+@keyframes webssh-toast-slide {
+  from {
+    transform: translateX(120%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.webssh-toast--neutral {
+  background-color: var(--color-bg-elevated);
+  border-color: var(--color-border-subtle);
+}
+
+.webssh-toast--success {
+  background-color: var(--color-bg-elevated);
+  border-color: var(--color-status-success);
+  color: var(--color-status-success);
+}
+
+.webssh-toast--warning {
+  background-color: var(--color-bg-elevated);
+  border-color: var(--color-status-warning);
+  color: var(--color-status-warning);
+}
+
+.webssh-toast--danger {
+  background-color: var(--color-bg-elevated);
+  border-color: var(--color-status-danger);
+  color: var(--color-status-danger);
+}
+
+.webssh-toast-message {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.webssh-toast-dismiss {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: var(--font-size-lg);
+  line-height: 1;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.webssh-toast-dismiss:hover {
+  opacity: 1;
+  background-color: color-mix(in oklab, currentColor 15%, transparent);
+}
+
+@media (max-width: 560px) {
+  .webssh-toast-container {
+    left: var(--space-3);
+    right: var(--space-3);
+  }
+  .webssh-toast {
+    min-width: auto;
+    width: 100%;
+  }
 }
 
 .webssh-panel-content {
@@ -1897,7 +2008,7 @@ html {
   position: absolute;
   top: var(--space-2);
   right: var(--space-3);
-  z-index: 5;
+  z-index: var(--z-term-search);
   display: flex;
   align-items: center;
   gap: var(--space-1);
@@ -2500,7 +2611,7 @@ html {
   display: flex;
   flex-direction: column;
   gap: var(--space-0);
-  z-index: 2000;
+  z-index: var(--z-dropdown-menu);
 }
 
 .webssh-view-menu-group {
@@ -2811,7 +2922,7 @@ html {
 .webssh-rail-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 99;
+  z-index: var(--z-rail-backdrop);
   background-color: rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(2px);
 }
@@ -2899,4 +3010,167 @@ html {
   width: 100vw;
   height: 100vh;
   border-radius: 0;
+}
+
+/* ========================================================================
+   Two-tier header
+   ======================================================================== */
+
+.webssh-header--tier-1 {
+  /* Tier 1: brand + connection + actions — always visible */
+}
+
+.webssh-header--tier-2 {
+  /* Tier 2: session strip + live resource meters — shown when connected */
+  background-color: var(--surface-nav);
+  border-bottom: var(--border-hairline);
+  flex-shrink: 0;
+}
+
+.webssh-header--tier-2 .webssh-session-strip {
+  background-color: transparent;
+  border-bottom: none;
+  padding: var(--space-1) var(--space-3);
+  min-height: auto;
+}
+
+.webssh-header--tier-2 .webssh-resource-strip {
+  background-color: transparent;
+  border-bottom: none;
+  padding: var(--space-1) var(--space-3);
+  gap: var(--space-3);
+}
+
+/* ========================================================================
+   Collapsible rail groups
+   ======================================================================== */
+
+.webssh-rail-group-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  user-select: none;
+  transition: background-color var(--motion-fast);
+}
+
+.webssh-rail-group-header:hover {
+  background-color: var(--color-bg-elevated);
+}
+
+.webssh-rail-group-header:focus-visible {
+  outline: var(--border-focus-ring);
+  outline-offset: var(--space-1);
+}
+
+.webssh-rail-group-chevron {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+}
+
+.webssh-rail-group-body {
+  padding-left: var(--space-2);
+  padding-bottom: var(--space-1);
+  border-left: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent);
+  margin-left: var(--space-1);
+}
+
+/* ========================================================================
+   Live terminal preview (Settings)
+   ======================================================================== */
+
+.webssh-terminal-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.webssh-terminal-preview-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background-color: color-mix(in srgb, var(--color-bg-surface) 90%, transparent);
+  border-bottom: var(--border-hairline);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.webssh-terminal-preview-title {
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-secondary);
+  white-space: nowrap;
+}
+
+.webssh-terminal-preview-body {
+  flex: 1;
+  min-height: 140px;
+  overflow: auto;
+  font-family: var(--font-font-mono);
+  line-height: var(--font-line-height-terminal);
+  background-color: var(--color-terminal-bg);
+  color: var(--color-terminal-fg);
+  padding: var(--space-3);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  border-top: none;
+}
+
+.webssh-terminal-preview-body > div:first-child {
+  margin-top: 0;
+}
+
+.webssh-terminal-preview-body > div {
+  margin-top: var(--space-1);
+  white-space: pre-wrap;
+}
+
+/* Rail group title styling for collapsible groups */
+.webssh-rail-group-title {
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--font-letter-spacing-tight);
+  flex: 1;
+}
+
+/* Rail nav item (replaces inline styles from Button) */
+.webssh-rail-nav-item {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.webssh-rail-nav-icon {
+  margin-right: var(--space-1);
+}
+
+.webssh-rail-nav-label {
+  flex: 1;
+}
+
+.webssh-rail-nav-badge {
+  font-size: var(--font-size-xs);
+  padding: var(--space-0) var(--space-1);
+}
+
+/* Theme swatch button */
+.webssh-theme-swatch {
+  position: relative;
+  padding-left: var(--space-4);
+  min-width: 90px;
+}
+
+.webssh-theme-dot {
+  position: absolute;
+  left: var(--space-1);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
 }

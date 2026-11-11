@@ -771,12 +771,12 @@ describe('LightIde editor chrome', () => {
     await settle();
 
     const editor = el.querySelector('[data-testid="ide-editor"]') as HTMLTextAreaElement;
-    expect(editor.style.whiteSpace).toBe('pre');
+    expect(editor.classList.contains('ide-editor-textarea')).toBe(true);
     expect(el.querySelector('[data-testid="ide-gutter"]')).toBeTruthy();
 
     input(el, 'ide-wrap-toggle').click();
     await sleep(20);
-    expect(editor.style.whiteSpace).toBe('pre-wrap');
+    expect(editor.dataset.wrap).toBe('on');
     // Wrapped logical lines span several visual rows, so a fixed-height
     // number column would drift; it is withdrawn instead of lying.
     expect(el.querySelector('[data-testid="ide-gutter"]')).toBeNull();
@@ -791,7 +791,7 @@ describe('LightIde editor chrome', () => {
     input(remounted, 'ide-entry-app.ts').click();
     await settle();
     const reloaded = remounted.querySelector('[data-testid="ide-editor"]') as HTMLTextAreaElement;
-    expect(reloaded.style.whiteSpace).toBe('pre-wrap');
+    expect(reloaded.dataset.wrap).toBe('on');
   });
 
   it('keeps an unsaved buffer when the close confirm is declined, and drops it when accepted', async () => {

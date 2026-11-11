@@ -24,7 +24,7 @@ describe('Session recording UI', () => {
     (container.querySelector('[data-testid="header-settings-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 
-    (container.querySelector('[data-testid="nav-terminal"]') as HTMLButtonElement).click();
+    (container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 150));
 
     // Idle Record moved into the View overflow menu (recording · Stop stays direct).

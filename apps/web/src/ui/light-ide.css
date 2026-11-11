@@ -1,0 +1,230 @@
+/* LightIde editor: all styles use design tokens — no hardcoded values. */
+
+/* --- Project header / actions --- */
+.ide-actions-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* --- Save progress --- */
+.ide-save-progress {
+  width: 120px;
+  height: 6px;
+  background-color: var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  position: relative;
+}
+
+.ide-save-progress-bar {
+  height: 100%;
+  background-color: var(--color-accent-primary);
+  border-radius: var(--radius-pill);
+  transition: width var(--motion-normal) ease;
+}
+
+.ide-save-progress-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-primary);
+}
+
+.ide-file-list-scroll {
+  overflow-x: hidden;
+}
+
+.ide-upload-input-hidden {
+  display: none;
+}
+
+/* --- File list --- */
+.ide-file-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.ide-file-item {
+  width: 100%;
+  text-align: left;
+  padding: var(--space-1) var(--space-2);
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+
+.ide-file-item:hover {
+  background-color: var(--color-bg-elevated);
+}
+
+.ide-file-list-empty {
+  padding: var(--space-2);
+  color: var(--color-fg-muted);
+}
+
+/* --- Quick open / recent files headings --- */
+.ide-quick-open-heading,
+.ide-recent-files-heading {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-sm);
+  color: var(--color-fg-secondary);
+}
+
+/* --- Input flex shorthands --- */
+.ide-input-flex-root {
+  flex: 1 1 240px;
+}
+
+.ide-input-flex-find {
+  flex: 1 1 140px;
+}
+
+.ide-input-flex-replace {
+  flex: 1 1 120px;
+}
+
+.ide-input-width-goto {
+  width: 80px;
+}
+
+/* --- Gutter --- */
+.ide-gutter-lines-container {
+  font-size: var(--font-size-sm);
+}
+
+/* --- Editor pane --- */
+.ide-editor-pane {
+  width: 100%;
+  font-family: var(--font-font-mono);
+  white-space: pre;
+  overflow: auto;
+}
+
+.ide-editor-textarea {
+  width: 100%;
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-md);
+  line-height: var(--font-line-height-editor);
+  white-space: pre;
+  overflowWrap: normal;
+  overflow: auto;
+  spellcheck: false;
+  resize: none;
+  outline: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  min-height: 0;
+}
+
+.ide-editor-textarea[data-wrap='on'] {
+  white-space: pre-wrap;
+  overflowWrap: anywhere;
+}
+
+/* --- Bracket match layer --- */
+.ide-bracket-layer {
+  font-size: var(--font-size-md);
+  pointer-events: none;
+}
+
+.ide-bracket-marker {
+  position: absolute;
+}
+
+/* --- Image preview --- */
+.ide-image-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+}
+
+.ide-image-preview img {
+  max-width: 100%;
+  max-height: 80vh;
+  border-radius: var(--radius-md);
+  box-shadow: var(--elevation-1);
+}
+
+/* --- Conflict banner --- */
+.ide-conflict-actions {
+  margin-top: var(--space-2);
+}
+
+/* --- Bottom panel --- */
+.ide-command-input {
+  flex: 1;
+}
+
+.ide-search-query {
+  flex: 1;
+}
+
+.ide-command-output,
+.ide-command-diff {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-xs);
+}
+
+/* --- Split editor view --- */
+.ide-editor-split {
+  display: flex;
+  gap: var(--space-2);
+  flex: 1;
+  min-height: 0;
+}
+
+.ide-editor-split-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ide-editor-pane-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-fg-muted);
+  padding: 0 var(--space-1) var(--space-1);
+  border-bottom: var(--border-hairline);
+  font-family: var(--font-font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Monaco editor host --- */
+.ide-monaco-host {
+  width: 100%;
+  height: 100%;
+  min-height: 240px;
+}
+
+/* --- Split editor view --- */
+.ide-editor-split {
+  display: flex;
+  gap: var(--space-2);
+  flex: 1;
+  min-height: 0;
+}
+
+.ide-editor-split-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}

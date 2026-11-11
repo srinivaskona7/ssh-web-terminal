@@ -1,0 +1,90 @@
+/* Welcome screen: Quick Connect layout. Tokens only — no hardcoded values. */
+.webssh-welcome-container {
+  padding: var(--space-4);
+  background-color: var(--color-bg-canvas);
+}
+
+.webssh-welcome-landing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-6);
+  align-items: center;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.webssh-welcome-heading {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-2xl);
+}
+
+.webssh-welcome-new-connection {
+  margin: 0 0 var(--space-3);
+}
+
+.webssh-welcome-user-port-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: var(--space-2);
+}
+
+.webssh-welcome-key-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.webssh-welcome-key-row {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.webssh-welcome-key-file-input {
+  flex: 1;
+}
+
+.webssh-welcome-passphrase {
+  max-width: 320px;
+}
+
+.webssh-welcome-challenge-spacer {
+  min-height: 80px;
+}
+
+.webssh-welcome-challenge-text {
+  margin: 0;
+}
+
+.webssh-welcome-challenge-placeholder {
+  visibility: hidden;
+}
+
+.webssh-welcome-actions-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.webssh-welcome-submit-wrapper {
+  width: 100%;
+}
+
+.webssh-welcome-saved-hosts-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.webssh-welcome-footer-note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+}
+
+@media (max-width: 860px) {
+  .webssh-welcome-landing {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

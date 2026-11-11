@@ -144,6 +144,8 @@ fs.writeFileSync(path.join(distDir, '.nojekyll'), '', 'utf8');
 // The code-split chunks (LightIde, ServerModules, CapabilityMatrixPanel) should
 // stay under 600 KiB gzipped each; the main entry under 1.5 MiB gzipped.
 // Budgets are generous enough for normal growth but catch accidental bloat.
+// Monaco language worker bundles (*.worker.js) are excluded: they are optional
+// language services loaded by Monaco Editor, not application code.
 import zlib from 'node:zlib';
 let totalGzip = 0;
 for (const file of assetFiles) {
@@ -152,9 +154,12 @@ for (const file of assetFiles) {
   const buf = fs.readFileSync(fullPath);
   const gz = zlib.gzipSync(buf).length;
   totalGzip += gz;
-  const budget = file.includes('LightIde') || file.includes('ServerModules') || file.includes('CapabilityMatrix')
-    ? 600 * 1024
-    : 1_500 * 1024;
+  const isWorker = file.includes('.worker');
+  const budget = isWorker
+    ? Infinity
+    : file.includes('LightIde') || file.includes('ServerModules') || file.includes('CapabilityMatrix')
+      ? 600 * 1024
+      : 1_500 * 1024;
   if (gz > budget) {
     console.error(`Build verification failed: bundle ${file} is ${gz} bytes gzip, budget ${budget}.`);
     process.exit(1);

@@ -31,6 +31,7 @@ import {
   languageForPath
 } from './ide-editing';
 import { IDE_STORE_KEY } from './ide-storage';
+import './light-ide.css';
 
 interface OpenFile {
   path: string;
@@ -172,6 +173,21 @@ export function LightIde({
   const [sftpState, setSftpState] = useState<'unknown' | 'ready' | 'unavailable'>('unknown');
   /** Collapse the file explorer to give the editor more room. */
   const [explorerCollapsed, setExplorerCollapsed] = useState<boolean>(false);
+  /** Use Monaco Editor (desktop) vs textarea fallback. */
+  const [monacoEditor, setMonacoEditor] = useState<typeof import('./MonacoEditor') | null>(null);
+  const [monacoError, setMonacoError] = useState<string | null>(null);
+  /** Split editor: second active file path (null = single pane). */
+  const [splitPath, setSplitPath] = useState<string | null>(null);
+
+  const loadMonaco = async (): Promise<void> => {
+    if (monacoEditor || monacoError) return;
+    try {
+      const mod = await import('./MonacoEditor');
+      setMonacoEditor(mod);
+    } catch (err) {
+      setMonacoError(err instanceof Error ? err.message : String(err));
+    }
+  };
   /** Bottom panel tab: 'output' | 'search' | 'git'. */
   const [bottomPanelTab, setBottomPanelTab] = useState<'output' | 'search' | 'git'>('output');
 
@@ -265,6 +281,37 @@ export function LightIde({
     },
     []
   );
+
+  // Global keyboard shortcuts for the editor screen.
+  // Ctrl+P opens quick-open file search; Ctrl+Tab cycles open file tabs.
+  // These only apply while the editor screen is mounted and no modal is open.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      // Don't intercept shortcuts when the user is typing in a field.
+      if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) return;
+
+      const mod = event.metaKey || event.ctrlKey;
+
+      if (mod && event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        const input = document.querySelector<HTMLInputElement>('[data-testid="ide-quick-open"]');
+        input?.focus();
+        return;
+      }
+
+      if (mod && event.key === 'Tab' && files.length > 1) {
+        event.preventDefault();
+        const current = activePath ? files.findIndex((f) => f.path === activePath) : -1;
+        const next = (current + (event.shiftKey ? -1 : 1) + files.length) % files.length;
+        setActivePath(files[next]!.path);
+      }
+    };
+
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [files, activePath]);
 
   const refresh = async (target = root): Promise<void> => {
     if (!session?.isConnected()) {
@@ -564,6 +611,61 @@ export function LightIde({
     const clamped = Math.max(11, Math.min(24, next));
     setFontSize(clamped);
     saveValue('fontSize', clamped);
+  };
+
+  // Render one editor pane for split view. Keeps it minimal: no gutter,
+  // no bracket layer, just the editor control so two panes fit side by side.
+  const renderEditorPane = (path: string, testId: string): JSX.Element | null => {
+    const buffer = files.find((f) => f.path === path);
+    if (!buffer) return null;
+    const mod = monacoEditor;
+    if (mod && !monacoError) {
+      return (
+        <mod.MonacoEditor
+          key={`monaco-${path}`}
+          value={buffer.content}
+          language={languageForPath(buffer.path)}
+          onChange={(next) => onEdit(buffer.path, next)}
+          readOnly={!canEdit}
+        />
+      );
+    }
+    return (
+      <textarea
+        key={`textarea-${path}`}
+        ref={(el) => {
+          // Split panes don't need the global editorRef; they manage their own caret.
+        }}
+        aria-label={`Editing ${buffer.path}`}
+        data-testid={testId}
+        value={buffer.content}
+        onInput={(e) => onEdit(buffer.path, (e.currentTarget as HTMLTextAreaElement).value)}
+        onKeyDown={(e) => {
+          if (e.metaKey || e.ctrlKey) {
+            if (e.key.toLowerCase() === 's') {
+              e.preventDefault();
+              void save(buffer.path);
+            }
+            if (e.key.toLowerCase() === 'f') {
+              e.preventDefault();
+            }
+          }
+          if (e.key === 'Tab') {
+            e.preventDefault();
+            const ta = e.currentTarget as HTMLTextAreaElement;
+            const start = ta.selectionStart;
+            const end = ta.selectionEnd;
+            const result = indentSelection(buffer.content, start, end, INDENT_UNIT, Boolean(e.shiftKey));
+            onEdit(buffer.path, result.text);
+            ta.setSelectionRange(result.start, result.end);
+          }
+        }}
+        spellcheck={false}
+        data-wrap={wrap ? 'on' : 'off'}
+        className="ui-input ide-editor ide-editor-textarea"
+        style={{ fontSize: `${fontSize}px`, height: '100%' }}
+      />
+    );
   };
 
   // Apply a pending caret position after a programmatic edit re-renders.
@@ -1104,6 +1206,41 @@ export function LightIde({
           >
             Wrap
           </Button>
+          <Button
+            variant={Boolean(monacoEditor && !monacoError) ? 'primary' : 'ghost'}
+            onClick={() => {
+              if (monacoEditor && !monacoError) {
+                setMonacoEditor(null);
+                setMonacoError(null);
+              } else {
+                void loadMonaco();
+              }
+            }}
+            ariaPressed={Boolean(monacoEditor && !monacoError)}
+            disabled={Boolean(monacoError)}
+            title={
+              monacoError
+                ? 'Monaco editor failed to load'
+                : monacoEditor
+                  ? 'Use textarea editor'
+                  : 'Use Monaco editor (syntax highlighting)'
+            }
+            testId="ide-monaco-toggle"
+          >
+            {monacoError ? 'Monaco (failed)' : monacoEditor ? 'Textarea' : 'Monaco'}
+          </Button>
+          <Button
+            variant={splitPath ? 'primary' : 'ghost'}
+            onClick={() => {
+              if (splitPath) setSplitPath(null);
+              else if (active) setSplitPath(active.path);
+            }}
+            ariaPressed={Boolean(splitPath)}
+            title={splitPath ? 'Exit split view' : 'Split editor (side by side)'}
+            testId="ide-split-toggle"
+          >
+            {splitPath ? 'Unsplit' : 'Split'}
+          </Button>
         </div>
       </header>
 
@@ -1123,12 +1260,11 @@ export function LightIde({
           ))}
         </select>
         <input
-          className="ui-input"
           aria-label="Project folder"
           data-testid="ide-root-input"
           value={root}
           onInput={(e) => setRoot((e.currentTarget as HTMLInputElement).value)}
-          style={{ flex: '1 1 240px' }}
+          className="ui-input ide-input-flex-root"
         />
         <Button onClick={() => void refresh(root)} testId="ide-open-project">
           Open folder
@@ -1162,10 +1298,9 @@ export function LightIde({
       <div className={`ws-mod-split ide-workspace-split ${explorerCollapsed ? 'ide-explorer-collapsed' : ''}`}>
         {!explorerCollapsed ? (
           <aside
-            className={dragging ? 'ws-mod-list ide-drop-active' : 'ws-mod-list'}
+            className={`ws-mod-list ide-file-list-scroll ${dragging ? 'ide-drop-active' : ''}`}
             aria-label="Project files"
             data-testid="ide-drop-zone"
-            style={{ overflowX: 'hidden' }}
             onDragOver={(event) => {
               event.preventDefault();
               if (!dragging) setDragging(true);
@@ -1195,7 +1330,7 @@ export function LightIde({
                 type="file"
                 aria-label="Upload a file into the open folder"
                 data-testid="ide-upload-input"
-                style={{ display: 'none' }}
+                className="ide-upload-input-hidden"
                 onChange={(e) => {
                   const file = (e.currentTarget as HTMLInputElement).files?.[0];
                   if (file) void uploadFile(file);
@@ -1203,15 +1338,14 @@ export function LightIde({
                 }}
               />
             </div>
-            <ul data-testid="ide-file-list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+            <ul data-testid="ide-file-list" className="ide-file-list">
               {entries.map((entry) => (
                 <li key={entry.path}>
                   <button
                     type="button"
-                    className="ui-button"
+                    className="ui-button ide-file-item"
                     data-testid={`ide-entry-${entry.name}`}
                     onClick={() => void (entry.isDir ? refresh(entry.path) : openFile(entry.path))}
-                    style={{ width: '100%', textAlign: 'left' }}
                   >
                     {entry.isDir ? '▸ ' : '  '}
                     {entry.name}
@@ -1223,7 +1357,7 @@ export function LightIde({
               {busy ? <li>Loading…</li> : null}
             </ul>
 
-            <h4 style={{ marginBottom: 'var(--space-1)' }}>Quick open</h4>
+            <h4 className="ide-quick-open-heading">Quick open</h4>
             <div className="ws-mod-filters">
               <input
                 className="ui-input"
@@ -1237,7 +1371,7 @@ export function LightIde({
               </Button>
             </div>
             {quickResults.length > 0 ? (
-              <ul data-testid="ide-quick-results" style={{ listStyle: 'none', padding: 0 }}>
+              <ul data-testid="ide-quick-results" className="ide-file-list">
                 {quickResults.map((path) => (
                   <li key={path}>
                     <button type="button" onClick={() => void openFile(path)}>
@@ -1250,8 +1384,8 @@ export function LightIde({
 
             {recentFiles.length > 0 ? (
               <>
-                <h4 style={{ marginBottom: 'var(--space-1)' }}>Recent files</h4>
-                <ul data-testid="ide-recent-files" style={{ listStyle: 'none', padding: 0 }}>
+                <h4 className="ide-recent-files-heading">Recent files</h4>
+                <ul data-testid="ide-recent-files" className="ide-file-list">
                   {recentFiles.slice(0, 8).map((path) => (
                     <li key={path}>
                       <button type="button" onClick={() => void openFile(path)}>
@@ -1300,7 +1434,7 @@ export function LightIde({
                   {active.conflict ? 'Conflict' : active.saving ? 'Saving…' : active.dirty ? 'Unsaved' : 'Saved'}
                 </Badge>
                 {active.saving ? (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+                  <div className="ide-actions-row">
                     <span className="ws-mod-muted">Saving to server…</span>
                     {saveProgress?.path === active.path ? (
                       <div className="ide-save-progress">
@@ -1345,7 +1479,6 @@ export function LightIde({
 
               <div className="ws-mod-filters">
                 <input
-                  className="ui-input"
                   aria-label="Find in file"
                   data-testid="ide-find-input"
                   placeholder="Find"
@@ -1354,7 +1487,7 @@ export function LightIde({
                     setFindQuery((e.currentTarget as HTMLInputElement).value);
                     setMatchIndex(0);
                   }}
-                  style={{ flex: '1 1 140px' }}
+                  className="ui-input ide-input-flex-find"
                 />
                 <Button variant="ghost" onClick={() => focusMatch(matchIndex + 1)} testId="ide-find-next">
                   Next
@@ -1374,13 +1507,12 @@ export function LightIde({
                   {findQuery ? `${matches.length} match(es)` : '—'}
                 </span>
                 <input
-                  className="ui-input"
                   aria-label="Replace with"
                   data-testid="ide-replace-input"
                   placeholder="Replace"
                   value={replaceValue}
                   onInput={(e) => setReplaceValue((e.currentTarget as HTMLInputElement).value)}
-                  style={{ flex: '1 1 120px' }}
+                  className="ui-input ide-input-flex-replace"
                 />
                 <Button variant="ghost" onClick={() => doReplace(false)} testId="ide-replace-one">
                   Replace
@@ -1392,13 +1524,12 @@ export function LightIde({
 
               <div className="ws-mod-filters">
                 <input
-                  className="ui-input"
                   aria-label="Go to line"
                   data-testid="ide-goto-line"
                   placeholder="Line"
                   value={gotoLine}
                   onInput={(e) => setGotoLine((e.currentTarget as HTMLInputElement).value)}
-                  style={{ width: '80px' }}
+                  className="ui-input ide-input-width-goto"
                 />
                 <Button variant="ghost" onClick={doGotoLine} testId="ide-goto-line-run">
                   Go
@@ -1428,102 +1559,125 @@ export function LightIde({
                 </div>
               ) : (
               <div className="ide-editor-shell">
-                {showGutter ? (
-                <div
-                  className="ide-gutter"
-                  aria-hidden="true"
-                  // Match the editor's font size exactly: the CSS default
-                  // (--font-size-sm) made each number row 3.2px shorter than a
-                  // code line, so the gutter drifted a line every ~7 rows.
-                  style={{ fontSize: `${fontSize}px` }}
-                >
-                  <div
-                    ref={(el) => {
-                      gutterRef.current = el;
-                    }}
-                    className="ide-gutter-lines"
-                    data-testid="ide-gutter"
-                  >
-                    {Array.from({ length: gutterLines }, (_v, i) => (
-                      <span key={i}>{i + 1}</span>
-                    ))}
+                {splitPath ? (
+                  <div className="ide-editor-split">
+                    <div className="ide-editor-split-pane">
+                      <div className="ide-editor-pane-label">{active.path}</div>
+                      {renderEditorPane(active.path, 'ide-editor')}
+                    </div>
+                    <div className="ide-editor-split-pane">
+                      <div className="ide-editor-pane-label">{splitPath}</div>
+                      {renderEditorPane(splitPath, 'ide-editor-split-2')}
+                    </div>
                   </div>
-                </div>
-                ) : null}
-                <div className="ide-editor-pane">
-                <textarea
-                  ref={(el) => {
-                    editorRef.current = el;
-                  }}
-                  className="ui-input ide-editor"
-                  aria-label={`Editing ${active.path}`}
-                  data-testid="ide-editor"
-                  value={active.content}
-                  onInput={(e) => onEdit(active.path, (e.currentTarget as HTMLTextAreaElement).value)}
-                  onKeyDown={onEditorKeyDown}
-                  onSelect={trackCursor}
-                  onClick={trackCursor}
-                  onKeyUp={trackCursor}
-                  onScroll={(e) => {
-                    const el = e.currentTarget as HTMLTextAreaElement;
-                    if (gutterRef.current) {
-                      gutterRef.current.style.transform = `translateY(${-el.scrollTop}px)`;
-                    }
-                    if (bracketLayerRef.current) {
-                      bracketLayerRef.current.style.transform = `translate(${-el.scrollLeft}px, ${-el.scrollTop}px)`;
-                    }
-                  }}
-                  spellcheck={false}
-                  data-wrap={wrap ? 'on' : 'off'}
-                  style={{
-                    width: '100%',
-                    fontFamily: 'var(--font-font-mono)',
-                    fontSize: `${fontSize}px`,
-                    lineHeight: 'var(--font-line-height-editor)',
-                    whiteSpace: wrap ? 'pre-wrap' : 'pre',
-                    overflowWrap: wrap ? 'anywhere' : 'normal',
-                    overflow: 'auto'
-                  }}
-                />
-                {/* One monospace cell per bracket, positioned in ch/em so no
-                    measurement is needed. Withdrawn while wrapping, where a
-                    logical offset no longer maps to a fixed column. */}
-                {!wrap && bracketMatch ? (
-                  <div
-                    ref={(el) => {
-                      bracketLayerRef.current = el;
-                      // A fresh mount must start where the editor is scrolled
-                      // to, not at the top-left of the file.
-                      const editor = editorRef.current;
-                      if (el && editor) {
-                        el.style.transform = `translate(${-editor.scrollLeft}px, ${-editor.scrollTop}px)`;
+                ) : (
+                  <>
+                    {showGutter ? (
+                    <div
+                      className="ide-gutter ide-gutter-font-size"
+                      aria-hidden="true"
+                      // Match the editor's font size exactly: the CSS default
+                      // (--font-size-sm) made each number row 3.2px shorter than a
+                      // code line, so the gutter drifted a line every ~7 rows.
+                      style={{ fontSize: `${fontSize}px` }}
+                    >
+                      <div
+                        ref={(el) => {
+                          gutterRef.current = el;
+                        }}
+                        className="ide-gutter-lines"
+                        data-testid="ide-gutter"
+                      >
+                        {Array.from({ length: gutterLines }, (_v, i) => (
+                          <span key={i}>{i + 1}</span>
+                        ))}
+                      </div>
+                    </div>
+                    ) : null}
+                    <div className="ide-editor-pane">
+                    {(() => {
+                      const mod = monacoEditor;
+                      if (mod && !monacoError) {
+                        return (
+                          <mod.MonacoEditor
+                            value={active.content}
+                            language={languageForPath(active.path)}
+                            onChange={(next) => onEdit(active.path, next)}
+                            readOnly={!canEdit}
+                          />
+                        );
                       }
-                    }}
-                    className="ide-bracket-layer"
-                    aria-hidden="true"
-                    data-testid="ide-bracket-layer"
-                    style={{ fontSize: `${fontSize}px` }}
-                  >
-                    {[bracketMatch.open, bracketMatch.close].map((offset) => {
-                      const at = lineColumnAt(active.content, offset);
-                      return (
-                        <span
-                          key={offset}
-                          className="ide-bracket-marker"
-                          data-testid="ide-bracket-marker"
-                          data-offset={offset}
-                          style={{
-                            left: `${at.column - 1}ch`,
-                            top: `calc(${at.line - 1} * var(--font-line-height-editor) * 1em)`
-                          }}
-                        >
-                          {active.content[offset]}
-                        </span>
-                      );
-                    })}
-                  </div>
-                ) : null}
-                </div>
+                      return null;
+                    })()}
+                    {(!monacoEditor || monacoError) && (
+                      <textarea
+                        ref={(el) => {
+                          editorRef.current = el;
+                        }}
+                        aria-label={`Editing ${active.path}`}
+                        data-testid="ide-editor"
+                        value={active.content}
+                        onInput={(e) => onEdit(active.path, (e.currentTarget as HTMLTextAreaElement).value)}
+                        onKeyDown={onEditorKeyDown}
+                        onSelect={trackCursor}
+                        onClick={trackCursor}
+                        onKeyUp={trackCursor}
+                        onScroll={(e) => {
+                          const el = e.currentTarget as HTMLTextAreaElement;
+                          if (gutterRef.current) {
+                            gutterRef.current.style.transform = `translateY(${-el.scrollTop}px)`;
+                          }
+                          if (bracketLayerRef.current) {
+                            bracketLayerRef.current.style.transform = `translate(${-el.scrollLeft}px, ${-el.scrollTop}px)`;
+                          }
+                        }}
+                        spellcheck={false}
+                        data-wrap={wrap ? 'on' : 'off'}
+                        className="ui-input ide-editor ide-editor-textarea"
+                        style={{ fontSize: `${fontSize}px` }}
+                      />
+                    )}
+                    {/* One monospace cell per bracket, positioned in ch/em so no
+                        measurement is needed. Withdrawn while wrapping, where a
+                        logical offset no longer maps to a fixed column. */}
+                    {!wrap && !Boolean(monacoEditor && !monacoError) && bracketMatch ? (
+                      <div
+                        ref={(el) => {
+                          bracketLayerRef.current = el;
+                          // A fresh mount must start where the editor is scrolled
+                          // to, not at the top-left of the file.
+                          const editor = editorRef.current;
+                          if (el && editor) {
+                            el.style.transform = `translate(${-editor.scrollLeft}px, ${-editor.scrollTop}px)`;
+                          }
+                        }}
+                        className="ide-bracket-layer"
+                        aria-hidden="true"
+                        data-testid="ide-bracket-layer"
+                        style={{ fontSize: `${fontSize}px` }}
+                      >
+                        {[bracketMatch.open, bracketMatch.close].map((offset) => {
+                          const at = lineColumnAt(active.content, offset);
+                          return (
+                            <span
+                              key={offset}
+                              className="ide-bracket-marker"
+                              data-testid="ide-bracket-marker"
+                              data-offset={offset}
+                              style={{
+                                left: `${at.column - 1}ch`,
+                                top: `calc(${at.line - 1} * var(--font-line-height-editor) * 1em)`
+                              }}
+                            >
+                              {active.content[offset]}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    </div>
+                  </>
+                )}
               </div>
               )}
               {active.error ? (
@@ -1536,7 +1690,7 @@ export function LightIde({
                   <div className="ws-mod-error" role="alert" data-testid="ide-conflict-banner">
                     {active.path} changed on the server since you opened it.
                   </div>
-                  <div className="ws-mod-actions" style={{ marginTop: 'var(--space-2)' }}>
+                  <div className="ws-mod-actions ide-conflict-actions">
                   <Button
                     variant="default"
                     onClick={() => {
@@ -1610,13 +1764,12 @@ export function LightIde({
             <>
               <div className="ws-mod-filters">
                 <input
-                  className="ui-input"
+                  className="ui-input ide-command-input"
                   aria-label="Command"
                   data-testid="ide-command-input"
                   value={command}
                   onInput={(e) => setCommand((e.currentTarget as HTMLInputElement).value)}
                   onKeyDown={onCommandKeyDown}
-                  style={{ flex: 1 }}
                 />
                 <Button onClick={() => void runCommand()} testId="ide-run-command">
                   Run
@@ -1669,12 +1822,12 @@ export function LightIde({
               <pre
                 data-testid="ide-command-output"
                 aria-live="polite"
-                style={{ maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }}
+                className="ide-command-output"
               >
                 {output.join('\n')}
               </pre>
               {diff.length > 0 ? (
-                <pre data-testid="ide-diff" style={{ maxHeight: '220px', overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                <pre data-testid="ide-diff" className="ide-command-diff">
                   {diff
                     .map((line) => `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`)
                     .join('\n')}
@@ -1685,19 +1838,18 @@ export function LightIde({
             <>
               <div className="ws-mod-filters">
                 <input
-                  className="ui-input"
+                  className="ui-input ide-search-query"
                   aria-label="Search project text"
                   data-testid="ide-search-query"
                   value={searchQuery}
                   onInput={(e) => setSearchQuery((e.currentTarget as HTMLInputElement).value)}
-                  style={{ flex: 1 }}
                 />
                 <Button variant="ghost" onClick={() => void searchProject()} testId="ide-search-run">
                   Search
                 </Button>
               </div>
               {searchResults.length > 0 ? (
-                <ul data-testid="ide-search-results" style={{ listStyle: 'none', padding: 0 }}>
+                <ul data-testid="ide-search-results" className="ide-file-list">
                   {searchResults.map((hit) => (
                     <li key={`${hit.path}:${hit.line}`}>
                       <button type="button" onClick={() => void openFile(hit.path, hit.line)}>

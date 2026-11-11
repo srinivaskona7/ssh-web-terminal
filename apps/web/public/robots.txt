@@ -1,0 +1,12 @@
+# WebSSH Studio robots.txt
+# Allow crawlers to index the public landing/welcome page.
+# The application shell is an authenticated SPA; internal routes are not
+# separately listed because they are client-rendered and require a session.
+
+User-agent: *
+Allow: /
+Allow: /og-image.svg
+Allow: /favicon.svg
+Allow: /manifest.webmanifest
+
+Sitemap: /sitemap.xml

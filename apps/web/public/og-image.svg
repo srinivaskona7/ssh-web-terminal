@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <rect width="1200" height="630" fill="#0b0d12" />
+  <!-- Brand mark: rounded terminal window -->
+  <rect x="180" y="130" width="420" height="370" rx="24" fill="#11151d" />
+  <rect x="180" y="130" width="420" height="52" rx="24" fill="#171c26" />
+  <circle cx="214" cy="156" r="8" fill="#ff5f56" />
+  <circle cx="240" cy="156" r="8" fill="#feb244" />
+  <circle cx="266" cy="156" r="8" fill="#28ca42" />
+  <text x="260" y="200" fill="#e6edf3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" font-weight="600">webssh@studio:~</text>
+  <text x="260" y="232" fill="#70DFE3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20">$ _</text>
+  <rect x="180" y="280" width="400" height="1" fill="#232a38" />
+  <text x="210" y="330" fill="#9da7b3" font-family="system-ui, -apple-system, sans-serif" font-size="22">WebSSH Studio</text>
+  <text x="210" y="370" fill="#9da7b3" font-family="system-ui, -apple-system, sans-serif" font-size="16">Browser SSH Terminal &amp; SFTP Studio</text>
+  <text x="210" y="410" fill="#4f8cff" font-family="system-ui, -apple-system, sans-serif" font-size="14">Non-extractable keys · No billing · No tracking</text>
+  <!-- Accent glyph on the right -->
+  <rect x="700" y="130" width="320" height="370" rx="24" fill="#11151d" stroke="#343e52" stroke-width="2" />
+  <text x="740" y="315" fill="#e6edf3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="48" font-weight="700" letter-spacing="8">➜</text>
+</svg>
