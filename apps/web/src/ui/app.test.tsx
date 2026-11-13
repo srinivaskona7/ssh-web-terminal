@@ -542,7 +542,8 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     await new Promise((r) => setTimeout(r, 150));
     const searchInput = container.querySelector('[data-testid="terminal-search-input"]') as HTMLInputElement;
     expect(searchInput).toBeTruthy();
-    expect(document.activeElement).toBe(searchInput);
+    // Polled: under coverage load jsdom can take longer than the settle above to report focus.
+    await vi.waitFor(() => expect(document.activeElement).toBe(searchInput));
 
     searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await new Promise((r) => setTimeout(r, 150));
@@ -579,7 +580,8 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
 
     const paletteInput = container.querySelector('[data-testid="command-palette-input"]') as HTMLInputElement;
     expect(paletteInput).toBeTruthy();
-    expect(document.activeElement).toBe(paletteInput);
+    // Polled: under coverage load jsdom can take longer than the settle above to report focus.
+    await vi.waitFor(() => expect(document.activeElement).toBe(paletteInput));
 
     // The highlighted row is the primary-variant button; an empty query keeps
     // registration order, so full-screen is first and Zen second.
@@ -819,5 +821,136 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     expect((container.querySelector('[data-testid="connect-port-input"]') as HTMLInputElement).value).toBe('2222');
 
     document.body.removeChild(container);
+  });
+
+  // The app used to seed a made-up "ssh-ed25519 ...WebSSHStudioBrowserNonExtractableKey" line, shown in the
+  // connect modal and sent as the public key, and reported "Copied" whether or not the clipboard took it.
+  it('shows no placeholder public key, requires a generated browser key, and copies only when the clipboard confirms', async () => {
+    localStorage.setItem(
+      'webssh.hosts.v1',
+      JSON.stringify([{ id: 'h-1', alias: 'build-01', host: '10.0.0.9', port: 22, user: 'deploy', tags: [], favorite: false, jumpHops: [] }])
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<App />, container);
+    await new Promise((r) => setTimeout(r, 150));
+    const q = <T extends Element = HTMLElement>(id: string): T | null => container.querySelector<T>(`[data-testid="${id}"]`);
+
+    // Connect modal, opened from a saved profile: no key yet, so no authorized_keys line at all.
+    q<HTMLButtonElement>('welcome-saved-hosts-btn')?.click();
+    await new Promise((r) => setTimeout(r, 150));
+    container.querySelector<HTMLButtonElement>('[data-testid="host-card-build-01"] button')?.click();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(q('connect-modal')).toBeTruthy();
+    expect(q('connect-pubkey-snippet')).toBeNull();
+    q<HTMLButtonElement>('auth-method-pubkey-btn')?.click();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(q('connect-pubkey-missing')).toBeTruthy();
+    expect(q('connect-pubkey-snippet')).toBeNull();
+    q<HTMLButtonElement>('connect-modal-submit-btn')?.click();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(q('connect-modal')?.textContent).toContain('Generate a browser key first.');
+    expect(container.textContent).not.toContain('WebSSHStudioBrowser');
+
+    // A generated key replaces the prompt; a rejected clipboard write is reported, never "Copied".
+    const writeText = vi.fn(() => Promise.reject(new Error('denied')));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    try {
+      q<HTMLButtonElement>('modal-generate-key-btn')?.click();
+      await vi.waitFor(() => expect(q<HTMLInputElement>('connect-pubkey-snippet')?.value).toMatch(/^echo "(ssh-ed25519|ecdsa-sha2-nistp256) /));
+      expect(q('connect-pubkey-missing')).toBeNull();
+      q<HTMLButtonElement>('copy-pubkey-snippet-btn')?.click();
+      await vi.waitFor(() => expect(q('toast-container')?.textContent).toContain('blocked clipboard access'));
+      expect(writeText).toHaveBeenCalledWith(q<HTMLInputElement>('connect-pubkey-snippet')?.value);
+      expect(q('copy-pubkey-snippet-btn')?.textContent).not.toContain('Copied');
+    } finally {
+      delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+
+    document.body.removeChild(container);
+  });
+
+  it('does not report diagnostics as copied when the clipboard rejects the write', async () => {
+    function Boom(): never {
+      throw new Error('boom');
+    }
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(<AppErrorBoundary><Boom /></AppErrorBoundary>, container);
+    await new Promise((r) => setTimeout(r, 10));
+    const btn = () => container.querySelector<HTMLButtonElement>('[data-testid="error-boundary-copy-diag-btn"]');
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn(() => Promise.reject(new Error('denied'))) }, configurable: true });
+    try {
+      btn()?.click();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(btn()?.textContent).not.toContain('Copied');
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn(() => Promise.resolve()) }, configurable: true });
+      btn()?.click();
+      await vi.waitFor(() => expect(btn()?.textContent).toContain('Copied'));
+    } finally {
+      delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+    document.body.removeChild(container);
+  });
+
+  it('refuses to connect through a saved hop that has its own password auth instead of lending it the target credentials', async () => {
+    localStorage.setItem(
+      'webssh.hosts.v1',
+      JSON.stringify([{ id: 'h-j', alias: 'behind-bastion', host: '10.0.0.9', port: 22, user: 'deploy', tags: [], favorite: false,
+        jumpHops: [{ host: 'bastion.example.com', port: 22, user: 'ops', authMethod: 'password' }] }])
+    );
+    const sockets: unknown[] = [];
+    const RealWS = globalThis.WebSocket;
+    globalThis.WebSocket = class { constructor() { sockets.push(this); throw new Error('no socket expected'); } } as unknown as typeof WebSocket;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    try {
+      render(<App />, container);
+      await new Promise((r) => setTimeout(r, 150));
+      const q = (id: string) => container.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+      q('welcome-saved-hosts-btn')?.click();
+      await new Promise((r) => setTimeout(r, 150));
+      container.querySelector<HTMLButtonElement>('[data-testid="host-card-behind-bastion"] button')?.click();
+      await new Promise((r) => setTimeout(r, 150));
+      const pass = q('connect-password-input') as HTMLInputElement;
+      pass.value = 'target-secret';
+      pass.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 50));
+      q('connect-modal-submit-btn')?.click();
+      await new Promise((r) => setTimeout(r, 150));
+      expect(q('connect-modal')?.textContent).toContain('needs its password');
+      expect(sockets).toHaveLength(0);
+    } finally {
+      globalThis.WebSocket = RealWS;
+      document.body.removeChild(container);
+    }
+  });
+
+  it('reaches the Workspace IDE from the rail and the command palette', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    try {
+      render(<App />, container);
+      await new Promise((r) => setTimeout(r, 150));
+      const q = (id: string) => container.querySelector<HTMLElement>(`[data-testid="${id}"]`);
+
+      // The Workspace IDE (file tree, git, search, Monaco) must have a navigation path.
+      // It is a claimed feature in docs/FEATURES.md, so an orphaned screen is a defect.
+      expect(q('nav-ide')).toBeTruthy();
+      q('nav-ide')?.click();
+      await vi.waitFor(() => expect(q('screen-ide')).toBeTruthy());
+
+      // The command palette offers the same destination for keyboard users.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+      await vi.waitFor(() => expect(q('command-palette-input')).toBeTruthy());
+      const paletteInput = q('command-palette-input') as HTMLInputElement;
+      paletteInput.value = 'Workspace IDE';
+      paletteInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 50));
+      paletteInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await vi.waitFor(() => expect(q('screen-ide')).toBeTruthy());
+    } finally {
+      document.body.removeChild(container);
+    }
   });
 });

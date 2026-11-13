@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1.7
-FROM golang:1.22-alpine AS builder
+# The builder must be at least the Go version apps/gateway/go.mod declares, or the
+# build downloads a toolchain at image-build time. 1.27.4 matches the CI pin.
+FROM golang:1.27.4-alpine AS builder
 WORKDIR /src
 COPY apps/gateway/go.mod apps/gateway/go.sum ./
 RUN go mod download

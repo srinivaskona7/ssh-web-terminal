@@ -176,11 +176,26 @@ export function LightIde({
   /** Use Monaco Editor (desktop) vs textarea fallback. */
   const [monacoEditor, setMonacoEditor] = useState<typeof import('./MonacoEditor') | null>(null);
   const [monacoError, setMonacoError] = useState<string | null>(null);
+  /**
+   * Monaco is desktop-only: a touch device keeps the textarea, and the editor
+   * bundle is never fetched. The pointer is re-checked so a device that gains a
+   * mouse (a tablet with a trackpad) can still switch over.
+   */
+  const [touchDevice, setTouchDevice] = useState(false);
   /** Split editor: second active file path (null = single pane). */
   const [splitPath, setSplitPath] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia('(pointer: coarse)');
+    setTouchDevice(query.matches);
+    const onChange = (event: MediaQueryListEvent): void => setTouchDevice(event.matches);
+    query.addEventListener?.('change', onChange);
+    return () => query.removeEventListener?.('change', onChange);
+  }, []);
+
   const loadMonaco = async (): Promise<void> => {
-    if (monacoEditor || monacoError) return;
+    if (monacoEditor || monacoError || touchDevice) return;
     try {
       const mod = await import('./MonacoEditor');
       setMonacoEditor(mod);
@@ -1217,13 +1232,15 @@ export function LightIde({
               }
             }}
             ariaPressed={Boolean(monacoEditor && !monacoError)}
-            disabled={Boolean(monacoError)}
+            disabled={Boolean(monacoError) || touchDevice}
             title={
-              monacoError
-                ? 'Monaco editor failed to load'
-                : monacoEditor
-                  ? 'Use textarea editor'
-                  : 'Use Monaco editor (syntax highlighting)'
+              touchDevice
+                ? 'Monaco is desktop-only; this device uses the text editor'
+                : monacoError
+                  ? 'Monaco editor failed to load'
+                  : monacoEditor
+                    ? 'Use textarea editor'
+                    : 'Use Monaco editor (syntax highlighting)'
             }
             testId="ide-monaco-toggle"
           >

@@ -140,8 +140,10 @@ export interface ThemeTokens {
   fgMuted: string;
   borderSubtle: string;
   borderStrong: string;
+  borderControl: string;
   accentPrimary: string;
   accentHover: string;
+  accentText: string;
   statusSuccess: string;
   statusWarning: string;
   statusDanger: string;

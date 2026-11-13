@@ -728,6 +728,45 @@ describe('LightIde editor chrome', () => {
     localStorage.clear();
   });
 
+  it('keeps the textarea editor on a touch device and never fetches Monaco', async () => {
+    const original = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      configurable: true,
+      value: (query: string) => ({
+        matches: query === '(pointer: coarse)',
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false
+      })
+    });
+    try {
+      const { session } = fakeSession({ './app.ts': 'one\ntwo\n' });
+      const el = container();
+      render(<LightIde session={session} connectedLabel="ubuntu@example.test" />, el);
+      await settle();
+
+      const toggle = el.querySelector('[data-testid="ide-monaco-toggle"]') as HTMLButtonElement;
+      expect(toggle.disabled).toBe(true);
+      expect(toggle.title).toContain('desktop-only');
+
+      // Clicking it must not swap the editor, and the Monaco module stays unloaded.
+      toggle.click();
+      await settle();
+      expect(el.querySelector('[data-testid="ide-monaco-toggle"]')?.textContent).toBe('Monaco');
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        writable: true,
+        configurable: true,
+        value: original
+      });
+    }
+  });
+
   it('renders one gutter number per buffer line and follows the editor scroll', async () => {
     const { session } = fakeSession({ './app.ts': 'one\ntwo\nthree\n' });
     const el = container();

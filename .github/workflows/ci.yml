@@ -32,6 +32,9 @@ jobs:
       - name: Lint design token usage (no hardcoded values)
         run: npm run lint:tokens
 
+      - name: Lint stylesheets (no unknown CSS properties)
+        run: npm run lint:css
+
       - name: Check line endings (LF only)
         run: npm run lint:eol
 
@@ -54,7 +57,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.23"
+          # 1.27.4 is the first release that carries the net/http fix for GO-2026-6859.
+          go-version: "1.27.4"
           cache-dependency-path: apps/gateway/go.sum
 
       - name: Run Go vet & tests with race detector and coverage gate
@@ -85,7 +89,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.23"
+          # 1.27.4 is the first release that carries the net/http fix for GO-2026-6859.
+          go-version: "1.27.4"
           cache-dependency-path: apps/gateway/go.sum
 
       - name: Install dependencies

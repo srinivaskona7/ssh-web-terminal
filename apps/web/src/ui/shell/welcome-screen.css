@@ -1,90 +1,432 @@
-/* Welcome screen: Quick Connect layout. Tokens only — no hardcoded values. */
+/*
+ * Welcome / connect page. Tokens only: `npm run lint:tokens` rejects hex colours and raw px
+ * spacing. Direction and the rules behind it live in DESIGN.md at the repo root.
+ */
+
 .webssh-welcome-container {
-  padding: var(--space-4);
+  padding: var(--space-5) var(--space-3);
   background-color: var(--color-bg-canvas);
 }
 
 .webssh-welcome-landing {
+  box-sizing: border-box;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-6);
-  align-items: center;
-  max-width: 1100px;
-  margin: 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    'intro'
+    'form'
+    'route';
+  gap: var(--space-5);
+  width: 100%;
+  max-width: 560px;
+  margin: auto;
 }
+
+.webssh-welcome-intro {
+  grid-area: intro;
+  min-width: 0;
+}
+
+.webssh-welcome-connect-card {
+  grid-area: form;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--space-4);
+  border: var(--border-hairline);
+  border-radius: var(--radius-panel);
+  background-color: var(--color-bg-surface);
+}
+
+.webssh-welcome-route {
+  grid-area: route;
+  min-width: 0;
+}
+
+@media (min-width: 600px) {
+  .webssh-welcome-container {
+    padding: var(--space-6) var(--space-5);
+  }
+
+  .webssh-welcome-connect-card {
+    padding: var(--space-5);
+  }
+}
+
+@media (min-width: 960px) {
+  .webssh-welcome-landing {
+    max-width: 960px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 440px);
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      'intro form'
+      'route form';
+    column-gap: var(--space-8);
+    row-gap: var(--space-6);
+    align-items: start;
+  }
+
+  /* Puts the headline on the same line as the card title. */
+  .webssh-welcome-intro {
+    padding-top: var(--space-5);
+  }
+}
+
+/* ---- Type --------------------------------------------------------------- */
 
 .webssh-welcome-heading {
-  margin: 0 0 var(--space-1);
-  font-size: var(--font-size-2xl);
+  margin: 0;
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size2xl);
+  font-weight: 600;
+  letter-spacing: var(--font-letter-spacing-tight);
+  line-height: 1.25;
+  text-wrap: balance;
 }
 
-.webssh-welcome-new-connection {
-  margin: 0 0 var(--space-3);
+.webssh-welcome-lede {
+  max-width: 44ch;
+  margin: var(--space-2) 0 0;
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-lg);
+  line-height: var(--font-line-height-ui);
+  text-wrap: pretty;
+}
+
+.webssh-welcome-card-title {
+  margin: 0 0 var(--space-4);
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  line-height: var(--font-line-height-ui);
+  text-wrap: balance;
+}
+
+.webssh-welcome-hint {
+  margin: 0;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-ui);
+  text-wrap: pretty;
+}
+
+.webssh-welcome-mono {
+  font-family: var(--font-font-mono);
+}
+
+/* ---- Form --------------------------------------------------------------- */
+
+.webssh-welcome-connect-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.webssh-welcome-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.webssh-welcome-field label {
+  color: var(--color-fg-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
 }
 
 .webssh-welcome-user-port-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px;
-  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 96px);
+  gap: var(--space-1) var(--space-3);
 }
 
-.webssh-welcome-key-field {
+.webssh-welcome-row-error {
+  grid-column: 1 / -1;
+}
+
+.webssh-welcome-field-error {
+  margin: 0;
+  color: var(--color-status-danger);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-ui);
+}
+
+/* One control height for inputs, selects and buttons; textareas size by rows. */
+.webssh-welcome .ui-input:not(textarea),
+.webssh-welcome .ui-select {
+  min-height: var(--density-comfortable-control-height);
+}
+
+.webssh-welcome .ui-input[aria-invalid='true'] {
+  border-color: var(--color-status-danger);
+}
+
+/* Private key */
+.webssh-welcome-key-group {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-}
-
-.webssh-welcome-key-row {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  align-items: center;
+  gap: var(--space-3);
 }
 
 .webssh-welcome-key-file-input {
+  max-width: 100%;
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-sans);
+  font-size: var(--font-size-md);
+}
+
+.webssh-welcome-key-file-input::file-selector-button {
+  margin-right: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-hairline);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-elevated);
+  color: var(--color-fg-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.webssh-welcome-key-file-input::file-selector-button:hover {
+  border-color: var(--color-border-strong);
+}
+
+.webssh-welcome-key-file-input:focus-visible {
+  border-radius: var(--radius-md);
+  outline: var(--border-focus-ring);
+  outline-offset: var(--space-1);
+}
+
+.webssh-welcome-paste summary {
+  width: fit-content;
+  border-radius: var(--radius-sm);
+  color: var(--color-accent-primary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.webssh-welcome-paste summary:focus-visible {
+  outline: var(--border-focus-ring);
+  outline-offset: var(--space-1);
+}
+
+.webssh-welcome-paste[open] summary {
+  margin-bottom: var(--space-2);
+}
+
+.webssh-welcome-paste textarea {
+  font-size: var(--font-size-sm);
+  resize: vertical;
+}
+
+.webssh-welcome-key-perms {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.webssh-welcome-key-perms .ui-select {
+  width: auto;
+}
+
+/* Browser key */
+.webssh-welcome-browser-key {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.webssh-welcome-key-generated {
+  align-self: stretch;
+}
+
+/* The key line and fingerprint are single long tokens: the line scrolls inside its field and the
+   fingerprint wraps anywhere, so neither widens the card on a phone. */
+.webssh-welcome-key-line {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.webssh-welcome-key-line .ui-input {
   flex: 1;
+  min-width: 0;
 }
 
-.webssh-welcome-passphrase {
-  max-width: 320px;
+.webssh-welcome-key-generated .webssh-welcome-hint {
+  overflow-wrap: anywhere;
 }
 
-.webssh-welcome-challenge-spacer {
-  min-height: 80px;
-}
-
-.webssh-welcome-challenge-text {
-  margin: 0;
-}
-
-.webssh-welcome-challenge-placeholder {
-  visibility: hidden;
-}
-
-.webssh-welcome-actions-column {
+/* Guest human check (relay mode with a Turnstile site key only) */
+.webssh-welcome-guest-challenge {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  padding: var(--space-3);
+  border: var(--border-hairline);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-elevated);
 }
 
-.webssh-welcome-submit-wrapper {
-  width: 100%;
+/* Height of Turnstile's managed widget, reserved so the iframe does not push the button down. */
+.webssh-welcome-turnstile {
+  min-height: 65px;
 }
 
-.webssh-welcome-saved-hosts-row {
+/* Connection errors and gateway probe results read as a message block, not a pill. */
+.webssh-welcome-status .ui-badge {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-ui);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* ---- Actions ------------------------------------------------------------ */
+
+.webssh-welcome-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
-  align-items: center;
-  justify-content: flex-end;
 }
 
-.webssh-welcome-footer-note {
+.webssh-welcome-actions .ui-btn {
+  flex: 1 1 auto;
+  min-height: var(--density-comfortable-control-height);
+}
+
+.webssh-welcome-actions .ui-btn--primary {
+  flex: 3 1 12rem;
+}
+
+/* Flat fill: the ui-kit primary adds a gradient, a shadow and a hover lift. */
+.webssh-welcome .ui-btn--primary {
+  border-color: var(--color-accent-primary);
+  background: var(--color-accent-primary);
+  box-shadow: none;
+}
+
+.webssh-welcome .ui-btn--primary:hover:not(:disabled) {
+  border-color: var(--color-accent-hover);
+  background: var(--color-accent-hover);
+  transform: none;
+}
+
+/* ---- Connection route --------------------------------------------------- */
+
+.webssh-welcome-route-title {
+  margin: 0 0 var(--space-3);
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+.webssh-welcome-route-steps {
+  --route-dot: var(--space-3);
+  --route-dot-top: calc((var(--font-size-md) * var(--font-line-height-ui) - var(--route-dot)) / 2);
   margin: 0;
-  font-size: var(--font-size-xs);
+  padding: 0;
+  list-style: none;
 }
 
-@media (max-width: 860px) {
-  .webssh-welcome-landing {
-    grid-template-columns: minmax(0, 1fr);
+.webssh-welcome-route-step {
+  position: relative;
+  padding: 0 0 var(--space-4) var(--space-5);
+}
+
+.webssh-welcome-route-step:last-child {
+  padding-bottom: 0;
+}
+
+.webssh-welcome-route-step::before {
+  content: '';
+  position: absolute;
+  top: var(--route-dot-top);
+  left: 0;
+  box-sizing: border-box;
+  width: var(--route-dot);
+  height: var(--route-dot);
+  border: var(--border-strong);
+  border-color: var(--color-fg-muted);
+  border-radius: var(--radius-pill);
+  background-color: var(--color-bg-canvas);
+}
+
+.webssh-welcome-route-step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: calc(var(--route-dot-top) + var(--route-dot) + var(--space-1));
+  bottom: 0;
+  left: calc(var(--route-dot) / 2);
+  border-left: var(--border-strong);
+  transform: translateX(-50%);
+}
+
+.webssh-welcome-route-name {
+  margin: 0;
+  color: var(--color-fg-primary);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  line-height: var(--font-line-height-ui);
+}
+
+.webssh-welcome-route-note {
+  max-width: 52ch;
+  margin: var(--space-1) 0 0;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-ui);
+  text-wrap: pretty;
+}
+
+/* Keeps a menu path or a symbolic file mode on one line (the arrow never starts a line). */
+.webssh-welcome-nowrap {
+  white-space: nowrap;
+}
+
+.webssh-welcome-route-host {
+  color: var(--color-fg-secondary);
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+p.webssh-welcome-route-host {
+  margin: var(--space-1) 0 0;
+}
+
+.webssh-welcome-route-host--empty {
+  color: var(--color-fg-muted);
+}
+
+.webssh-welcome-route-missing {
+  color: var(--color-status-warning);
+  font-weight: 400;
+}
+
+/* ---- Touch -------------------------------------------------------------- */
+
+/* 44px targets, and 16px input text so iOS does not zoom the page on focus. Selectors match the
+   base control rule's specificity (`:not(textarea)` counts as a type selector) so these win. */
+@media (pointer: coarse) {
+  .webssh-welcome .ui-input,
+  .webssh-welcome .ui-select {
+    font-size: max(1rem, var(--font-size-md));
+  }
+
+  .webssh-welcome .ui-input:not(textarea),
+  .webssh-welcome .ui-select,
+  .webssh-welcome .ui-btn,
+  .webssh-welcome-key-file-input::file-selector-button {
+    min-height: 44px;
+  }
+
+  .webssh-welcome-paste summary {
+    line-height: 44px;
   }
 }

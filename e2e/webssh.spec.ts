@@ -35,8 +35,8 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('screen-welcome')).toBeVisible();
     await expect(page.getByTestId('welcome-quick-connect-card')).toBeVisible();
 
-    // 2. Connection-first header: no View menu on welcome; Settings toggles and back navigates.
-    await expect(page.getByTestId('view-menu-btn')).toBeHidden();
+    // 2. Connection-first header: the View menu stays in Tier 1 (as app.test.tsx asserts); Settings toggles and back navigates.
+    await expect(page.getByTestId('view-menu-btn')).toBeVisible();
     await page.getByTestId('header-settings-btn').click();
     await expect(page.getByTestId('screen-settings')).toBeVisible();
     await page.getByTestId('header-settings-btn').click();
@@ -118,7 +118,7 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await expect(page.getByTestId('remote-editor-textarea')).toHaveValue(/WebSSH Test Server/);
 
     // 8. Navigate through remaining IDE screens and verify accessibility
-    await page.getByTestId('nav-server-health').click();
+    await page.getByTestId('nav-server-tools').click();
     await expect(page.getByTestId('screen-overview')).toBeVisible();
     await expect(page.getByTestId('live-control')).toBeVisible();
 
@@ -189,9 +189,65 @@ test.describe('WebSSH Studio Real-SSH E2E & Accessibility Suite (M0-M16)', () =>
     await page.getByTestId('welcome-connect-submit-btn').click();
     await expect(page.getByTestId('terminal-viewport')).toBeVisible();
     await expect(page.getByTestId('disconnect-btn')).toBeVisible();
+    // The rail's host dot shares the header's state; green is only for a live session.
+    const railDot = page.getByTestId('host-switcher').locator('.webssh-status-dot');
+    await expect(railDot).toHaveAttribute('class', 'webssh-status-dot');
     await page.getByTestId('disconnect-btn').click();
-    await expect(page.getByTestId('empty-state-connect-btn')).toBeVisible();
-    await expect(page.getByTestId('empty-state-reconnect-btn')).toBeVisible();
+    await expect(page.getByTestId('empty-disconnected-state')).toContainText('Disconnected');
+    await expect(page.getByTestId('empty-disconnected-state')).not.toContainText('dropped');
+    await expect(railDot).toHaveClass(/webssh-status-dot--disconnected/);
+    // A session the user ended is not a warning; the amber dot is for a dropped connection.
+    await expect(page.getByTestId('empty-disconnected-state').locator('.webssh-status-dot')).toHaveClass(/webssh-status-dot--disconnected/);
+    // The first automatic retry fires within a second of a drop; a manual disconnect must start none.
+    await page.waitForTimeout(3000);
+    await expect(page.getByTestId('connection-state-banner')).toHaveCount(0);
+
+    // The ended session cannot be resumed: Reconnect reopens the form for the same target, and the
+    // password, cleared on connect, is entered again.
+    await page.getByTestId('empty-state-reconnect-btn').click();
+    await expect(page.getByTestId('connect-modal')).toBeVisible();
+    await expect(page.getByTestId('connect-host-input')).toHaveValue(sshHost);
+    await expect(page.getByTestId('connect-user-input')).toHaveValue('ubuntu');
+    await expect(page.getByTestId('connect-port-input')).toHaveValue(sshPort);
+    // No browser key exists in this session, so the form offers no authorized_keys line to copy.
+    await expect(page.getByTestId('connect-pubkey-snippet')).toHaveCount(0);
+    await page.getByTestId('connect-password-input').fill('testpass123');
+    await page.getByTestId('connect-modal-submit-btn').click();
+    await expect(page.getByTestId('disconnect-btn')).toBeVisible();
+    await expect(page.getByTestId('status-bar')).toContainText('SSH-2.0-OpenSSH_9.6_testsshd');
+    await expect(railDot).toHaveAttribute('class', 'webssh-status-dot');
+  });
+
+  test('a Recent Hosts item opens the connect form for that host', async ({ page, request }) => {
+    const healthResp = await request.get('http://127.0.0.1:8080/healthz');
+    const health = (await healthResp.json()) as GatewayHealthInfo;
+    const sshHost = health.testSshdHost ?? '127.0.0.1';
+    const sshPort = String(health.testSshdPort ?? 22);
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        'webssh.hosts.v1',
+        JSON.stringify([
+          { id: 'h-recent', alias: 'build-02', host: '10.20.30.40', port: 2222, user: 'deploy', tags: [], favorite: false, jumpHops: [], lastConnectedAt: Date.now() - 60_000 }
+        ])
+      );
+    });
+    await page.goto('./');
+    await page.getByTestId('welcome-host-input').fill(sshHost);
+    await page.getByTestId('welcome-user-input').fill('ubuntu');
+    await page.getByTestId('welcome-port-input').fill(sshPort);
+    await page.getByTestId('welcome-password-input').fill('testpass123');
+    await page.getByTestId('welcome-connect-submit-btn').click();
+    await expect(page.getByTestId('disconnect-btn')).toBeVisible();
+
+    await page.getByTestId('nav-recent-10.20.30.40-2222').click();
+    await expect(page.getByTestId('connect-modal')).toBeVisible();
+    await expect(page.getByTestId('connect-host-input')).toHaveValue('10.20.30.40');
+    await expect(page.getByTestId('connect-user-input')).toHaveValue('deploy');
+    await expect(page.getByTestId('connect-port-input')).toHaveValue('2222');
+    // Opening the form neither connects nor ends the live session.
+    await page.getByTestId('connect-modal').getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByTestId('connect-modal')).toHaveCount(0);
+    await expect(page.getByTestId('disconnect-btn')).toBeVisible();
   });
 
   test('status bar dimensions match stty size output (C01 real check)', async ({ page, request }) => {

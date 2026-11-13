@@ -146,6 +146,8 @@ export function AppHeader({
       {/* TIER 1: Header bar — brand + active connection + quick actions */}
       <header className="webssh-header webssh-header--tier-1" role="banner">
         <div className="webssh-header-brand">
+          {/* The connection page hides the rail, so a drawer toggle there would open an empty backdrop. */}
+          {!onConnectionPage ? (
           <button
             type="button"
             className="webssh-header-menu-toggle"
@@ -155,6 +157,7 @@ export function AppHeader({
           >
             <span aria-hidden="true">≡</span>
           </button>
+          ) : null}
           <Icon name="server" size={16} />
           <span className="webssh-header-workspace">WebSSH Studio</span>
         </div>
@@ -229,13 +232,13 @@ export function AppHeader({
             <Icon name="settings" size={14} />
           </Button>
           <Button variant="ghost" ariaLabel="View and session options" title="View and session options" testId="view-menu-btn" onClick={(e) => { e.stopPropagation(); setOpenMenu((m) => (m === 'view' ? null : 'view')); }}>
-            <Icon name="settings" size={14} />
+            <Icon name="sliders" size={14} />
           </Button>
         </div>
       </header>
 
       {/* TIER 2: Session strip — tabs + resource meters (shown when connected) + always-visible session controls */}
-      <div className="webssh-header webssh-header--tier-2">
+      <div className={`webssh-header webssh-header--tier-2${onConnectionPage && !recording ? ' webssh-header--connection' : ''}`}>
         <div className="webssh-session-strip">
           {/* Session tabs — only meaningful when connected */}
           {isConnected && connectedHost ? (
@@ -476,7 +479,7 @@ export function AppHeader({
       </div>
 
       {/* Rail backdrop (mobile drawer open) */}
-      {isRailOpen ? (
+      {isRailOpen && !onConnectionPage ? (
         <div
           className="webssh-rail-backdrop"
           onClick={toggleRail}

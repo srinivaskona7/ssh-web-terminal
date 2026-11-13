@@ -166,10 +166,13 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
   private handleCopyDiagnostics = (): void => {
     const report = buildSafeDiagnosticReport(this.state.error);
     const json = JSON.stringify(report, null, 2);
-    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      void navigator.clipboard.writeText(json).catch(() => undefined);
+    if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+      return;
     }
-    this.setState({ copied: true });
+    navigator.clipboard.writeText(json).then(
+      () => this.setState({ copied: true }),
+      () => this.setState({ copied: false })
+    );
   };
 
   override render(): ComponentChildren {

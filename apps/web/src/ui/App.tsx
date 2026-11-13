@@ -19,7 +19,8 @@ import {
   bytesToBase64,
   validateAndInspectPrivateKeyPem
 } from '../vault';
-import { HostRegistry, type HostProfile } from '../hosts';
+import type { JumpHop } from '@webssh/protocol';
+import { HostRegistry, buildConnectJumpHops, type HostJumpHop, type HostProfile } from '../hosts';
 import { PreferencesStore, type CursorShape, type LayoutPreset, type WorkspacePreset } from '../prefs';
 import { XtermPaneAdapter, type TerminalRendererMode } from '../terminal/xterm-adapter';
 import { TerminalPane, type PaneTransport } from '../terminal/TerminalPane';
@@ -29,7 +30,8 @@ import { lazy, Suspense } from 'preact/compat';
 import { AppHeader, type MenuId } from './shell/AppHeader';
 import { AppRail } from './shell/AppRail';
 import { SettingsScreen, type SettingsSection } from './shell/SettingsScreen';
-import { WelcomeScreen } from './shell/WelcomeScreen';
+import { CONNECT_FIELD_MESSAGES, WelcomeScreen } from './shell/WelcomeScreen';
+import { statusDotClassFor } from './shell/status-dot';
 import { ViewBoundary } from './ViewBoundary';
 import {
   BrowserSshRelaySessionClient,
@@ -42,6 +44,7 @@ import {
   validateGatewayWsUrl,
   type TransportBackendMode
 } from '../transport';
+import { scopeConnectSecrets, selectSigningKey } from '../transport/remote-signer';
 import {
   AsciicastRecorder,
   CommandPaletteRegistry,
@@ -166,7 +169,8 @@ export interface SessionTabItem {
 export interface PendingJump {
   targetHost: string;
   targetPort: number;
-  hops: { host: string; port: number; user: string }[];
+  /** Address plus the hop's own auth method, so it never silently inherits the target's. */
+  hops: HostJumpHop[];
 }
 
 /**
@@ -416,6 +420,9 @@ export function App(): JSX.Element {
   const [reconnectCount, setReconnectCount] = useState(0);
   const [reconnectNotice, setReconnectNotice] = useState<string | null>(null);
   const [reconnectMessage, setReconnectMessage] = useState<string | null>(null);
+  // Set by Disconnect and cleared by the next successful connect, so an ended
+  // session is not reported as a dropped one.
+  const [disconnectedByUser, setDisconnectedByUser] = useState(false);
   const [reconnectCountdown, setReconnectCountdown] = useState<number | null>(null);
   const [connectionPanelOpen, setConnectionPanelOpen] = useState(false);
   /** True only when a live session is established; false for disconnected/reconnecting/failed/offline. */
@@ -458,6 +465,9 @@ export function App(): JSX.Element {
   // Connections the user closed explicitly must never be resurrected by the
   // auto-reconnect loop; this is per connection, not global.
   const suppressedReconnectRef = useRef<Set<string>>(new Set());
+  // Host, user, port and jump chain of the last successful connection, so
+  // Reconnect after Disconnect reopens the same path. No credentials.
+  const lastTargetRef = useRef<{ host: string; user: string; port: number; hops: PendingJump['hops'] } | null>(null);
   // Per-tab PTY channel ids captured before a drop. A gateway resume has to
   // put every pane back on its own channel, not on the session's first one.
   const channelSnapshotRef = useRef<Map<string, number>>(new Map());
@@ -643,10 +653,11 @@ export function App(): JSX.Element {
   const [hostSearch, setHostSearch] = useState('');
   const [hostTransferStatus, setHostTransferStatus] = useState('');
   const [sshConfigInput, setSshConfigInput] = useState('');
-  const [generatedPubKey, setGeneratedPubKey] = useState(
-    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWebSSHStudioBrowserNonExtractableKey webssh@browser'
-  );
+  // Empty until the vault generates a key in this session: no placeholder key is ever shown or sent.
+  const [generatedPubKey, setGeneratedPubKey] = useState('');
   const [generatedFp, setGeneratedFp] = useState('');
+  // Fingerprint of the uploaded PEM, kept apart so it never replaces the browser key's.
+  const [pemFp, setPemFp] = useState('');
   const [vaultLocked, setVaultLocked] = useState(false);
   const [fileFilter, setFileFilter] = useState('');
   const [transferStatus, setTransferStatus] = useState<string>('Disconnected — Connect to an SSH host to browse SFTP files');
@@ -904,14 +915,20 @@ export function App(): JSX.Element {
     setRendererNotice((prev) => (prev === mode ? prev : mode));
   };
 
+  // "Copied" only once the browser confirms the write; a missing or blocked clipboard says so.
   const copyToClipboard = (text: string): void => {
-    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      void navigator.clipboard.writeText(text).catch(() => {
-        // Ignore clipboard errors in restricted environments
-      });
+    const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+    if (!clipboard || typeof clipboard.writeText !== 'function') {
+      showToast('The clipboard is not available here. Select the text and copy it.', 'warning');
+      return;
     }
-    setCopiedSnippet(true);
-    setTimeout(() => setCopiedSnippet(false), 2000);
+    clipboard.writeText(text).then(
+      () => {
+        setCopiedSnippet(true);
+        setTimeout(() => setCopiedSnippet(false), 2000);
+      },
+      () => showToast('The browser blocked clipboard access. Select the text and copy it.', 'warning')
+    );
   };
 
   const refreshSftpDirectory = async (
@@ -1541,7 +1558,13 @@ export function App(): JSX.Element {
     setConnectedAt(null);
     const activeTab = tabs.find((t) => t.id === activeTabId);
     const connection = connectionRegistryRef.current.get(activeTab?.connectionId);
-    if (connection) connectionRegistryRef.current.close(connection.id);
+    if (connection) {
+      // close() reports 'disconnected' synchronously, before liveSessionRef is
+      // cleared below; unsuppressed, that arms a retry against the closed client.
+      suppressedReconnectRef.current.add(connection.id);
+      connectionRegistryRef.current.close(connection.id);
+    }
+    setDisconnectedByUser(true);
     liveSessionRef.current = null;
     setConnectionState('disconnected');
     setPendingInputBytes(0);
@@ -1566,6 +1589,7 @@ export function App(): JSX.Element {
     setUploadedKeyFileName(file.name);
     setKeyPermissionMode('0400');
     setConnectErrorMsg('');
+    setPemFp('');
     try {
       const text = typeof file.text === 'function' ? await file.text() : '';
       setUploadedKeyContent(text);
@@ -1573,8 +1597,8 @@ export function App(): JSX.Element {
         const check = await validateAndInspectPrivateKeyPem(text);
         if (!check.valid) {
           setConnectErrorMsg(check.error ?? 'Invalid private key format');
-        } else if (check.fingerprint) {
-          setGeneratedFp(check.fingerprint);
+        } else {
+          setPemFp(check.fingerprint ?? '');
         }
       }
     } catch {
@@ -1730,6 +1754,33 @@ export function App(): JSX.Element {
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
     scheduleReconnect(client, activeConnectionId, true);
+  };
+
+  // A session ended with Disconnect cannot be resumed, so Reconnect opens the
+  // connect form for the same target. The password or passphrase was cleared
+  // on connect and is asked for again.
+  const reconnectAfterDisconnect = (): void => {
+    const target = lastTargetRef.current;
+    if (target) {
+      setConnectHost(target.host);
+      setConnectUser(target.user);
+      setConnectPort(String(target.port));
+    }
+    setPendingJump(target && target.hops.length > 0 ? { targetHost: target.host, targetPort: target.port, hops: target.hops } : null);
+    setConnectModalOpen(true);
+  };
+
+  // Prefills the connect form from a saved profile, jump chain included, and opens it.
+  const openConnectForProfile = (h: HostProfile): void => {
+    setConnectUser(h.user);
+    setConnectHost(h.host);
+    setConnectPort(String(h.port));
+    setPendingJump({
+      targetHost: h.host,
+      targetPort: h.port,
+      hops: h.jumpHops.map((j) => ({ ...j }))
+    });
+    setConnectModalOpen(true);
   };
 
   // ---- Resource metrics (CPU / RAM / Disk) collected via SSH exec ----
@@ -1955,15 +2006,16 @@ export function App(): JSX.Element {
     const hostVal = connectHost.trim();
     const userVal = connectUser.trim();
     const portVal = connectPort.trim();
-    if (!hostVal) { setConnectErrorMsg('Host is required.'); return; }
-    if (!userVal) { setConnectErrorMsg('Username is required.'); return; }
+    if (!hostVal) { setConnectErrorMsg(CONNECT_FIELD_MESSAGES.host); return; }
+    if (!userVal) { setConnectErrorMsg(CONNECT_FIELD_MESSAGES.user); return; }
     if (!portVal || !Number.isInteger(Number(portVal)) || Number(portVal) < 1 || Number(portVal) > 65535) {
-      setConnectErrorMsg('Port must be 1–65535.'); return;
+      setConnectErrorMsg(CONNECT_FIELD_MESSAGES.port); return;
     }
-    if (authMethod === 'Password' && !connectPassword) { setConnectErrorMsg('Password is required for Password authentication.'); return; }
+    if (authMethod === 'Password' && !connectPassword) { setConnectErrorMsg(CONNECT_FIELD_MESSAGES.password); return; }
     if (authMethod === 'Private Key (.pem / id_rsa)' && !uploadedKeyContent.trim()) {
       setConnectErrorMsg('Upload or paste a private key for Private Key authentication.'); return;
     }
+    if (authMethod === 'Argon2id Ed25519 Key' && !generatedPubKey) { setConnectErrorMsg(CONNECT_FIELD_MESSAGES.browserKey); return; }
     setConnectErrorMsg('');
     setConnectionState('connecting');
     const portNum = Number.parseInt(portVal, 10) || 22;
@@ -2053,7 +2105,24 @@ export function App(): JSX.Element {
 
       const connectionId = nextConnectionId();
 
-      const jumpHops = activeJumpHops;
+      // A hop with its own auth method gets its own credential or the connect is refused;
+      // sending it bare would hand it the target's password or key.
+      let jumpHops: JumpHop[] | undefined;
+      try {
+        jumpHops = activeJumpHops
+          ? buildConnectJumpHops(
+              activeJumpHops,
+              activeJumpHops.map((hop) => {
+                if (hop.authMethod !== 'remote_signer') return undefined;
+                const key = selectSigningKey(vault.listKeys(), hop.keyFingerprint ?? '');
+                return key ? { publicKey: key.authorizedKeyLine } : undefined;
+              })
+            )
+          : undefined;
+      } catch (error) {
+        setConnectErrorMsg(error instanceof Error ? error.message : 'Jump host credentials are missing');
+        return;
+      }
       const sessionParams = {
         transportMode,
         jumpHops,
@@ -2063,11 +2132,10 @@ export function App(): JSX.Element {
         port: portNum,
         user: userVal,
         authMethod: protocolAuthMethod as 'password' | 'private_key' | 'remote_signer',
-        password: connectPassword,
+        ...scopeConnectSecrets(protocolAuthMethod, { password: connectPassword, privateKeyPassphrase: keyPassphrase }),
         privateKeyPem: authMethod === 'Private Key (.pem / id_rsa)' ? uploadedKeyContent : undefined,
-        privateKeyPassphrase: keyPassphrase || undefined,
         publicKey: authMethod === 'Argon2id Ed25519 Key' ? generatedPubKey : undefined,
-        keyFingerprint: generatedFp,
+        keyFingerprint: authMethod === 'Argon2id Ed25519 Key' ? generatedFp : authMethod === 'Private Key (.pem / id_rsa)' ? pemFp : '',
         cols,
         rows,
         onPtyData: (channel: number, data: Uint8Array) => {
@@ -2154,10 +2222,11 @@ export function App(): JSX.Element {
           algorithm: string;
           dataBase64: string;
         }) => {
-          const allKeys = vault.listKeys();
-          if (allKeys[0]) {
+          // Sign only with the key the request names; never fall back to another key.
+          const signingKey = selectSigningKey(vault.listKeys(), req.keyFingerprint);
+          if (signingKey) {
             const resp = await vault.signChallenge(
-              allKeys[0].id,
+              signingKey.id,
               base64ToBytes(req.dataBase64)
             );
             return bytesToBase64(resp.rawWebCryptoSignature);
@@ -2207,6 +2276,7 @@ export function App(): JSX.Element {
           setConnectionState('disconnected');
           // Only an unexpected drop earns a retry; an explicit disconnect does not.
           if (!suppressedReconnectRef.current.has(connectionId)) {
+            setDisconnectedByUser(false);
             const activeClient = liveSessionRef.current;
             if (activeClient) {
               scheduleReconnect(activeClient, connectionId);
@@ -2317,6 +2387,8 @@ export function App(): JSX.Element {
         setReconnectMessage(null);
         reconnectAttemptRef.current = 0;
         suppressedReconnectRef.current.delete(connectionId);
+        setDisconnectedByUser(false);
+        lastTargetRef.current = { host: hostVal, user: userVal, port: portNum, hops: activeJumpHops ?? [] };
         const matchedHost = hostRegistry
           .list()
           .find((h) => h.host === hostVal && h.user === userVal && h.port === portNum);
@@ -2449,6 +2521,13 @@ export function App(): JSX.Element {
     }
 
     if (cmd === 'pubkey') {
+      if (!generatedPubKey) {
+        const msg = 'No browser key in this session. Generate one in the connect form or the vault.';
+        setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, msg]);
+        appendCommandBlock(trimmed, [msg], 1);
+        writeToXterm(`${String.fromCharCode(13, 10)}${msg}${String.fromCharCode(13, 10)}webssh:~$ `);
+        return;
+      }
       copyToClipboard(authorizedKeysSnippet);
       const out = [`Ed25519 Public Key: ${generatedPubKey}`, `Copy helper: ${authorizedKeysSnippet}`];
       setTerminalLines((prev) => [...prev, `webssh:~$ ${trimmed}`, ...out]);
@@ -2948,8 +3027,8 @@ export function App(): JSX.Element {
       setGeneratedFp(record.fingerprintSHA256);
       setKeyPermissionMode('0400');
       setConnectErrorMsg('');
-    } catch {
-      // Keep fallback display in constrained environment
+    } catch (err) {
+      setConnectErrorMsg(`Could not create a browser key: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -3020,6 +3099,15 @@ export function App(): JSX.Element {
       category: 'Files',
       run: () => {
         setActiveScreen('editor');
+        setPaletteOpen(false);
+      }
+    });
+    reg.register({
+      id: 'nav.ide',
+      title: 'Open Workspace IDE',
+      category: 'Files',
+      run: () => {
+        setActiveScreen('ide');
         setPaletteOpen(false);
       }
     });
@@ -3130,14 +3218,7 @@ export function App(): JSX.Element {
   // is only for the post-connect workspace. Saved Hosts / Settings stay reachable from the card.
   const showWorkspaceShell = !(activeScreen === 'welcome' && connectionState !== 'connected');
 
-  const statusDotClass =
-    connectionState === 'reconnecting'
-      ? 'webssh-status-dot--reconnecting'
-      : connectionState === 'offline'
-        ? 'webssh-status-dot--offline'
-        : connectionState === 'disconnected'
-          ? 'webssh-status-dot--disconnected'
-          : '';
+  const statusDotClass = statusDotClassFor(connectionState);
 
   return (
     <div
@@ -3301,7 +3382,9 @@ export function App(): JSX.Element {
             connectedHost={connectedHost}
             connectedUser={connectedUser}
             connectedPort={Number.parseInt(connectPort, 10) || 22}
+            statusDotClass={statusDotClass}
             onConnectAnother={() => { setPendingJump(null); setConnectModalOpen(true); }}
+            onConnectRecent={openConnectForProfile}
             workspacePreset={workspacePreset}
             applyPreset={applyPreset}
             railWidth={railWidth}
@@ -3573,17 +3656,19 @@ export function App(): JSX.Element {
           {activeScreen === 'workspace' && connectionState === 'disconnected' && (
             <div className="webssh-empty-state" data-testid="empty-disconnected-state">
               <div className="webssh-empty-state-icon">◐</div>
-              <div aria-hidden="true"><span className="webssh-status-dot webssh-status-dot--offline" style={{ display: 'inline-block', width: '10px', height: '10px', backgroundColor: 'var(--color-status-warning)' }} /></div>
-              <h2 className="webssh-empty-state-title">Connection interrupted</h2>
+              <div aria-hidden="true"><span className={`webssh-status-dot ${disconnectedByUser ? 'webssh-status-dot--disconnected' : 'webssh-status-dot--reconnecting'}`} style={{ display: 'inline-block', width: '10px', height: '10px' }} /></div>
+              <h2 className="webssh-empty-state-title">{disconnectedByUser ? 'Disconnected' : 'Connection interrupted'}</h2>
               <p className="webssh-empty-state-description">
-                The connection dropped. Your tabs and terminal output are kept — reconnect to continue.
+                {disconnectedByUser
+                  ? 'You ended this session. Reconnect opens the connect form for the same host.'
+                  : 'The connection dropped. Your tabs and terminal output are kept — reconnect to continue.'}
                 {connectedHost ? <span> {connectedUser}@{connectedHost}{connectedAt ? ` · last connected ${new Date(connectedAt).toLocaleTimeString()}` : ''}</span> : null}
               </p>
               <div className="webssh-empty-state-actions">
                 {connectedHost ? (
                   <Button
                     variant="primary"
-                    onClick={() => handleReconnectNow()}
+                    onClick={() => (disconnectedByUser ? reconnectAfterDisconnect() : handleReconnectNow())}
                     testId="empty-state-reconnect-btn"
                   >
                     Reconnect
@@ -3883,6 +3968,10 @@ export function App(): JSX.Element {
                 handleConnectSubmit,
                 handlePrivateKeyFileUpload,
                 handleGenerateKey,
+                browserKeyLine: generatedPubKey,
+                browserKeyFingerprint: generatedFp,
+                onCopyBrowserKey: () => copyToClipboard(generatedPubKey),
+                browserKeyCopied: copiedSnippet,
                 isConnecting: connectionState === 'connecting',
                 onCancel: handleCancelConnect
               }}
@@ -3958,10 +4047,11 @@ export function App(): JSX.Element {
                       readOnly
                       rows={3}
                       value={generatedPubKey}
+                      placeholder="Not generated in this session"
                       data-testid="vault-pubkey-output"
                     />
                     <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
-                      <Button variant="default" onClick={() => copyToClipboard(authorizedKeysSnippet)}>
+                      <Button variant="default" disabled={!generatedPubKey} onClick={() => copyToClipboard(authorizedKeysSnippet)}>
                         <Icon name="copy" /> Copy authorized_keys Snippet
                       </Button>
                     </div>
@@ -4117,17 +4207,7 @@ export function App(): JSX.Element {
                       </td><td>
                       <Button
                         variant="primary"
-                        onClick={() => {
-                          setConnectUser(h.user);
-                          setConnectHost(h.host);
-                          setConnectPort(String(h.port));
-                          setPendingJump({
-                            targetHost: h.host,
-                            targetPort: h.port,
-                            hops: h.jumpHops.map((j) => ({ host: j.host, port: j.port, user: j.user }))
-                          });
-                          setConnectModalOpen(true);
-                        }}
+                        onClick={() => openConnectForProfile(h)}
                       >
                         Connect
                       </Button>
@@ -5246,26 +5326,35 @@ export function App(): JSX.Element {
             </div>
           ) : null}
 
-          <div>
-            <label htmlFor="connect-pubkey-snippet">Public Key Snippet (authorized_keys)</label>
-            <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-1)' }}>
-              <input
-                id="connect-pubkey-snippet"
-                type="text"
-                className="ui-input"
-                readOnly
-                value={authorizedKeysSnippet}
-                data-testid="connect-pubkey-snippet"
-              />
-              <Button
-                variant="default"
-                onClick={() => copyToClipboard(authorizedKeysSnippet)}
-                testId="copy-pubkey-snippet-btn"
-              >
-                <Icon name="copy" /> {copiedSnippet ? 'Copied' : 'Copy'}
+          {generatedPubKey ? (
+            <div>
+              <label htmlFor="connect-pubkey-snippet">Public Key Snippet (authorized_keys)</label>
+              <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', marginTop: 'var(--space-1)' }}>
+                <input
+                  id="connect-pubkey-snippet"
+                  type="text"
+                  className="ui-input"
+                  readOnly
+                  value={authorizedKeysSnippet}
+                  data-testid="connect-pubkey-snippet"
+                />
+                <Button
+                  variant="default"
+                  onClick={() => copyToClipboard(authorizedKeysSnippet)}
+                  testId="copy-pubkey-snippet-btn"
+                >
+                  <Icon name="copy" /> {copiedSnippet ? 'Copied' : 'Copy'}
+                </Button>
+              </div>
+            </div>
+          ) : authMethod === 'Argon2id Ed25519 Key' ? (
+            <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', justifyContent: 'space-between' }} data-testid="connect-pubkey-missing">
+              <span className="ws-mod-muted">No browser key in this session yet.</span>
+              <Button variant="default" onClick={() => void handleGenerateKey()} testId="modal-generate-key-btn">
+                Generate browser key
               </Button>
             </div>
-          </div>
+          ) : null}
 
           {activeJumpHops?.length ? (
             <details data-testid="jump-hosts-advanced">

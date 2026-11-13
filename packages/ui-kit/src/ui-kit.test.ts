@@ -32,9 +32,30 @@ describe('@webssh/ui-kit design tokens and WCAG AA contrast', () => {
   it('passes WCAG AA contrast (>= 4.5:1) across every built-in theme', () => {
     for (const id of THEME_IDS) {
       const audit = auditThemeContrast(THEMES[id]);
-      expect(audit.passesAA, `Theme ${id} failed WCAG AA contrast: ${JSON.stringify(audit)}`).toBe(true);
+      expect(audit.failures, `Theme ${id} failed WCAG AA contrast`).toEqual([]);
+      expect(audit.passesAA).toBe(true);
       expect(meetsWcagAA(THEMES[id].fgPrimary, THEMES[id].bgSurface)).toBe(true);
     }
     expect(getContrastRatio('#ffffff', '#000000')).toBe(21);
+  });
+
+  it('flags status text, labels and control borders that fall below AA', () => {
+    const dark = THEMES.dark;
+    const audit = auditThemeContrast({ ...dark, statusDanger: dark.bgElevated, accentText: dark.accentPrimary, borderControl: dark.bgSurface });
+    expect(audit.passesAA).toBe(false);
+    expect(audit.failures).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^statusDanger on bgElevated 1:1/),
+        expect.stringMatching(/^accentText on accentPrimary 1:1/),
+        expect.stringMatching(/^bgCanvas on statusDanger /),
+        expect.stringMatching(/^borderControl on bgSurface 1:1 < 3:1/)
+      ])
+    );
+  });
+
+  // applyThemeToDocument only sets the keys a theme has, so a missing key keeps the previous theme's inline value.
+  it('defines every colour token in every theme', () => {
+    const keys = Object.keys(THEMES.dark).sort();
+    for (const id of THEME_IDS) expect(Object.keys(THEMES[id]).sort(), id).toEqual(keys);
   });
 });

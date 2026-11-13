@@ -61,6 +61,29 @@ for (const dir of TARGET_DIRS) {
   }
 }
 
+// A var(--x) that nothing declares resolves to nothing, silently: the declaration drops to its initial
+// value. Declarations come from every stylesheet (generated tokens included) and from '--x' literals in
+// code, which covers setProperty('--x', …) and style={{ '--x': … }}.
+const declared = new Set();
+const uses = [];
+for (const dir of TARGET_DIRS) {
+  for (const file of walk(dir)) {
+    const content = fs.readFileSync(file, 'utf8');
+    if (file.endsWith('.css')) {
+      for (const m of content.matchAll(/(--[\w-]+)\s*:/g)) declared.add(m[1]);
+      content.split(NL).forEach((line, idx) => {
+        if (line.includes('lint-tokens-ignore')) return;
+        for (const m of line.matchAll(/var\(\s*(--[\w-]+)/g)) uses.push([file, idx + 1, m[1]]);
+      });
+    } else {
+      for (const m of content.matchAll(/['"`](--[\w-]+)['"`]/g)) declared.add(m[1]);
+    }
+  }
+}
+for (const [file, line, name] of uses) {
+  if (!declared.has(name)) violations.push(`${path.relative(rootDir, file)}:${line} Undefined custom property: ${name}`);
+}
+
 if (violations.length > 0) {
   console.error('Design Token Lint Violations Found:');
   for (const v of violations) {
@@ -68,5 +91,5 @@ if (violations.length > 0) {
   }
   process.exit(1);
 } else {
-  console.log('Token lint passed: 0 hardcoded design values in UI components and stylesheets.');
+  console.log('Token lint passed: 0 hardcoded design values and 0 undefined custom properties in UI components and stylesheets.');
 }

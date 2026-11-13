@@ -66,11 +66,21 @@
   border-color: transparent;
 }
 
+/* The shorthand also clears the primary gradient, a background-image that would paint over a colour. */
 .ui-btn--ghost[aria-pressed="true"],
-.webssh-rail-group .ui-btn--primary {
-  background-color: color-mix(in srgb, var(--color-accent-primary) 10%, transparent);
+.webssh-rail-group .ui-btn--primary,
+.webssh-rail-group .ui-btn--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent-primary) 10%, transparent);
   color: var(--color-accent-primary);
   border-color: transparent;
+  box-shadow: none;
+}
+
+/* The selected rail item keeps its tint on hover: accent text on the solid accent fill is unreadable,
+   and a stronger tint drops below 4.5:1 in Solarized. */
+.webssh-rail-group .ui-btn--primary:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  transform: none;
 }
 
 .ui-btn--ghost:hover:not(:disabled) {
@@ -129,17 +139,52 @@
   width: 100%;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
-  border: var(--border-hairline);
+  /* Form controls need a 3:1 boundary (WCAG 1.4.11); hairlines elsewhere stay subtle. */
+  border: var(--border-control);
   background: var(--color-bg-canvas);
   color: var(--color-fg-primary);
   font-family: var(--font-font-sans);
   font-size: var(--font-size-md);
 }
 
+/*
+ * WebKit ignores vertical padding on a native select (22px tall beside a 35px input), so single-line
+ * selects drop the native arrow, size from padding like inputs in every engine, and draw a caret in
+ * the text colour. Forced-colors mode strips background images, so it keeps the native control.
+ */
+.ui-select:not([multiple]):not([size]),
+select.ui-input:not([multiple]):not([size]) {
+  appearance: none;
+  padding-right: calc(var(--space-3) + var(--space-4));
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    right calc(var(--space-3) + var(--space-1)) center,
+    right var(--space-3) center;
+  background-size: var(--space-1) var(--space-1);
+  background-repeat: no-repeat;
+}
+
+@media (forced-colors: active) {
+  .ui-select:not([multiple]):not([size]),
+  select.ui-input:not([multiple]):not([size]) {
+    appearance: auto;
+    padding-right: var(--space-3);
+  }
+}
+
 .ui-input:focus-visible,
 .ui-select:focus-visible {
   outline: var(--border-focus-ring);
   outline-offset: var(--space-0);
+}
+
+/* UA placeholder greys miss 4.5:1 on the light canvas (WebKit 2.2:1, Chromium 4.3:1); fg-muted is
+   audited at 4.5:1 in every theme. */
+.ui-input::placeholder {
+  color: var(--color-fg-muted);
+  opacity: 1;
 }
 
 .ui-modal-backdrop {

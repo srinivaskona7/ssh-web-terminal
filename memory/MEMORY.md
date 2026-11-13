@@ -13,7 +13,7 @@
 - **Honest capability matrix (source of truth for claims)**: [../docs/FEATURES.md](../docs/FEATURES.md)
 - **Monorepo Modules**:
   - `design/`: Source-of-truth design tokens (`tokens.json`) and screen/component specifications.
-  - `packages/ui-kit/`: Token compiler, themes, icons, self-hosted WOFF2 fonts, UI primitives.
+  - `packages/ui-kit/`: Token compiler, themes, icons, font stacks (no font files ship), UI primitives.
   - `packages/protocol/`: Binary framing and control message codecs (TypeScript & Go).
   - `apps/web/`: Browser SSH studio client.
     - `vault/`, `transport/`, `terminal/`, `files/`, `prefs/`, `hosts/`: original modules.
@@ -37,6 +37,7 @@
 - Cloudflare build root is `apps/relay`; build command `npm ci --include=dev && npm run build`; deploy `npx wrangler deploy`; pinned Wrangler comes from root `package-lock.json`.
 - Relay auth lives in `apps/relay/src/auth.ts`; runtime secrets `SESSION_SIGNING_SECRET`, `AUTH_USERS_JSON` never enter Pages or Git. `USER_QUOTA_DO` binding and `v1` migration live in `apps/relay/wrangler.jsonc`; missing binding must block SSH.
 - Run token generation before type checking, tests, and builds (root scripts already do this). Validate with `npm run lint`, `npm test`, `npm run build`; build with `VITE_BASE_PATH=/ssh-web-terminal/` for Pages. Ignore artifacts using root-anchored rules, including `/apps/relay/.wrangler/` and `/apps/relay/.dev.vars*`.
+- CI pins Go `1.27.4` (first release with the `net/http` fix for GO-2026-6859) and `govulncheck` `v1.9.0` (pinned, not `@latest`). A Go pin older than the scanner's requirement makes `go install` fail the whole security job.
 - Operational setup and target connection checks are documented in `docs/RUNBOOK.md`, section 5.
 - `.npmrc` pins the public npm registry; all `package-lock.json` download URLs must use `registry.npmjs.org` so GitHub and Cloudflare runners can install without corporate network access. Keep dependency-install failures visible in CI logs.
 - Relay PTY creation must wait for server acknowledgements of both `pty-req` and `shell`; `connected`/`channel_opened` must not be reported before acceptance. Production limitations of relay file tools and process resumption are recorded in `docs/RUNBOOK.md`.
@@ -48,6 +49,9 @@
 3. No billing code, tiers or paywalls.
 4. No anonymous TCP proxy; auth, origin checks, destination validation and quotas stay in place.
 5. Claims come from tests; docs/FEATURES.md distinguishes Verified from Implemented.
+6. No orphaned screens: a screen no navigation path reaches is a defect, not a feature. Every shipped screen needs a rail or palette entry plus a test that opens it (the Workspace IDE lost its entry in 3436f86 and stayed unreachable until 2026-11-13).
+7. No unknown CSS properties: stylesheets use kebab-case. The camelCase spelling parses but browsers drop it, so the rule silently does nothing. `npm run lint:css` fails the build.
+8. No known vulnerable dependencies: `npm audit --omit=dev --audit-level=high` and `govulncheck ./...` must both be clean.
 
 ## Workspace additions (2026-11)
 - `apps/web/src/ui/shell/`: `AppHeader.tsx` (two-tier header: brand/connection/actions tier + session strip/resource meters tier), `AppRail.tsx` (collapsible nav groups, recent hosts shortcuts, server tools badge), `SettingsScreen.tsx` (theme swatches, live terminal preview card), `WelcomeScreen.tsx`, `TurnstileWidget.tsx`, `types.ts`; extracted shell components used by `ui/App.tsx`.

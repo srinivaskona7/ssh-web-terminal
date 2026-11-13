@@ -36,28 +36,49 @@ export function meetsWcagAA(fgHex: string, bgHex: string, largeText = false): bo
   return ratio >= (largeText ? 3.0 : 4.5);
 }
 
+type ColorKey = Exclude<keyof ThemeTokens, 'ansi'>;
+
+// Colours the UI sets as text on each of the three backgrounds (badges sit on bgElevated, inputs on bgCanvas).
+const TEXT_KEYS: readonly ColorKey[] = ['fgPrimary', 'fgSecondary', 'fgMuted', 'accentPrimary', 'statusSuccess', 'statusWarning', 'statusDanger'];
+const BACKGROUND_KEYS: readonly ColorKey[] = ['bgCanvas', 'bgSurface', 'bgElevated'];
+// [text, background] pairs where a status or accent colour is the fill: primary and danger buttons, menu hover.
+const LABEL_PAIRS: ReadonlyArray<readonly [ColorKey, ColorKey]> = [
+  ['accentText', 'accentPrimary'],
+  ['accentText', 'accentHover'],
+  ['bgCanvas', 'accentPrimary'],
+  ['bgCanvas', 'statusDanger'],
+  ['terminalFg', 'terminalBg']
+];
+
+/**
+ * WCAG 2.2 AA audit of the pairs the UI actually renders: 4.5:1 for text (1.4.3) and 3:1 for the
+ * form-control border (1.4.11). `failures` names each pair below its minimum.
+ */
 export function auditThemeContrast(theme: ThemeTokens): {
   canvasPrimaryRatio: number;
   surfacePrimaryRatio: number;
   surfaceSecondaryRatio: number;
   terminalRatio: number;
+  failures: string[];
   passesAA: boolean;
 } {
-  const canvasPrimaryRatio = getContrastRatio(theme.fgPrimary, theme.bgCanvas);
-  const surfacePrimaryRatio = getContrastRatio(theme.fgPrimary, theme.bgSurface);
-  const surfaceSecondaryRatio = getContrastRatio(theme.fgSecondary, theme.bgSurface);
-  const terminalRatio = getContrastRatio(theme.terminalFg, theme.terminalBg);
-  const passesAA =
-    canvasPrimaryRatio >= 4.5 &&
-    surfacePrimaryRatio >= 4.5 &&
-    surfaceSecondaryRatio >= 4.5 &&
-    terminalRatio >= 4.5;
+  const failures: string[] = [];
+  const check = (fg: ColorKey, bg: ColorKey, min: number): void => {
+    const ratio = getContrastRatio(theme[fg], theme[bg]);
+    if (ratio < min) failures.push(`${fg} on ${bg} ${ratio}:1 < ${min}:1`);
+  };
+  for (const bg of BACKGROUND_KEYS) {
+    for (const fg of TEXT_KEYS) check(fg, bg, 4.5);
+    check('borderControl', bg, 3);
+  }
+  for (const [fg, bg] of LABEL_PAIRS) check(fg, bg, 4.5);
   return {
-    canvasPrimaryRatio,
-    surfacePrimaryRatio,
-    surfaceSecondaryRatio,
-    terminalRatio,
-    passesAA
+    canvasPrimaryRatio: getContrastRatio(theme.fgPrimary, theme.bgCanvas),
+    surfacePrimaryRatio: getContrastRatio(theme.fgPrimary, theme.bgSurface),
+    surfaceSecondaryRatio: getContrastRatio(theme.fgSecondary, theme.bgSurface),
+    terminalRatio: getContrastRatio(theme.terminalFg, theme.terminalBg),
+    failures,
+    passesAA: failures.length === 0
   };
 }
 

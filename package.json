@@ -11,6 +11,7 @@
   "scripts": {
     "tokens:build": "node scripts/build-tokens.mjs",
     "lint:tokens": "node scripts/lint-tokens.mjs",
+    "lint:css": "node scripts/lint-css.mjs",
     "lint:eol": "node scripts/check-eol.mjs",
     "lint:memory": "node scripts/check-memory-sync.mjs",
     "prebuild": "npm run tokens:build",
@@ -19,7 +20,7 @@
     "dev": "npm run tokens:build && npm --workspace=@webssh/web run dev",
     "preview": "npm --workspace=@webssh/web run preview",
     "typecheck": "npm run tokens:build && tsc -b packages/protocol packages/ui-kit apps/web && tsc -p apps/relay/tsconfig.json --noEmit",
-    "lint": "npm run lint:tokens && npm run lint:eol && npm run lint:memory && npm run typecheck",
+    "lint": "npm run lint:tokens && npm run lint:css && npm run lint:eol && npm run lint:memory && npm run typecheck",
     "pretest": "npm run tokens:build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -31,13 +32,14 @@
     "@playwright/test": "^1.50.0",
     "@types/node": "^22.10.2",
     "@vitejs/plugin-basic-ssl": "^1.1.0",
-    "@vitest/coverage-v8": "^2.1.8",
+    "@vitest/coverage-v8": "^4.1.12",
+    "esbuild": "0.25.12",
     "fake-indexeddb": "^6.0.0",
     "fast-check": "^3.22.0",
     "jsdom": "^25.0.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
-    "vitest": "^2.1.8",
+    "vitest": "^4.1.12",
     "wrangler": "4.156.2"
   },
   "dependencies": {
@@ -51,8 +53,11 @@
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "idb": "^8.0.1",
-    "monaco-editor": "^0.57.0",
+    "monaco-editor": "0.58.0-dev-20261111",
     "nanostores": "^1.2.0",
     "preact": "^10.25.3"
+  },
+  "overrides": {
+    "dompurify": "3.4.17"
   }
 }

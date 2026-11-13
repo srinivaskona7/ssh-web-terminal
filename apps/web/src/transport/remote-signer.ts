@@ -93,3 +93,25 @@ export async function routeSignRequest(
     return { ok: false, reason: `key ${expected} could not sign: ${detail}` };
   }
 }
+
+/** The vault key a sign request names, matched by fingerprint; undefined when none matches. */
+export function selectSigningKey<K extends { fingerprintSHA256: string }>(
+  keys: readonly K[],
+  keyFingerprint: string
+): K | undefined {
+  if (!keyFingerprint) return undefined;
+  return keys.find((key) => key.fingerprintSHA256 === keyFingerprint);
+}
+
+/**
+ * The secrets a connect message may carry for one auth method. The gateway offers password auth
+ * whenever a password is present, so a key login must never ship a leftover typed password.
+ */
+export function scopeConnectSecrets(
+  authMethod: 'password' | 'private_key' | 'remote_signer',
+  secrets: { password?: string; privateKeyPassphrase?: string }
+): { password?: string; privateKeyPassphrase?: string } {
+  if (authMethod === 'password') return { password: secrets.password };
+  if (authMethod === 'private_key') return { privateKeyPassphrase: secrets.privateKeyPassphrase || undefined };
+  return {};
+}

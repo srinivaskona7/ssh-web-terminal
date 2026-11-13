@@ -1,7 +1,8 @@
 import { THEME_IDS, type ThemeId, getContrastRatio, meetsWcagAA } from '@webssh/ui-kit';
 
 export const PREFERENCES_SCHEMA_VERSION = 2;
-export const BUNDLED_PROGRAMMING_FONTS = [
+/** Font family names offered by default. No font files ship: each renders only where it is installed. */
+export const DEFAULT_PROGRAMMING_FONTS = [
   'JetBrains Mono',
   'Fira Code',
   'Source Code Pro',
@@ -314,7 +315,7 @@ export function validateCustomThemeContrast(theme: CustomThemeDefinition): {
 }
 
 export async function listAvailableFonts(): Promise<string[]> {
-  const fonts = new Set<string>(BUNDLED_PROGRAMMING_FONTS);
+  const fonts = new Set<string>(DEFAULT_PROGRAMMING_FONTS);
   if (typeof window !== 'undefined' && 'queryLocalFonts' in window) {
     try {
       const queryFn = (window as unknown as { queryLocalFonts: () => Promise<Array<{ family: string }>> }).queryLocalFonts;
@@ -325,7 +326,7 @@ export async function listAvailableFonts(): Promise<string[]> {
         }
       }
     } catch {
-      // Permission denied or unavailable; fall back to self-hosted WOFF2 fonts
+      // Permission denied or unavailable; offer the default names only
     }
   }
   return Array.from(fonts);

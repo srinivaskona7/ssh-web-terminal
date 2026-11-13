@@ -9,8 +9,11 @@ interface Props {
 }
 
 /**
- * Lazy-loaded Monaco editor for desktop. Falls back to a plain textarea on
- * mobile or when Monaco cannot initialise (GitHub Pages worker issues).
+ * Lazy-loaded Monaco editor for desktop.
+ *
+ * The textarea fallback lives in the caller (`LightIde`): a touch device never
+ * loads this module at all, and an import failure leaves the textarea in
+ * place. Here a failure only means "no Monaco on this screen".
  */
 export function MonacoEditor({ value, language = 'plaintext', onChange, readOnly }: Props): JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);

@@ -3,6 +3,8 @@ import type { JumpHop } from '@webssh/protocol';
 import {
   hopHasOwnCredential,
   routeSignRequest,
+  scopeConnectSecrets,
+  selectSigningKey,
   toWireJumpHop,
   type SignRequestMessage,
   type SignRoutingParams
@@ -224,5 +226,30 @@ describe('jump hop credentials', () => {
         privateKeyPassphrase: 'pp'
       })
     ).toEqual({ ...inheritingHop, authMethod: 'private_key', privateKeyPem: 'PEM', privateKeyPassphrase: 'pp' });
+  });
+});
+
+describe('selectSigningKey', () => {
+  const keys = [
+    { id: 'a', fingerprintSHA256: 'SHA256:aaa' },
+    { id: 'b', fingerprintSHA256: 'SHA256:bbb' }
+  ];
+  it('returns the key the request names, not the first one', () => {
+    expect(selectSigningKey(keys, 'SHA256:bbb')?.id).toBe('b');
+  });
+  it('refuses when no key matches or the fingerprint is empty', () => {
+    expect(selectSigningKey(keys, 'SHA256:zzz')).toBeUndefined();
+    expect(selectSigningKey(keys, '')).toBeUndefined();
+  });
+});
+
+describe('scopeConnectSecrets', () => {
+  const typed = { password: 'stale-typed', privateKeyPassphrase: 'pp' };
+  it('sends only the password for password auth', () => {
+    expect(scopeConnectSecrets('password', typed)).toEqual({ password: 'stale-typed' });
+  });
+  it('never sends a password for key auth, only the PEM passphrase', () => {
+    expect(scopeConnectSecrets('private_key', typed)).toEqual({ privateKeyPassphrase: 'pp' });
+    expect(scopeConnectSecrets('remote_signer', typed)).toEqual({});
   });
 });

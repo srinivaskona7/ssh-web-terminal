@@ -12,7 +12,11 @@ export interface AppRailProps {
   connectedHost?: string;
   connectedUser?: string;
   connectedPort?: number;
+  /** Same dot modifier as the header, so the rail never shows a live session that has ended. */
+  statusDotClass: string;
   onConnectAnother?: () => void;
+  /** Opens the connect form prefilled with a recent host's profile. */
+  onConnectRecent?: (host: HostProfile) => void;
   workspacePreset: WorkspacePreset;
   applyPreset: (preset: WorkspacePreset) => void;
   railWidth: number;
@@ -47,7 +51,7 @@ interface RailGroupState {
  *
  * Groups:
  *   Global:        Welcome, Hosts, Settings
- *   Connection:    Terminal, Files, Editor, Server tools
+ *   Workspace:     Terminal, Files, Editor, IDE, Server tools
  *   Recents:       Recent host shortcuts (quick reconnect)
  *
  * Server tools (containers, Kubernetes, software, automations, deployments,
@@ -62,7 +66,9 @@ export function AppRail({
   connectedHost,
   connectedUser,
   connectedPort,
+  statusDotClass,
   onConnectAnother,
+  onConnectRecent,
   workspacePreset,
   applyPreset,
   railWidth,
@@ -160,7 +166,7 @@ export function AppRail({
       <nav className="webssh-rail" aria-label="Workspace navigation" style={{ width: `${railWidth}px`, transform: isRailOpen ? 'translateX(0)' : 'translateX(-100%)' }}>
         <div style={{ padding: 'var(--space-2)', borderBottom: 'var(--border-hairline)' }} data-testid="host-switcher">
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
-            <span className="webssh-status-dot webssh-status-dot--connected" aria-hidden="true" />
+            <span className={`webssh-status-dot ${statusDotClass}`.trim()} aria-hidden="true" />
             <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{connectedHost ? `${connectedUser}@${connectedHost}:${connectedPort}` : 'No host'}</strong>
           </div>
           <Button variant="ghost" onClick={() => onConnectAnother?.()} testId="connect-another-btn">Connect another server</Button>
@@ -216,6 +222,13 @@ export function AppRail({
                 () => setActiveScreen('editor')
               ),
               navItem(
+                'ide',
+                'IDE',
+                'code',
+                activeScreen === 'ide',
+                () => setActiveScreen('ide')
+              ),
+              navItem(
                 'server-tools',
                 'Server Tools',
                 'server',
@@ -240,9 +253,7 @@ export function AppRail({
                   activeScreen === 'workspace' && connectedHost === host.host && connectedUser === host.user,
                   () => {
                     setActiveScreen('workspace');
-                    // Trigger connect via the same path as WelcomeScreen: open connect modal with pre-filled host
-                    // We signal the parent through onConnectAnother; the host itself is applied by the caller.
-                    void onConnectAnother?.();
+                    onConnectRecent?.(host);
                   }
                 );
               })

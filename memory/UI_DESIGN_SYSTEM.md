@@ -13,9 +13,9 @@ npm run lint:tokens  =  fails on any hardcoded hex/px in components
 
 ## Themes
 
-9 themes: Dark, Light, High-Contrast, Solarized, Dracula, Nord, Gruvbox, Tokyo Night, One Dark. Each has `bgCanvas`/`bgSurface`/`bgElevated`/`bgOverlay`, fg/border/accent/status, terminal bg/fg/cursor/selection, and 16-color ANSI map. `contrast.ts` verifies WCAG AA live. Theme choice persists via `PreferencesStore`.
+9 themes: Dark, Light, High-Contrast, Solarized, Dracula, Nord, Gruvbox, Tokyo Night, One Dark. Each has `bgCanvas`/`bgSurface`/`bgElevated`/`bgOverlay`, fg/border (`borderControl` for form controls)/accent (`accentText` for labels on accent)/status, terminal bg/fg/cursor/selection, and 16-color ANSI map. `contrast.ts` `auditThemeContrast` checks every text and status colour at 4.5:1 on all three backgrounds, labels on accent and danger fills plus terminal text at 4.5:1, and the control border at 3:1; `ui-kit.test.ts` fails on any theme below AA. Theme choice persists via `PreferencesStore`.
 
-Vite: `host: true`, `allowedHosts: true`, `cors: true`. CSP `default-src 'self'`. Fonts/icons self-hosted WOFF2 + 1.5px line icons.
+Vite: `host: true`, `allowedHosts: true`, `cors: true`. CSP `default-src 'self'`. Icons are inline 1.5px line SVG (`ui-kit/src/icons.tsx`). No webfont files ship: the sans/mono stacks use Inter / JetBrains Mono when installed, else system fonts (no CDN either way).
 
 ## Shell & Screens
 
@@ -23,7 +23,8 @@ Vite: `host: true`, `allowedHosts: true`, `cors: true`. CSP `default-src 'self'`
 
 - `AppHeader.tsx`, `AppRail.tsx` — top bar, collapsible rail (resizable, width persisted)
 - `SettingsScreen.tsx` — appearance, connection, gateway/relay endpoint, tokens. Saved prefs preserved on endpoint change.
-- `WelcomeScreen.tsx`, `WelcomeDashboard.tsx` + `welcome-data.ts` — clean welcome-first, recent hosts (newest first), Quick Connect, creator `ProfileCard` (GitHub/LinkedIn/email `rel="noopener noreferrer"`), IDE mode toggle, Turnstile guest flow
+- `WelcomeScreen.tsx` + `welcome-screen.css` — connect page: one New connection form (field errors inline via `CONNECT_FIELD_MESSAGES`), "How this connects" route panel (`describeRoute`: what the relay/gateway receives per auth method), Turnstile guest check only in relay mode with a site key. Direction, dials and Never list in root `DESIGN.md`; axe in all nine themes in `e2e/welcome.spec.ts`.
+- `WelcomeDashboard.tsx` + `welcome-data.ts`, `ProfileCard.tsx` — tested components, not mounted on Welcome (recent hosts live in Saved Hosts)
 - `TurnstileWidget.tsx` — guest widget
 
 Module screens: `ServerModules.tsx` — Overview, Software, Containers, Kubernetes, Automations, Deployments, Activity (compact rail via `ModuleContext`).

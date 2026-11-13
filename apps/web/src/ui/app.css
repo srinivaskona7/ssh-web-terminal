@@ -364,7 +364,7 @@
   display: flex;
   justify-content: space-between;
   gap: var(--space-1);
-  padding: var(--space-0_5) 0;
+  padding: calc(var(--space-1) / 2) 0;
 }
 
 .webssh-resource-detail-label {
@@ -385,7 +385,7 @@
 .webssh-resource-detail-core {
   display: inline-block;
   margin-right: var(--space-2);
-  margin-bottom: var(--space-0_5);
+  margin-bottom: calc(var(--space-1) / 2);
   font-family: var(--font-font-mono);
   font-size: var(--font-size-xs);
 }
@@ -409,7 +409,8 @@
   display: none;
 }
 
-.webssh-workspace-body--connection .webssh-session-strip {
+.webssh-workspace-body--connection .webssh-session-strip,
+.webssh-header--tier-2.webssh-header--connection {
   display: none;
 }
 
@@ -487,7 +488,6 @@
     transform: none !important;
     flex-shrink: 0;
     min-width: 0;
-    width: var(--rail-width-px, 260px);
     left: auto;
     top: auto;
     bottom: auto;
@@ -1549,7 +1549,7 @@ button.webssh-rail-group-title {
   align-items: center;
   justify-content: center;
   gap: var(--space-1);
-  color: var(--text-muted);
+  color: var(--color-fg-muted);
   pointer-events: none;
 }
 
@@ -1776,101 +1776,7 @@ html {
   resize: vertical;
 }
 
-/* ---- Welcome: creator card over an aurora backdrop ---------------------- */
-.webssh-welcome {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-}
-
-.webssh-aurora {
-  position: absolute;
-  inset: calc(-1 * var(--space-6));
-  z-index: -1;
-  pointer-events: none;
-  background:
-    radial-gradient(
-      42% 46% at 22% 18%,
-      color-mix(in oklab, var(--color-accent-primary) 26%, transparent) 0%,
-      transparent 70%
-    ),
-    radial-gradient(
-      38% 42% at 82% 8%,
-      color-mix(in oklab, var(--color-status-warning) 14%, transparent) 0%,
-      transparent 72%
-    ),
-    radial-gradient(
-      46% 50% at 68% 92%,
-      color-mix(in oklab, var(--color-accent-hover) 16%, transparent) 0%,
-      transparent 74%
-    );
-  filter: blur(48px);
-  animation: webssh-aurora-drift 24s ease-in-out infinite alternate;
-}
-
-@keyframes webssh-aurora-drift {
-  from {
-    transform: translate3d(-1%, -1%, 0) scale(1);
-  }
-  to {
-    transform: translate3d(2%, 2%, 0) scale(1.08);
-  }
-}
-
-.webssh-welcome-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-4);
-}
-
-.webssh-welcome-copy h1 {
-  margin: 0 0 var(--space-1);
-}
-
-.webssh-welcome-eyebrow {
-  display: inline-block;
-  margin-bottom: var(--space-1);
-  color: var(--color-accent-primary);
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.webssh-quick-connect-row {
-  display: grid;
-  width: 100%;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 6rem);
-  gap: var(--space-2);
-  align-items: end;
-}
-
-.webssh-quick-connect-row > div {
-  min-width: 0;
-}
-
-.webssh-quick-connect-row .ui-input {
-  min-width: 0;
-}
-
-@media (max-width: 560px) {
-  .webssh-quick-connect-row {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-
-  .webssh-quick-connect-row > div:first-child {
-    grid-column: 1 / -1;
-  }
-}
-
-.webssh-welcome-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-
+/* ---- Creator card (ProfileCard) ---------------------------------------- */
 .webssh-profile {
   position: relative;
   min-width: 264px;
@@ -1978,20 +1884,12 @@ html {
 }
 
 @media (max-width: 860px) {
-  .webssh-welcome-hero {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .webssh-profile {
     max-width: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .webssh-aurora {
-    animation: none;
-  }
-
   .webssh-profile,
   .webssh-profile-link {
     transition: none;
@@ -2069,7 +1967,7 @@ html {
   font-family: var(--font-font-mono);
   font-size: var(--font-size-xs);
   color: var(--color-fg-primary);
-  background: var(--color-bg-sunken);
+  background: var(--color-bg-canvas);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
 }
@@ -2091,7 +1989,7 @@ html {
   overflow: hidden;
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
-  background: var(--color-bg-sunken);
+  background: var(--color-bg-canvas);
 }
 
 .ide-gutter {
@@ -2677,126 +2575,6 @@ html {
 }
 
 /* ========================================================================
-   Welcome screen: Quick Connect above the fold
-   ======================================================================== */
-.webssh-welcome-quick-connect {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
-@media (max-width: 860px) {
-  .webssh-landing { grid-template-columns: 1fr !important; }
-}
-
-.webssh-welcome-connect-card {
-  width: min(640px, 100%);
-  background-color: var(--color-bg-surface);
-  border: var(--border-hairline);
-  border-radius: var(--radius-xl);
-  padding: var(--space-6);
-  box-shadow: var(--elevation-2);
-  animation: webssh-card-in var(--motion-max) cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes webssh-card-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .webssh-welcome-connect-card { animation: none; }
-}
-
-.webssh-welcome .ui-input {
-  transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
-}
-
-.webssh-welcome .ui-input:focus {
-  border-color: var(--color-accent-primary);
-  box-shadow: var(--border-focusRing);
-  outline: none;
-}
-
-.webssh-welcome-heading {
-  margin: 0 0 var(--space-1);
-  font-size: var(--font-size-2xl);
-  font-weight: 700;
-  color: var(--color-fg-primary);
-  font-family: var(--font-font-sans);
-  letter-spacing: var(--font-letter-spacing-tight);
-  line-height: 1.15;
-}
-
-.webssh-welcome-subheading {
-  margin: 0 0 var(--space-4);
-  color: var(--color-fg-secondary);
-  font-size: var(--font-size-md);
-  line-height: 1.6;
-  max-width: 44ch;
-}
-
-.webssh-welcome-guest-challenge {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3);
-  background-color: var(--color-bg-elevated);
-  border: var(--border-hairline);
-  border-radius: var(--radius-md);
-}
-
-.webssh-welcome-connect-form {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.webssh-welcome-field-row {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.webssh-welcome-field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
-.webssh-welcome-field label {
-  font-size: var(--font-size-xs);
-  color: var(--color-fg-secondary);
-  font-family: var(--font-font-sans);
-}
-
-.webssh-welcome-section-title {
-  margin: 0 0 var(--space-2);
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-  color: var(--color-fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: var(--font-letter-spacing-tight);
-  font-family: var(--font-font-sans);
-}
-
-.webssh-welcome-recent-card {
-  margin-top: var(--space-2);
-}
-
-.webssh-welcome-admin-settings {
-  margin-top: var(--space-4);
-}
-
-@media (max-width: 640px) {
-  .webssh-welcome-field-row {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* ========================================================================
    Server tools screen
    ======================================================================== */
 .webssh-panel-content[data-testid='screen-server-tools'] h1 {
@@ -3009,6 +2787,7 @@ html {
 .webssh-studio-container--terminal-fullscreen {
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   border-radius: 0;
 }
 

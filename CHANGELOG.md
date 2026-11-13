@@ -10,6 +10,41 @@ Status words are the same as `docs/FEATURES.md`:
   real server in this build.
 - **Conditional** — needs a prerequisite the app cannot supply (gateway, `sudo -n`, a CLI).
 
+## [Unreleased] — 2026-11-13
+
+### Fixed
+
+- **Security Scans CI could not run.** `govulncheck@latest` requires Go ≥ 1.26, but the
+  workflows pinned Go 1.23 with `GOTOOLCHAIN=local`, so `go install` failed and took the
+  whole dependency-audit job down. Go is now pinned to `1.27.4` — the first release with
+  the `net/http` fix for GO-2026-6859 — and `govulncheck` to `v1.9.0`, so the scanner can
+  no longer drift past the toolchain.
+- **Five critical DOMPurify advisories in the shipped bundle.** `monaco-editor@0.57.0`
+  pins `dompurify@3.4.15` and vendors that same copy into its ESM bundle, so the DOM-XSS
+  advisories applied to code that actually ships. The `dompurify` npm dependency is now
+  overridden to `3.4.17`, and Monaco is bumped to `0.58.0-dev-20261111`, which vendors the
+  fixed DOMPurify. `npm audit` reports zero vulnerabilities for the whole tree.
+- **The IDE soft-wrap rule never applied.** `apps/web/src/ui/light-ide.css` used
+  `overflowWrap`, which is invalid in a stylesheet: the declaration parsed and was then
+  dropped by every browser, so long lines never broke. Corrected to `overflow-wrap`.
+- **The Workspace IDE could not be opened.** The `ide` screen lost its only navigation
+  entry in `3436f86`, so the file tree, git, search, command runner and Monaco editor were
+  unreachable by any user while `docs/FEATURES.md` claimed them as Verified. An "IDE" rail
+  entry and an "Open Workspace IDE" palette command restore the path, and a test now opens
+  the screen so the orphan cannot come back unnoticed.
+- **Monaco offered on touch devices.** The editor's mobile fallback was documented but
+  never implemented. A coarse pointer now keeps the textarea and never fetches the editor
+  bundle.
+
+### Added
+
+- **`npm run lint:css`.** Fails the build when a stylesheet declares a property the browser
+  does not know. esbuild is the oracle, so the check matches what the CSS parser does and
+  needs no hand-kept property list. Wired into `npm run lint` and the CI workflow.
+- **Dependency audit gates.** `npm audit --omit=dev --audit-level=high` and
+  `govulncheck ./...` are now part of the documented gate set, and Vitest moved to
+  `4.1.12` to clear the remaining dev-dependency advisories.
+
 ## [Unreleased] — 2026-11-04
 
 ### Added

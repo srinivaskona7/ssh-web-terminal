@@ -115,7 +115,7 @@
   font-size: var(--font-size-md);
   line-height: var(--font-line-height-editor);
   white-space: pre;
-  overflowWrap: normal;
+  overflow-wrap: normal;
   overflow: auto;
   spellcheck: false;
   resize: none;
@@ -128,7 +128,7 @@
 
 .ide-editor-textarea[data-wrap='on'] {
   white-space: pre-wrap;
-  overflowWrap: anywhere;
+  overflow-wrap: anywhere;
 }
 
 /* --- Bracket match layer --- */

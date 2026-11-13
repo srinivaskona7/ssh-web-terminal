@@ -20,7 +20,7 @@
 ## Batch status (final)
 - B01/B09/B10: registry isolates hosts (unit); per-host badges/stale write-block implemented; live two-host e2e owed.
 - B02/B03: per-pane channels + FitAddon resize (unit + B03 e2e).
-- B07/B08: bounded retry + manual-disconnect suppression (code + reconnect unit); socket-drop needs network fixture.
+- B07/B08: bounded retry (code + reconnect unit); manual-disconnect suppression and fresh-shell Reconnect proven by the `e2e/webssh.spec.ts` B07/B08 test (fixed 2026-11-11: Disconnect had armed a retry); socket-drop needs network fixture.
 - F01/F02/F07: OS detection (NAME/VERSION_ID) + Debian/Amazon Linux fixtures (unit, new); real distro images owed.
 - G01–G04/H03: Docker/K8s/tunnel clients exist with honest unavailable states; positive paths need fixtures.
 - J06/J07: `scripts/capacity-ramp.mjs` (100 WS opens: p50 51 ms, p95 52 ms, 0 fail) + `TestConcurrentSessionCreatesIsolate` (20 parallel session creates, distinct IDs, race-free). Measures WS accept + session manager isolation, not full SSH auth. 100 SSH sessions + 30-min soak still owed.
