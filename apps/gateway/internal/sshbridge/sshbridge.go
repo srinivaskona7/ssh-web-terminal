@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -495,8 +496,10 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 	cleanPath, err := SanitizeRemotePath(msg.Path)
 	if err != nil {
 		res.Error = err.Error()
+		log.Printf("[sftp] op=%q path=%q opid=%s error=%s", msg.Op, msg.Path, msg.OpID, err.Error())
 		return res
 	}
+	log.Printf("[sftp] op=%q path=%q opid=%s", msg.Op, cleanPath, msg.OpID)
 
 	switch msg.Op {
 	case "list":
@@ -647,6 +650,7 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 			f, err := b.client.Open(partPath)
 			if err != nil {
 				res.Error = err.Error()
+				log.Printf("[sftp] op=upload_commit path=%q opid=%s error=open_part: %s", cleanPath, msg.OpID, err.Error())
 				return res
 			}
 			h := sha256.New()
@@ -654,11 +658,13 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 			_ = f.Close()
 			if copyErr != nil {
 				res.Error = copyErr.Error()
+				log.Printf("[sftp] op=upload_commit path=%q opid=%s error=hash_part: %s", cleanPath, msg.OpID, copyErr.Error())
 				return res
 			}
 			gotHex := hex.EncodeToString(h.Sum(nil))
 			if !strings.EqualFold(gotHex, msg.Sha256) {
 				res.Error = fmt.Sprintf("%s: got %s want %s", ErrChecksumFailed.Error(), gotHex, msg.Sha256)
+				log.Printf("[sftp] op=upload_commit path=%q opid=%s error=checksum_mismatch: got=%s want=%s", cleanPath, msg.OpID, gotHex, msg.Sha256)
 				return res
 			}
 		}
@@ -666,10 +672,12 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 			_ = b.client.Remove(cleanPath)
 			if err2 := b.client.Rename(partPath, cleanPath); err2 != nil {
 				res.Error = err2.Error()
+				log.Printf("[sftp] op=upload_commit path=%q opid=%s error=rename: %s", cleanPath, msg.OpID, err2.Error())
 				return res
 			}
 		}
 		res.OK = true
+		log.Printf("[sftp] op=upload_commit path=%q opid=%s ok", cleanPath, msg.OpID)
 		return res
 
 	case "download_read", "read_file":
@@ -711,20 +719,24 @@ func (b *SFTPBridge) HandleOp(msg protocol.ControlMessage) protocol.ControlMessa
 		raw, err := base64.StdEncoding.DecodeString(msg.DataBase64)
 		if err != nil {
 			res.Error = err.Error()
+			log.Printf("[sftp] op=write_file path=%q opid=%s error=base64_decode: %s", cleanPath, msg.OpID, err.Error())
 			return res
 		}
 		f, err := b.client.OpenFile(cleanPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY)
 		if err != nil {
 			res.Error = err.Error()
+			log.Printf("[sftp] op=write_file path=%q opid=%s error=open: %s", cleanPath, msg.OpID, err.Error())
 			return res
 		}
 		_, writeErr := f.Write(raw)
 		_ = f.Close()
 		if writeErr != nil {
 			res.Error = writeErr.Error()
+			log.Printf("[sftp] op=write_file path=%q opid=%s error=write: %s", cleanPath, msg.OpID, writeErr.Error())
 			return res
 		}
 		res.OK = true
+		log.Printf("[sftp] op=write_file path=%q opid=%s ok bytes=%d", cleanPath, msg.OpID, len(raw))
 		return res
 
 	default:

@@ -1931,6 +1931,7 @@ export class BrowserSshRelaySessionClient {
     err: unknown
   ): Extract<ControlMessage, { type: 'sftp_result' }> {
     if (err instanceof SftpError) {
+      console.debug(`[webssh:sftp] opid=${opId} error=SFTP_${SftpStatus[err.code] ?? err.code}: ${err.message}`);
       return {
         type: 'sftp_result',
         opId,
@@ -1938,6 +1939,7 @@ export class BrowserSshRelaySessionClient {
         error: `SFTP_${SftpStatus[err.code] ?? err.code}: ${err.message}`
       };
     }
+    console.debug(`[webssh:sftp] opid=${opId} error=${err instanceof Error ? err.message : String(err)}`);
     return {
       type: 'sftp_result',
       opId,
@@ -1953,6 +1955,7 @@ export class BrowserSshRelaySessionClient {
   ): Promise<Extract<ControlMessage, { type: 'sftp_result' }>> {
     const opId = `sftp_${++this.opCounter}`;
     const targetPath = (req.path ?? '~').trim() || '~';
+    console.debug(`[webssh:sftp] op=${req.op} path=${targetPath} opid=${opId}`);
 
     try {
       const sftp = await this.getSftpClient();
@@ -2000,7 +2003,19 @@ export class BrowserSshRelaySessionClient {
 
         case 'write_file': {
           const bytes = req.dataBase64 ? base64ToBytes(req.dataBase64) : new Uint8Array(0);
-          const size = await sftp.writeFile(targetPath, bytes, { atomic: true });
+          let size: number;
+          try {
+            // Atomic write: stage to a .webssh-tmp-* sibling then rename into
+            // place so a failed write never truncates the target.
+            size = await sftp.writeFile(targetPath, bytes, { atomic: true });
+          } catch (err) {
+            // Some SSH servers (notably certain EC2 SFTP subsystems) do not
+            // support SFTP RENAME, or place the temp file and target on
+            // different filesystems. The data was written to the temp file but
+            // the rename into place failed. Fall back to a direct non-atomic
+            // write so the save still succeeds.
+            size = await sftp.writeFile(targetPath, bytes, { atomic: false });
+          }
           return { type: 'sftp_result', opId, ok: true, size };
         }
 
