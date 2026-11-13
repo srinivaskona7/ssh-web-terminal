@@ -278,7 +278,7 @@ export function App(): JSX.Element {
   );
 
   // 1 & 3. Default Font Size (+20% = 17px) & Font Family
-  const [fontSize, setFontSize] = useState<number>(15);
+  const [fontSize, setFontSize] = useState<number>(18);
   const [lineHeight, setLineHeight] = useState<number>(1.25);
   const [fontFamily, setFontFamily] = useState<string>("'JetBrains Mono', 'Fira Code', monospace");
   const [cols, setCols] = useState<number>(80);

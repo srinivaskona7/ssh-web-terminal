@@ -164,7 +164,7 @@ export function LightIde({
   const [files, setFiles] = useState<OpenFile[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
   const [autoSave, setAutoSave] = useState<boolean>(() => loadValue<boolean>('autoSave', true));
-  const [fontSize, setFontSize] = useState<number>(() => loadValue<number>('fontSize', 14));
+  const [fontSize, setFontSize] = useState<number>(() => loadValue<number>('fontSize', 17));
   const [wrap, setWrap] = useState<boolean>(() => loadValue<boolean>('wrap', false));
   const [status, setStatus] = useState<string>('');
   const [cursor, setCursor] = useState<{ line: number; column: number }>({ line: 1, column: 1 });

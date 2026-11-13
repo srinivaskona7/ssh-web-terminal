@@ -86,13 +86,13 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
       'chmod 0400 — Enforced'
     );
 
-    // 4. Switch to Terminal and test interactive shell, 17px default font size, and commands
+    // 4. Switch to Terminal and test interactive shell, 18px default font size, and commands
     const navWorkspace = container.querySelector('[data-testid="nav-workspace"]') as HTMLButtonElement;
     navWorkspace.click();
     await new Promise((r) => setTimeout(r, 10));
 
     let termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
-    expect(termViewport.style.fontSize).toBe('15px');
+    expect(termViewport.style.fontSize).toBe('18px');
     expect(termViewport.style.fontFamily).toContain('JetBrains Mono');
 
     // Local command output lives in the inspector, never duplicated inside the
@@ -110,13 +110,13 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: '=', ctrlKey: true, bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
-    expect(termViewport.style.fontSize).toBe('16px');
+    expect(termViewport.style.fontSize).toBe('19px');
 
     // Decrease font via the global keyboard handler (Cmd+-).
     document.dispatchEvent(new KeyboardEvent('keydown', { key: '-', ctrlKey: true, bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     termViewport = container.querySelector('[data-testid="terminal-viewport"]') as HTMLElement;
-    expect(termViewport.style.fontSize).toBe('15px');
+    expect(termViewport.style.fontSize).toBe('18px');
 
     // 5. Test 'connect root@10.0.0.5' command opening simple Connection modal
     for (const ch of 'connect root@10.0.0.5') {
