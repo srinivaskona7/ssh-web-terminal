@@ -1,5 +1,7 @@
 import type { JSX } from 'preact';
+import { useMemo, useState } from 'preact/hooks';
 import { Badge, Button } from '@webssh/ui-kit';
+import { AsciicastRecorder, parseAsciicastV2, scrubAsciicastOutput } from '../productivity';
 import type { HostProfile } from '../../hosts';
 import { validateGatewayWsUrl, type TransportBackendMode } from '../../transport';
 import type { AuthMethod, KeyPermissionMode, PendingJump } from '../App';
@@ -166,6 +168,19 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
   const targetHost = connectHost.trim();
   const target = `${connectUser.trim() || 'user'}@${targetHost || 'host'}:${connectPort.trim() || '22'}`;
 
+  // Clearly-labelled sample recording for the welcome screen. This is NOT live
+  // SSH output — it is a bundled asciicast v2 demo so visitors see what a
+  // session looks like without connecting. See non-negotiable #5.
+  const demoCast = useMemo(() => {
+    const nl = String.fromCharCode(10);
+    const rec = new AsciicastRecorder(80, 24, 'Production Incident Check');
+    rec.recordOutput(`$ kubectl get pods -n ingress${nl}`, Date.now() + 500);
+    rec.recordOutput(`NAME                       READY   STATUS    RESTARTS   AGE${nl}`, Date.now() + 1500);
+    rec.recordOutput(`gateway-7c9f8b6d4-x2k9p    1/1     Running   0          14d${nl}`, Date.now() + 2500);
+    return parseAsciicastV2(rec.exportCast());
+  }, []);
+  const [scrubberSec, setScrubberSec] = useState<number>(3);
+
   return (
     <div className="webssh-panel-content webssh-welcome webssh-welcome-container" data-testid="screen-welcome">
       <div className="webssh-welcome-landing" data-testid="welcome-quick-connect-card">
@@ -307,6 +322,24 @@ export function WelcomeScreen(props: WelcomeScreenProps): JSX.Element {
               <p className={`webssh-welcome-route-host${targetHost ? '' : ' webssh-welcome-route-host--empty'}`} data-testid="welcome-route-target">{target}</p>
             </li>
           </ol>
+        </section>
+
+        <section className="webssh-welcome-demo" aria-labelledby="welcome-demo-title" data-testid="welcome-demo-recording">
+          <h2 id="welcome-demo-title" className="webssh-welcome-card-title">Sample recording (demo)</h2>
+          <p className="webssh-welcome-hint">Sample recording — not output from your server. Replay of a bundled asciicast v2 capture.</p>
+          <input
+            type="range"
+            min={0}
+            max={3}
+            step={0.5}
+            value={scrubberSec}
+            aria-label="Replay timeline scrubber"
+            onInput={(e) => setScrubberSec(Number((e.target as HTMLInputElement).value))}
+            data-testid="welcome-demo-scrubber"
+          />
+          <pre className="webssh-welcome-demo-terminal" data-testid="welcome-demo-output">
+            {scrubAsciicastOutput(demoCast.events, scrubberSec)}
+          </pre>
         </section>
       </div>
     </div>

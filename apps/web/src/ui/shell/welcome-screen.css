@@ -430,3 +430,26 @@ p.webssh-welcome-route-host {
     line-height: 44px;
   }
 }
+
+.webssh-welcome-demo {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+}
+
+.webssh-welcome-demo-terminal {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-fg-primary);
+  font-family: var(--font-font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--font-line-height-terminal);
+  white-space: pre;
+  overflow-x: auto;
+  min-height: 6rem;
+}
