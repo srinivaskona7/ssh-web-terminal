@@ -648,6 +648,14 @@ export function App(): JSX.Element {
   const [paletteQuery, setPaletteQuery] = useState('');
   const [hostKeyModal, setHostKeyModal] = useState<'none' | 'tofu' | 'mismatch'>('none');
   const [hosts, setHosts] = useState<HostProfile[]>(() => hostRegistry.list());
+  const [connectionTick, setConnectionTick] = useState<number>(0);
+  const [remoteActiveSessions, setRemoteActiveSessions] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (activeScreen === 'hosts') {
+      void refreshRemoteActiveSessions();
+    }
+  }, [activeScreen]);
   const [cacheRepairStatus, setCacheRepairStatus] = useState<string>('');
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance');
   const [hostSearch, setHostSearch] = useState('');
@@ -1564,6 +1572,7 @@ export function App(): JSX.Element {
       suppressedReconnectRef.current.add(connection.id);
       connectionRegistryRef.current.close(connection.id);
     }
+    setConnectionTick((n) => n + 1);
     setDisconnectedByUser(true);
     liveSessionRef.current = null;
     setConnectionState('disconnected');
@@ -1775,12 +1784,27 @@ export function App(): JSX.Element {
     setConnectUser(h.user);
     setConnectHost(h.host);
     setConnectPort(String(h.port));
+    if (h.authMethod) setAuthMethod(h.authMethod);
     setPendingJump({
       targetHost: h.host,
       targetPort: h.port,
       hops: h.jumpHops.map((j) => ({ ...j }))
     });
     setConnectModalOpen(true);
+  };
+
+  const refreshRemoteActiveSessions = async (): Promise<void> => {
+    try {
+      const raw = gatewayUrl.trim();
+      const wsBase = raw.replace(/\/ws\/?$/, '').replace(/\/$/, '');
+      const httpBase = wsBase.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+      const res = await fetch(`${httpBase}/healthz`);
+      if (!res.ok) throw new Error('bad status');
+      const json = (await res.json()) as { activeSessions?: number };
+      setRemoteActiveSessions(typeof json.activeSessions === 'number' ? json.activeSessions : null);
+    } catch {
+      setRemoteActiveSessions(null);
+    }
   };
 
   // ---- Resource metrics (CPU / RAM / Disk) collected via SSH exec ----
@@ -2383,6 +2407,7 @@ export function App(): JSX.Element {
           );
         }
         setConnectionState('connected');
+        setConnectionTick((n) => n + 1);
         setConnectedAt(Date.now());
         setRttMs(0);
         setReconnectCount(0);
@@ -4236,6 +4261,44 @@ export function App(): JSX.Element {
                   ))}
                 </tbody>
               </table>
+              <Card testId="connected-sessions-panel">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h2>Connected sessions ({connectionRegistryRef.current.list().filter((c) => c.client.isConnected).length})</h2>
+                  <Button variant="ghost" testId="refresh-remote-sessions-btn" onClick={() => void refreshRemoteActiveSessions()}>
+                    Refresh site-wide
+                  </Button>
+                </div>
+                <p className="ws-mod-muted" data-testid="remote-active-sessions">
+                  {transportMode === 'cloudflare-relay' ? 'Relay' : 'Gateway'} site-wide: {remoteActiveSessions === null ? 'not reported' : `${remoteActiveSessions} active session(s)`}
+                </p>
+                {connectionRegistryRef.current.list().length === 0 ? (
+                  <p className="ws-mod-muted">No live sessions. Connect to a host to see it here.</p>
+                ) : (
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                    {connectionRegistryRef.current.list().map((c) => (
+                      <li key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 'var(--space-2) 0', borderTop: 'var(--border-hairline)' }}>
+                        <span>
+                          <strong>{c.user}@{c.host}:{c.port}</strong>{' '}
+                          <Badge tone={c.client.isConnected ? 'success' : 'neutral'}>{c.client.isConnected ? 'connected' : 'disconnected'}</Badge>
+                        </span>
+                        <Button
+                          variant="ghost"
+                          testId={`disconnect-session-${c.id}`}
+                          onClick={() => {
+                            if (c.client.isConnected) {
+                              suppressedReconnectRef.current.add(c.id);
+                              connectionRegistryRef.current.close(c.id);
+                              setConnectionTick((n) => n + 1);
+                            }
+                          }}
+                        >
+                          Disconnect
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Card>
               <Card>
                 <h2>Import ~/.ssh/config</h2>
                 <textarea

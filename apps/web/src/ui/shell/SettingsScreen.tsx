@@ -322,17 +322,22 @@ export function SettingsScreen({
               <Button variant="default" testId="product-sign-in-submit" onClick={() => void administrator.handleRelayLogin()}>Sign in</Button>
             </div>
           )}
-          <label htmlFor="welcome-transport-mode-select">SSH Transport Mode</label>
-          <select id="welcome-transport-mode-select" className="ui-input" value={administrator.transportMode} onChange={(e) => { const m = (e.target as HTMLSelectElement).value; administrator.setTransportMode(m); try { globalThis.localStorage?.setItem('webssh.transport.mode', m); } catch {} }} data-testid="welcome-transport-mode-select">
-            <option value="go-gateway">Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)</option>
-            <option value="cloudflare-relay">Cloudflare Worker SSH Relay (Terminal, tabs; SFTP via gateway preferred)</option>
-          </select>
-          <label htmlFor="welcome-gateway-url-input">{administrator.transportMode === 'cloudflare-relay' ? 'Relay endpoint (wss://…/ws)' : 'Gateway endpoint (wss://…/ws)'}</label>
-          <input id="welcome-gateway-url-input" type="text" className="ui-input" value={administrator.gatewayUrl} onInput={(e) => { const v = (e.target as HTMLInputElement).value; administrator.setGatewayUrl(v); administrator.setGatewayProbeStatus(null); try { globalThis.localStorage?.setItem('webssh.gateway.wsUrl', v); } catch {} }} data-testid="welcome-gateway-url-input" />
-          <label htmlFor="welcome-gateway-token-input">Gateway Auth Token (optional)</label>
-          <input id="welcome-gateway-token-input" type="password" className="ui-input" value={administrator.gatewayAuthToken} onInput={(e) => { const v = (e.target as HTMLInputElement).value; administrator.setGatewayAuthToken(v); try { globalThis.sessionStorage?.setItem('webssh.gateway.authToken', v); } catch {} }} data-testid="welcome-gateway-token-input" />
-          <Button variant="default" testId="test-gateway-btn" onClick={() => void administrator.handleTestGateway(administrator.gatewayUrl)}>Test Gateway</Button>
-          {administrator.gatewayProbeStatus ? <Badge tone={administrator.gatewayProbeStatus.ok ? 'success' : 'danger'} testId="gateway-probe-badge">{administrator.gatewayProbeStatus.message}</Badge> : null}
+          <details data-testid="advanced-transport-settings">
+            <summary>Advanced — transport endpoints</summary>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
+              <label htmlFor="welcome-transport-mode-select">SSH Transport Mode</label>
+              <select id="welcome-transport-mode-select" className="ui-input" value={administrator.transportMode} onChange={(e) => { const m = (e.target as HTMLSelectElement).value; administrator.setTransportMode(m); try { globalThis.localStorage?.setItem('webssh.transport.mode', m); } catch {} }} data-testid="welcome-transport-mode-select">
+                <option value="go-gateway">Go SSH/SFTP Gateway (Full PTY + SFTP + Editor + Tunnels + 4 MiB Resume)</option>
+                <option value="cloudflare-relay">Cloudflare Worker SSH Relay (Terminal, tabs; SFTP via gateway preferred)</option>
+              </select>
+              <label htmlFor="welcome-gateway-url-input">{administrator.transportMode === 'cloudflare-relay' ? 'Relay endpoint (wss://…/ws)' : 'Gateway endpoint (wss://…/ws)'}</label>
+              <input id="welcome-gateway-url-input" type="text" className="ui-input" value={administrator.gatewayUrl} onInput={(e) => { const v = (e.target as HTMLInputElement).value; administrator.setGatewayUrl(v); administrator.setGatewayProbeStatus(null); try { globalThis.localStorage?.setItem('webssh.gateway.wsUrl', v); } catch {} }} data-testid="welcome-gateway-url-input" />
+              <label htmlFor="welcome-gateway-token-input">Gateway Auth Token (optional)</label>
+              <input id="welcome-gateway-token-input" type="password" className="ui-input" value={administrator.gatewayAuthToken} onInput={(e) => { const v = (e.target as HTMLInputElement).value; administrator.setGatewayAuthToken(v); try { globalThis.sessionStorage?.setItem('webssh.gateway.authToken', v); } catch {} }} data-testid="welcome-gateway-token-input" />
+              <Button variant="default" testId="test-gateway-btn" onClick={() => void administrator.handleTestGateway(administrator.gatewayUrl)}>Test Gateway</Button>
+              {administrator.gatewayProbeStatus ? <Badge tone={administrator.gatewayProbeStatus.ok ? 'success' : 'danger'} testId="gateway-probe-badge">{administrator.gatewayProbeStatus.message}</Badge> : null}
+            </div>
+          </details>
         </div>
       </Card>
       ) : null}

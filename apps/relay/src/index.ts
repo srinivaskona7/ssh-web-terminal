@@ -134,6 +134,13 @@ export class RelayUserQuotaDO {
       );
     }
 
+    if (url.pathname === '/count') {
+      return new Response(
+        JSON.stringify({ ok: true, activeSessions: this.activeSessions.size }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     return new Response(JSON.stringify({ ok: false, error: 'Unknown DO action' }), { status: 404 });
   }
 }
@@ -555,6 +562,17 @@ export async function handleRelayRequest(
       }
     }
     if (!env.USER_QUOTA_DO) missingConfiguration.push('USER_QUOTA_DO');
+    let relayActiveSessions = 0;
+    if (env.USER_QUOTA_DO) {
+      try {
+        const gStub = env.USER_QUOTA_DO.get(env.USER_QUOTA_DO.idFromName('__global__'));
+        const gRes = await gStub.fetch('https://quota.internal/count');
+        const gJson = (await gRes.json().catch(() => ({}))) as { activeSessions?: number };
+        relayActiveSessions = typeof gJson.activeSessions === 'number' ? gJson.activeSessions : 0;
+      } catch {
+        relayActiveSessions = 0;
+      }
+    }
     return jsonResponse(
       200,
       {
@@ -572,7 +590,8 @@ export async function handleRelayRequest(
         allowedPorts: (env.ALLOWED_SSH_PORTS ?? '22,2222')
           .split(',')
           .map((p) => Number(p.trim()))
-          .filter(Boolean)
+          .filter(Boolean),
+        activeSessions: relayActiveSessions
       },
       corsHeader ?? '*'
     );
@@ -709,12 +728,34 @@ export async function handleRelayRequest(
         corsHeader
       );
     }
+    // Global counter instance (shared across all users) for the site-wide
+    // "N sessions connected" figure. Reuses the same DO class; a very high
+    // cap means it never blocks, it only counts.
+    const globalStub = env.USER_QUOTA_DO.get(env.USER_QUOTA_DO.idFromName('__global__'));
+    try {
+      await globalStub.fetch('https://quota.internal/acquire', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connId, maxConcurrent: 1_000_000, maxAttemptsPerMin: 1_000_000, nowMs })
+      });
+    } catch {
+      // best-effort counter; never block a connection
+    }
     let released = false;
     releaseQuota = async () => {
       if (released) return;
       released = true;
       try {
         await stub.fetch('https://quota.internal/release', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connId })
+        });
+      } catch {
+        // ignore release errors
+      }
+      try {
+        await globalStub.fetch('https://quota.internal/release', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ connId })
