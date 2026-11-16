@@ -416,8 +416,31 @@ export function App(): JSX.Element {
   // 3. Fresh Default State (Zero Pre-Populated Mock Data)
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [rttMs, setRttMs] = useState(0);
+  const [rttHistory, setRttHistory] = useState<number[]>([]);
+  const [speedTestResult, setSpeedTestResult] = useState<string | null>(null);
+  const [speedTestRunning, setSpeedTestRunning] = useState(false);
+  // (rttTrend, rttTrendArrow, connQualityLabel defined below)
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [reconnectCount, setReconnectCount] = useState(0);
+  const rttTrend: 'improving' | 'stable' | 'degrading' = (() => {
+    if (rttHistory.length < 4) return 'stable';
+    const half = Math.floor(rttHistory.length / 2);
+    const first = rttHistory.slice(0, half);
+    const last = rttHistory.slice(-half);
+    const avg = (a: number[]) => a.reduce((s, v) => s + v, 0) / (a.length || 1);
+    const delta = avg(last) - avg(first);
+    if (delta < -15) return 'improving';
+    if (delta > 15) return 'degrading';
+    return 'stable';
+  })();
+  const rttTrendArrow = rttTrend === 'improving' ? '↓' : rttTrend === 'degrading' ? '↑' : '→';
+  const connQualityLabel = (() => {
+    if (rttMs <= 0) return 'n/a';
+    if (reconnectCount > 3) return 'Poor';
+    if (rttMs < 150 && rttTrend !== 'degrading') return 'Good';
+    if (rttMs < 400) return 'Fair';
+    return 'Poor';
+  })();
   const [reconnectNotice, setReconnectNotice] = useState<string | null>(null);
   const [reconnectMessage, setReconnectMessage] = useState<string | null>(null);
   // Set by Disconnect and cleared by the next successful connect, so an ended
@@ -1795,6 +1818,31 @@ export function App(): JSX.Element {
     setConnectModalOpen(true);
   };
 
+  const runSpeedTest = async (): Promise<void> => {
+    if (!remoteSession || !remoteSession.isConnected()) {
+      setSpeedTestResult('Not connected');
+      return;
+    }
+    setSpeedTestRunning(true);
+    setSpeedTestResult(null);
+    try {
+      const cmd = "curl -s -o /dev/null -w '%{speed_download}' --max-time 20 https://speed.cloudflare.com/__down?bytes=1048576 2>/dev/null || echo 'ERR'";
+      const res = await remoteSession.exec(cmd, { timeoutMs: 25000 });
+      const out = (res.stdout || '').trim();
+      if (!out || out === 'ERR' || !Number.isFinite(Number(out))) {
+        setSpeedTestResult('not reported (curl unavailable or no internet)');
+        return;
+      }
+      const bps = Number(out);
+      const mbps = (bps * 8) / 1_000_000;
+      setSpeedTestResult(`${mbps.toFixed(2)} Mbps down`);
+    } catch (err) {
+      setSpeedTestResult(`failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSpeedTestRunning(false);
+    }
+  };
+
   const refreshRemoteActiveSessions = async (): Promise<void> => {
     try {
       const raw = gatewayUrl.trim();
@@ -2270,6 +2318,9 @@ export function App(): JSX.Element {
         },
         onStateChange: (st: 'connected' | 'reconnecting' | 'disconnected', rtt: number) => {
           setRttMs(rtt);
+          if (rtt > 0) {
+            setRttHistory((prev) => [...prev.slice(-19), rtt]);
+          }
           if (st === 'connected') {
             return;
           }
@@ -2410,8 +2461,10 @@ export function App(): JSX.Element {
         }
         setConnectionState('connected');
         setConnectionTick((n) => n + 1);
+        setRttHistory([]);
         setConnectedAt(Date.now());
         setRttMs(0);
+    setRttHistory([]);
         setReconnectCount(0);
         setReconnectNotice(null);
         setReconnectMessage(null);
@@ -5181,6 +5234,10 @@ export function App(): JSX.Element {
                 <span>{formatRtt(rttMs)}</span>
                 <span aria-hidden="true">·</span>
                 <span>{formatUptime(connectedAt !== null ? Date.now() - connectedAt : 0)}</span>
+                <span aria-hidden="true">·</span>
+                <span data-testid="conn-quality-badge" title={`RTT trend: ${rttTrend}; reconnects: ${reconnectCount}`}>
+                  {connQualityLabel} {rttTrendArrow}
+                </span>
               </span>
             ) : null}
             {connectionPanelOpen ? (
@@ -5227,6 +5284,23 @@ export function App(): JSX.Element {
                   ))}
                   {connectionState === 'connected' && (
                     <>
+                      <div className="webssh-conn-row">
+                        <dt>Quality</dt>
+                        <dd>{connQualityLabel} ({rttTrend})</dd>
+                      </div>
+                      <div className="webssh-conn-row">
+                        <dt>Packet loss (est.)</dt>
+                        <dd>{reconnectCount === 0 ? '0%' : `~${Math.min(100, reconnectCount * 10)}% (${reconnectCount} reconnects)`}</dd>
+                      </div>
+                      <div className="webssh-conn-row">
+                        <dt>Internet speed</dt>
+                        <dd>
+                          <Button variant="ghost" onClick={() => void runSpeedTest()} disabled={speedTestRunning} testId="run-speed-test-btn">
+                            {speedTestRunning ? 'Testing…' : 'Run speed test'}
+                          </Button>
+                          {speedTestResult ? <span style={{ marginLeft: 'var(--space-2)' }}>{speedTestResult}</span> : null}
+                        </dd>
+                      </div>
                       <div className="webssh-conn-row">
                         <dt>Transport</dt>
                         <dd>{transportMode === 'go-gateway' ? 'Go Gateway (SSH+SFTP)' : 'Cloudflare Relay (TCP only)'}</dd>
