@@ -383,7 +383,9 @@ export function App(): JSX.Element {
   const [railWidth, setRailWidth] = useState<number>(() => prefsStore.get().railWidthPx);
   const [railOpen, setRailOpen] = useState<boolean>(false);
   const [cursorShape, setCursorShape] = useState<CursorShape>(() => prefsStore.get().surface.cursorShape);
-  const [zenMode, setZenMode] = useState(false);
+  const [zenMode, setZenMode] = useState<boolean>(() => {
+    try { return window.localStorage.getItem('webssh.zenMode') === '1'; } catch { return false; }
+  });
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isPseudoFullscreen, setIsPseudoFullscreen] = useState(false);
   const [terminalFullscreen, setTerminalFullscreen] = useState(false);
@@ -2906,6 +2908,10 @@ export function App(): JSX.Element {
     applyThemeToDocument(activeTheme);
     prefsStore.update({ activeThemeId: activeTheme });
   }, [activeTheme, prefsStore]);
+
+  useEffect(() => {
+    try { window.localStorage.setItem('webssh.zenMode', zenMode ? '1' : '0'); } catch {}
+  }, [zenMode]);
 
   useEffect(() => {
     prefsStore.update({ density });
@@ -5634,6 +5640,26 @@ export function App(): JSX.Element {
           </div>
         </form>
       </Modal>
+
+      <nav className="webssh-bottom-nav" data-testid="bottom-nav" aria-label="Primary navigation">
+        {[
+          ['welcome', 'Home'],
+          ['workspace', 'Terminal'],
+          ['files', 'Files'],
+          ['ide', 'Editor'],
+          ['hosts', 'Hosts'],
+          ['settings', 'Settings']
+        ].map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            className={`webssh-bottom-nav-btn ${activeScreen === id ? 'is-active' : ''}`}
+            onClick={() => setActiveScreen(id as ScreenId)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
 
       <Modal
         open={paletteOpen}
