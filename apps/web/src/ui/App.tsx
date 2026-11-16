@@ -370,7 +370,7 @@ export function App(): JSX.Element {
   const [ideMode, setIdeMode] = useState<boolean>(false);
   const [activeTheme, setActiveTheme] = useState<ThemeId>(() => {
     const stored = prefsStore.get().activeThemeId;
-    return (THEME_IDS as readonly string[]).includes(stored) ? (stored as ThemeId) : 'dark';
+    return (THEME_IDS as readonly string[]).includes(stored) ? (stored as ThemeId) : 'light';
   });
   const [density, setDensity] = useState<'comfortable' | 'compact'>(() => {
     const stored = prefsStore.get().density;
@@ -876,7 +876,7 @@ export function App(): JSX.Element {
     [generatedPubKey]
   );
 
-  const terminalPalette = THEMES[activeTheme] ?? THEMES.dark;
+  const terminalPalette = THEMES[activeTheme] ?? THEMES.light;
   const recentHosts = [...hosts]
     .filter((h) => typeof h.lastConnectedAt === 'number')
     .sort((a, b) => (b.lastConnectedAt ?? 0) - (a.lastConnectedAt ?? 0))
