@@ -669,6 +669,7 @@ export function App(): JSX.Element {
   const [pemFp, setPemFp] = useState('');
   const [vaultLocked, setVaultLocked] = useState(false);
   const [fileFilter, setFileFilter] = useState('');
+  const [sftpViewMode, setSftpViewMode] = useState<'list' | 'grid'>('list');
   const [transferStatus, setTransferStatus] = useState<string>('Disconnected — Connect to an SSH host to browse SFTP files');
   const [sftpRawEntries, setSftpRawEntries] = useState<
     { name: string; path: string; size: number; mode: string; modTime: number; isDir: boolean }[]
@@ -4391,6 +4392,10 @@ export function App(): JSX.Element {
                 <Badge tone="neutral" testId="storage-quota-badge">
                   Storage Guard: {quotaSnap.percentUsed}% of 256 MiB cap (256 KiB chunks, SHA-256 verified)
                 </Badge>
+                <div style={{ display: 'flex', gap: 'var(--space-1)' }}>
+                  <Button variant={sftpViewMode === 'list' ? 'primary' : 'default'} onClick={() => setSftpViewMode('list')} testId="sftp-view-list">List</Button>
+                  <Button variant={sftpViewMode === 'grid' ? 'primary' : 'default'} onClick={() => setSftpViewMode('grid')} testId="sftp-view-grid">Grid</Button>
+                </div>
               </div>
               <nav aria-label="Current path" data-testid="sftp-path-breadcrumb" style={{ display: 'flex', gap: 'var(--space-1)', alignItems: 'center', flexWrap: 'wrap', fontSize: 'var(--font-size-sm)' }}>
                 <span className="ws-mod-muted">Path:</span>
@@ -4513,6 +4518,7 @@ export function App(): JSX.Element {
                 >
                 <p className="ws-mod-muted">Drop files here to upload them into {sftpCurrentPath}.</p>
                 <div style={{ overflowX: 'auto' }}>
+                {sftpViewMode === 'list' ? (
                 <table className="ws-mod-table" data-testid="sftp-remote-table">
                   <thead>
                     <tr>
@@ -4588,6 +4594,33 @@ export function App(): JSX.Element {
                     ))}
                   </tbody>
                 </table>
+                ) : (
+                <div data-testid="sftp-grid-view" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(7rem, 1fr))', gap: 'var(--space-2)' }}>
+                  {sftpEntries.map((entry) => (
+                    <button
+                      key={entry.path}
+                      type="button"
+                      onClick={() => (entry.isDir ? void refreshSftpDirectory(entry.path) : void loadRemoteFileIntoEditor(entry.path))}
+                      data-testid={`sftp-grid-${entry.name}`}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        gap: 'var(--space-1)',
+                        padding: 'var(--space-2)',
+                        border: 'var(--border-hairline)',
+                        borderRadius: 'var(--radius-md)',
+                        background: 'var(--color-bg-surface)',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <Icon name={entry.isDir ? 'folder' : 'file'} size={32} />
+                      <span style={{ fontSize: 'var(--font-size-xs)', textAlign: 'center', wordBreak: 'break-word' }}>{entry.name}</span>
+                      {!entry.isDir ? <span className="ws-mod-muted" style={{ fontSize: 'var(--font-size-xs)' }}>{entry.size} B</span> : null}
+                    </button>
+                  ))}
+                </div>
+                )}
                 </div>
                 </div>
                 {renameTarget ? (
