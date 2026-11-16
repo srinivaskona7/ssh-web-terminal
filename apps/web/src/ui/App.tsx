@@ -4342,18 +4342,20 @@ export function App(): JSX.Element {
                         Connect
                       </Button>
                       </td><td>
-                      <Button
-                        variant="ghost"
-                        testId={`remove-host-${h.alias}`}
-                        onClick={() => {
-                          hostRegistry.remove(h.id);
-                          setHosts(hostRegistry.list());
-                        }}
-                      >
-                        Remove
-                      </Button>
-                      </td><td>
                       <details><summary>⋯</summary>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', padding: 'var(--space-1)' }}>
+                          <Button
+                            variant="ghost"
+                            testId={`remove-host-${h.alias}`}
+                            onClick={() => {
+                              if (!window.confirm(`Remove saved host ${h.alias}?`)) return;
+                              hostRegistry.remove(h.id);
+                              setHosts(hostRegistry.list());
+                            }}
+                          >
+                            Remove host
+                          </Button>
+                        </div>
                       <p style={{ fontSize: 'var(--font-size-xs)' }}>{h.jumpHops.length > 0 ? <p>ProxyJump: {h.jumpHops.map((j) => `${j.user}@${j.host}:${j.port}`).join(' -> ')}</p> : null}</p>
                       </details>
                       </td></tr>
@@ -5234,10 +5236,6 @@ export function App(): JSX.Element {
                 <span>{formatRtt(rttMs)}</span>
                 <span aria-hidden="true">·</span>
                 <span>{formatUptime(connectedAt !== null ? Date.now() - connectedAt : 0)}</span>
-                <span aria-hidden="true">·</span>
-                <span data-testid="conn-quality-badge" title={`RTT trend: ${rttTrend}; reconnects: ${reconnectCount}`}>
-                  {connQualityLabel} {rttTrendArrow}
-                </span>
               </span>
             ) : null}
             {connectionPanelOpen ? (
