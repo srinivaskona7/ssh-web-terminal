@@ -220,9 +220,8 @@ export function SettingsScreen({
             <div style={{ color: 'var(--color-prompt-host)', display: 'inline', marginLeft: '1px' }}>localhost</div>
             <div style={{ color: 'var(--color-prompt-dir)', display: 'inline', marginLeft: '1px' }}>{':~/projects'}</div>
             <div style={{ color: 'var(--color-prompt-arrow)', display: 'inline', marginLeft: '1px' }}> $</div>
-            <div style={{ marginTop: 'var(--space-2)', color: 'var(--ansi-green)' }}>✔ Connected via WebSocket (wss)</div>
-            <div style={{ marginTop: 'var(--space-1)', color: 'var(--ansi-blue)' }}>→ load average: 0.12, 0.08, 0.05</div>
-            <div style={{ marginTop: 'var(--space-1)', color: 'var(--ansi-yellow)' }}>→ 3 containers running · 2 pods ready</div>
+            <div style={{ marginTop: 'var(--space-2)', color: 'var(--ansi-green)' }}>✔ Sample terminal — not a live session</div>
+            <div style={{ marginTop: 'var(--space-1)', color: 'var(--color-fg-muted)', fontSize: 'var(--font-size-xs)' }}>Metrics appear here only when a server is connected.</div>
             <div style={{ marginTop: 'var(--space-3)', borderTop: 'var(--border-hairline)', paddingTop: 'var(--space-2)', color: 'var(--color-fg-muted)', fontSize: 'var(--font-size-xs)' }}>
               Cursor: {cursorShape} · Theme: {activeTheme} · Font: {fontSize}px
             </div>

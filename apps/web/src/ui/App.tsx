@@ -2303,17 +2303,20 @@ export function App(): JSX.Element {
           .list()
           .find((h) => h.host === hostVal && h.port === portNum && h.user === userVal);
         hostRegistry.upsert(
-          sourceHost ?? {
-            id: `host-${userVal}-${hostVal}-${portNum}`,
-            alias: hostVal,
-            host: hostVal,
-            port: portNum,
-            user: userVal,
-            folder: 'Connected',
-            tags: [authMethod === 'Password' ? 'password' : 'key-400'],
-            favorite: true,
-            jumpHops: []
-          }
+          sourceHost
+            ? { ...sourceHost, authMethod }
+            : {
+                id: `host-${userVal}-${hostVal}-${portNum}`,
+                alias: hostVal,
+                host: hostVal,
+                port: portNum,
+                user: userVal,
+                authMethod,
+                folder: 'Connected',
+                tags: [authMethod === 'Password' ? 'password' : 'key-400'],
+                favorite: true,
+                jumpHops: []
+              }
         );
         setHosts(hostRegistry.list());
         setConnectedUser(userVal);
@@ -2393,7 +2396,7 @@ export function App(): JSX.Element {
           .list()
           .find((h) => h.host === hostVal && h.user === userVal && h.port === portNum);
         if (matchedHost) {
-          hostRegistry.upsert({ ...matchedHost, lastConnectedAt: Date.now() });
+          hostRegistry.upsert({ ...matchedHost, authMethod, lastConnectedAt: Date.now() });
           setHosts(hostRegistry.list());
         }
         setConnectModalOpen(false);
@@ -4095,6 +4098,9 @@ export function App(): JSX.Element {
             <div className="webssh-panel-content" data-testid="screen-hosts">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h1>Saved Hosts</h1>
+                <Badge tone="neutral" testId="connected-sessions-count">
+                  {connectionRegistryRef.current.list().filter((c) => c.client.isConnected).length} connected session(s)
+                </Badge>
                 <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                   <Button variant="default" onClick={() => setHostKeyModal('tofu')} testId="trigger-tofu-modal-btn">
                     Verify Host Key (TOFU)
@@ -4210,6 +4216,17 @@ export function App(): JSX.Element {
                         onClick={() => openConnectForProfile(h)}
                       >
                         Connect
+                      </Button>
+                      </td><td>
+                      <Button
+                        variant="ghost"
+                        testId={`remove-host-${h.alias}`}
+                        onClick={() => {
+                          hostRegistry.remove(h.id);
+                          setHosts(hostRegistry.list());
+                        }}
+                      >
+                        Remove
                       </Button>
                       </td><td>
                       <details><summary>⋯</summary>

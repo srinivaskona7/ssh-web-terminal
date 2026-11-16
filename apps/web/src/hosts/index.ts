@@ -26,6 +26,8 @@ export interface HostProfile {
   host: string;
   port: number;
   user: string;
+  /** Auth method used on the last successful connect. Never a secret. */
+  authMethod?: 'Password' | 'Private Key (.pem / id_rsa)' | 'Argon2id Ed25519 Key';
   keyFingerprint?: string;
   folder?: string;
   tags: string[];
@@ -282,6 +284,12 @@ function sanitizeHostProfile(raw: unknown): HostProfile | null {
     port,
     user,
     keyFingerprint: typeof obj.keyFingerprint === 'string' ? obj.keyFingerprint : undefined,
+    authMethod:
+      obj.authMethod === 'Password' ||
+      obj.authMethod === 'Private Key (.pem / id_rsa)' ||
+      obj.authMethod === 'Argon2id Ed25519 Key'
+        ? (obj.authMethod as HostProfile['authMethod'])
+        : undefined,
     folder: typeof obj.folder === 'string' ? obj.folder : undefined,
     tags,
     favorite: Boolean(obj.favorite),
