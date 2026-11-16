@@ -808,7 +808,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     (container.querySelector('[data-testid="welcome-saved-hosts-btn"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 50));
     expect(container.textContent).toContain('new-box');
-    const profileBtn = container.querySelector('[data-testid="host-card-new-box"] button');
+    const profileBtn = container.querySelector('[data-testid="connect-host-new-box"]');
     expect(profileBtn).toBeTruthy();
 
     // Selecting a saved profile fills the connection form.
@@ -839,7 +839,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
     // Connect modal, opened from a saved profile: no key yet, so no authorized_keys line at all.
     q<HTMLButtonElement>('welcome-saved-hosts-btn')?.click();
     await new Promise((r) => setTimeout(r, 150));
-    container.querySelector<HTMLButtonElement>('[data-testid="host-card-build-01"] button')?.click();
+    container.querySelector<HTMLButtonElement>('[data-testid="connect-host-build-01"]')?.click();
     await new Promise((r) => setTimeout(r, 150));
     expect(q('connect-modal')).toBeTruthy();
     expect(q('connect-pubkey-snippet')).toBeNull();
@@ -910,7 +910,7 @@ describe('App UI Shell Integration Suite (M4-M13)', () => {
       const q = (id: string) => container.querySelector<HTMLElement>(`[data-testid="${id}"]`);
       q('welcome-saved-hosts-btn')?.click();
       await new Promise((r) => setTimeout(r, 150));
-      container.querySelector<HTMLButtonElement>('[data-testid="host-card-behind-bastion"] button')?.click();
+      container.querySelector<HTMLButtonElement>('[data-testid="connect-host-behind-bastion"]')?.click();
       await new Promise((r) => setTimeout(r, 150));
       const pass = q('connect-password-input') as HTMLInputElement;
       pass.value = 'target-secret';

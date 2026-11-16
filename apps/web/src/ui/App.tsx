@@ -659,6 +659,7 @@ export function App(): JSX.Element {
   const [cacheRepairStatus, setCacheRepairStatus] = useState<string>('');
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('appearance');
   const [hostSearch, setHostSearch] = useState('');
+  const [hostFolderFilter, setHostFolderFilter] = useState('');
   const [hostTransferStatus, setHostTransferStatus] = useState('');
   const [sshConfigInput, setSshConfigInput] = useState('');
   // Empty until the vault generates a key in this session: no placeholder key is ever shown or sent.
@@ -4131,6 +4132,18 @@ export function App(): JSX.Element {
                     Verify Host Key (TOFU)
                   </Button>
                   <Button
+                    variant="ghost"
+                    testId="clear-all-hosts-btn"
+                    onClick={() => {
+                      if (!window.confirm('Remove all saved hosts from this browser? This cannot be undone.')) return;
+                      for (const h of hostRegistry.list()) hostRegistry.remove(h.id);
+                      setHosts(hostRegistry.list());
+                      setHostTransferStatus('Cleared all saved hosts.');
+                    }}
+                  >
+                    Clear all hosts
+                  </Button>
+                  <Button
                     variant="default"
                     testId="export-hosts-btn"
                     onClick={() => {
@@ -4203,23 +4216,54 @@ export function App(): JSX.Element {
                   {hostTransferStatus}
                 </p>
               ) : null}
-              <input
-                type="search"
-                className="ui-input"
-                placeholder="Filter hosts by alias, user, hostname, or tag…"
-                value={hostSearch}
-                onInput={(e) => setHostSearch((e.target as HTMLInputElement).value)}
-                aria-label="Filter hosts"
-              />
+              <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', alignItems: 'center' }}>
+                <select
+                  className="ui-select"
+                  aria-label="Filter by folder"
+                  value={hostFolderFilter}
+                  onChange={(e) => setHostFolderFilter((e.target as HTMLSelectElement).value)}
+                  data-testid="host-folder-filter"
+                >
+                  <option value="">All folders</option>
+                  {Array.from(new Set(hosts.map((h) => h.folder).filter(Boolean))).map((f) => (
+                    <option key={f} value={f}>{f}</option>
+                  ))}
+                </select>
+                <input
+                  type="search"
+                  className="ui-input"
+                  placeholder="Filter hosts by alias, user, hostname, or tag…"
+                  value={hostSearch}
+                  onInput={(e) => setHostSearch((e.target as HTMLInputElement).value)}
+                  aria-label="Filter hosts"
+                />
+              </div>
               <table data-testid="hosts-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead><tr><th>Host</th><th>Tag</th><th>Last connection</th><th /><th /></tr></thead>
                 <tbody>
                 {hosts
+                  .filter((h) => !hostFolderFilter || h.folder === hostFolderFilter)
                   .filter((h) => !hostSearch || h.alias.toLowerCase().includes(hostSearch.toLowerCase()) || h.host.toLowerCase().includes(hostSearch.toLowerCase()) || h.tags.some((t) => t.toLowerCase().includes(hostSearch.toLowerCase())))
                   .map((h) => (
                     <tr key={h.id} data-testid={`host-card-${h.alias}`} style={{ borderTop: 'var(--border-hairline)' }}>
                       <td><Icon name="server" size={14} /> <strong>{h.alias}</strong> {h.user}@{h.host}:{h.port}</td>
-                      <td><span style={{ border: 'var(--border-hairline)', borderRadius: 'var(--radius-pill)', padding: '0 6px' }}>{h.folder}</span></td>
+                      <td>
+                        <span style={{ border: 'var(--border-hairline)', borderRadius: 'var(--radius-pill)', padding: '0 6px' }}>{h.folder ?? '—'}</span>
+                        <Button
+                          variant="ghost"
+                          testId={`set-folder-${h.alias}`}
+                          onClick={() => {
+                            const next = window.prompt('Folder name (blank to clear):', h.folder ?? '');
+                            if (next === null) return;
+                            const profile = hostRegistry.get(h.id);
+                            if (!profile) return;
+                            hostRegistry.upsert({ ...profile, folder: next.trim() || undefined });
+                            setHosts(hostRegistry.list());
+                          }}
+                        >
+                          ✎
+                        </Button>
+                      </td>
                       <td>
                         <Badge
                   tone={
@@ -4238,6 +4282,7 @@ export function App(): JSX.Element {
                       </td><td>
                       <Button
                         variant="primary"
+                        testId={`connect-host-${h.alias}`}
                         onClick={() => openConnectForProfile(h)}
                       >
                         Connect
@@ -4266,6 +4311,21 @@ export function App(): JSX.Element {
                   <h2>Connected sessions ({connectionRegistryRef.current.list().filter((c) => c.client.isConnected).length})</h2>
                   <Button variant="ghost" testId="refresh-remote-sessions-btn" onClick={() => void refreshRemoteActiveSessions()}>
                     Refresh site-wide
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    testId="disconnect-all-sessions-btn"
+                    onClick={() => {
+                      for (const c of connectionRegistryRef.current.list()) {
+                        if (c.client.isConnected) {
+                          suppressedReconnectRef.current.add(c.id);
+                          connectionRegistryRef.current.close(c.id);
+                        }
+                      }
+                      setConnectionTick((n) => n + 1);
+                    }}
+                  >
+                    Disconnect all
                   </Button>
                 </div>
                 <p className="ws-mod-muted" data-testid="remote-active-sessions">
