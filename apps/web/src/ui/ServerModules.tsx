@@ -34,6 +34,7 @@ import {
 } from '../jobs/job-manager.js';
 import type { JobSession } from '../jobs/remote-job-runner.js';
 import { isActiveJobState, isTerminalJobState, isValidJobId, type JobRecord, type JobState } from '../jobs/types.js';
+import { formatStorageGiB } from './ide-editing';
 import { DockerClient, type ContainerSummary } from '../containers/docker-client.js';
 import { KubernetesClient, type PodSummary } from '../kubernetes/kubectl-client.js';
 import { PythonAutomation, type CronEntry, type PythonEnvironment } from '../automation/python-automation.js';
@@ -257,11 +258,11 @@ export function OverviewPanel({ ctx }: { ctx: ModuleContext }): JSX.Element {
                 <tr key={`${disk.mount}-${disk.filesystem}`}>
                   <td>{disk.mount}</td>
                   <td>{disk.filesystem}</td>
-                  <td>{disk.totalMiB} MiB</td>
+                  <td>{formatStorageGiB(disk.totalMiB)}</td>
                   <td>
-                    {disk.usedMiB} MiB ({disk.usePercent}%)
+                    {formatStorageGiB(disk.usedMiB)} ({disk.usePercent}%)
                   </td>
-                  <td>{disk.availableMiB} MiB</td>
+                  <td>{formatStorageGiB(disk.availableMiB)}</td>
                 </tr>
               ))}
             </tbody>

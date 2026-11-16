@@ -163,6 +163,7 @@ export function LightIde({
   const [busy, setBusy] = useState<boolean>(false);
   const [files, setFiles] = useState<OpenFile[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
+  const [closedFiles, setClosedFiles] = useState<string[]>([]);
   const [autoSave, setAutoSave] = useState<boolean>(() => loadValue<boolean>('autoSave', true));
   const [fontSize, setFontSize] = useState<number>(() => loadValue<number>('fontSize', 17));
   const [wrap, setWrap] = useState<boolean>(() => loadValue<boolean>('wrap', false));
@@ -304,10 +305,29 @@ export function LightIde({
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
-      // Don't intercept shortcuts when the user is typing in a field.
-      if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) return;
 
       const mod = event.metaKey || event.ctrlKey;
+
+      if (mod && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        if (activePath) void save(activePath);
+        return;
+      }
+
+      if (mod && event.key.toLowerCase() === 'w') {
+        event.preventDefault();
+        if (activePath) closeFile(activePath);
+        return;
+      }
+
+      if (mod && event.shiftKey && event.key.toLowerCase() === 't') {
+        event.preventDefault();
+        reopenClosed();
+        return;
+      }
+
+      // Don't intercept other shortcuts when the user is typing in a field.
+      if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) return;
 
       if (mod && event.key.toLowerCase() === 'p') {
         event.preventDefault();
@@ -536,6 +556,10 @@ export function LightIde({
     setBusy(true);
     try {
       const raw = await session.readFile(path);
+      if (raw.length > 2 * 1024 * 1024) {
+        setStatus(`${baseName(path)} is too large to edit (${formatBytes(raw.length)}). Open a smaller file.`);
+        return;
+      }
       const eol = detectEol(raw);
       const content = normalizeEol(raw, '\n');
       if (isProbablyBinary(content)) {
@@ -576,11 +600,36 @@ export function LightIde({
     }
     clearTimer(path);
     if (buffer?.preview) URL.revokeObjectURL(buffer.preview);
+    setClosedFiles((prev) => [path, ...prev.filter((p) => p !== path)].slice(0, 20));
     setFiles((prev) => prev.filter((f) => f.path !== path));
     if (activePath === path) {
       const next = filesRef.current.find((f) => f.path !== path);
       setActivePath(next ? next.path : null);
     }
+  };
+
+  const saveAllFiles = saveAll;
+
+  const closeAllFiles = (): void => {
+    const dirty = filesRef.current.filter((f) => f.dirty);
+    if (dirty.length > 0 && !window.confirm(`${dirty.length} file(s) have unsaved changes. Close all anyway?`)) {
+      return;
+    }
+    for (const f of filesRef.current) {
+      clearTimer(f.path);
+      if (f.preview) URL.revokeObjectURL(f.preview);
+      setClosedFiles((prev) => [f.path, ...prev.filter((p) => p !== f.path)].slice(0, 20));
+    }
+    setFiles([]);
+    setActivePath(null);
+    setSplitPath(null);
+  };
+
+  const reopenClosed = (): void => {
+    const path = closedFiles[0];
+    if (!path) return;
+    setClosedFiles((prev) => prev.slice(1));
+    void openFile(path);
   };
 
   const applyEdit = (path: string, nextText: string, start: number, end = start): void => {
@@ -1205,6 +1254,15 @@ export function LightIde({
               }}
             />
           </label>
+          <Button variant="ghost" onClick={() => void saveAllFiles()} testId="ide-save-all-btn" title="Save all open files">
+            Save all
+          </Button>
+          <Button variant="ghost" onClick={() => closeAllFiles()} testId="ide-close-all-btn" title="Close all open files">
+            Close all
+          </Button>
+          <Button variant="ghost" onClick={() => reopenClosed()} testId="ide-reopen-closed-btn" title="Reopen last closed file" disabled={closedFiles.length === 0}>
+            Reopen
+          </Button>
           <Button variant="ghost" onClick={() => changeFontSize(fontSize - 1)} testId="ide-font-dec">
             A-
           </Button>

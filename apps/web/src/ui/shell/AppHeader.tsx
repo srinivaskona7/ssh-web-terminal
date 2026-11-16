@@ -5,6 +5,7 @@ import type { ConnectionRegistry } from '../../session/connection-registry';
 import type { BrowserSshRelaySessionClient, LiveGatewaySessionClient } from '../../transport';
 import type { ConnectionState, PendingJump, ResourceMetrics, ScreenId, SessionTabItem } from '../App';
 import type { Setter } from './types';
+import { formatStorageGiB } from '../ide-editing';
 
 export type MenuId = 'view' | null;
 
@@ -346,7 +347,7 @@ export function AppHeader({
                   />
                 </div>
                 <span className="webssh-resource-value">
-                  {metrics ? `${metrics.disk?.[0]?.percent ?? '--'}% · ${metrics.disk?.[0]?.availableMiB ?? '--'} free / ${metrics.disk?.[0]?.totalMiB ?? '--'} total` : '--%'}
+                  {metrics ? `${metrics.disk?.[0]?.percent ?? '--'}% · ${formatStorageGiB(metrics.disk?.[0]?.availableMiB ?? 0)} free / ${formatStorageGiB(metrics.disk?.[0]?.totalMiB ?? 0)} total` : '--%'}
                 </span>
               </div>
               {metrics?.updatedAt && (
@@ -417,7 +418,7 @@ export function AppHeader({
                     <div key={d.mountpoint} className="webssh-resource-detail-row">
                       <span className="webssh-resource-detail-label">{d.mountpoint}:</span>
                       <span className="webssh-resource-detail-value">
-                        {d.usedMiB} / {d.totalMiB} MiB ({d.percent}%)
+                        {formatStorageGiB(d.usedMiB)} / {formatStorageGiB(d.totalMiB)} ({d.percent}%)
                       </span>
                     </div>
                   ))}

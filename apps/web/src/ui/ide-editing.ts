@@ -252,6 +252,11 @@ export function languageForPath(path: string): string {
   return map[ext] ?? 'Text';
 }
 
+export function formatStorageGiB(mib: number): string {
+  if (!Number.isFinite(mib) || mib <= 0) return '0.00 GB';
+  return `${(mib / 1024).toFixed(2)} GB`;
+}
+
 export function formatBytes(size: number): string {
   if (!Number.isFinite(size) || size <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
