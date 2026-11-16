@@ -114,8 +114,8 @@ export function SettingsScreen({
         <h2>Terminal Font</h2>
         <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', marginBottom: 'var(--space-2)' }}>
           <Button variant="ghost" testId="font-preset-compact" onClick={() => { setFontSize(14); setLineHeight(1.2); }}>Compact 14px</Button>
-          <Button variant="ghost" testId="font-preset-default" onClick={() => { setFontSize(15); setLineHeight(1.25); }}>Default 15px</Button>
-          <Button variant="ghost" testId="font-preset-teaching" onClick={() => { setFontSize(18); setLineHeight(1.35); }}>Teaching 18px</Button>
+          <Button variant="ghost" testId="font-preset-default" onClick={() => { setFontSize(18); setLineHeight(1.25); }}>Default 18px</Button>
+          <Button variant="ghost" testId="font-preset-teaching" onClick={() => { setFontSize(22); setLineHeight(1.35); }}>Large 22px</Button>
         </div>
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: `${fontSize}px`, marginTop: 'var(--space-2)', border: 'var(--border-hairline)', borderRadius: 'var(--radius-md)', padding: 'var(--space-2)' }} data-testid="font-preview">
           <span>Sample terminal</span>
