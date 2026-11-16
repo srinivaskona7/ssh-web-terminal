@@ -7,7 +7,7 @@ const store = (value: string | null): Pick<Storage, 'getItem'> => ({ getItem: (k
 
 describe('readIdeRecents', () => {
   it('reads projects and recent files', () => {
-    expect(readIdeRecents(store(JSON.stringify({ projects: ['/a'], recentFiles: ['/a/x'] })))).toEqual({
+    expect(readIdeRecents(undefined, store(JSON.stringify({ projects: ['/a'], recentFiles: ['/a/x'] })))).toEqual({
       projects: ['/a'],
       recentFiles: ['/a/x']
     });
@@ -15,14 +15,14 @@ describe('readIdeRecents', () => {
 
   it('drops entries that are not non-empty strings', () => {
     const value = JSON.stringify({ projects: ['/a', 3, null, ''], recentFiles: 'nope' });
-    expect(readIdeRecents(store(value))).toEqual({ projects: ['/a'], recentFiles: [] });
+    expect(readIdeRecents(undefined, store(value))).toEqual({ projects: ['/a'], recentFiles: [] });
   });
 
   it('reads nothing from missing, malformed or non-object storage', () => {
     for (const value of [null, '', '{', '[]', '"text"', 'null', '42']) {
-      expect(readIdeRecents(store(value))).toEqual({ projects: [], recentFiles: [] });
+      expect(readIdeRecents(undefined, store(value))).toEqual({ projects: [], recentFiles: [] });
     }
-    expect(readIdeRecents(null)).toEqual({ projects: [], recentFiles: [] });
+    expect(readIdeRecents(undefined, null)).toEqual({ projects: [], recentFiles: [] });
   });
 
   it('reads nothing when storage throws', () => {
@@ -31,7 +31,7 @@ describe('readIdeRecents', () => {
         throw new Error('denied');
       }
     };
-    expect(readIdeRecents(throwing)).toEqual({ projects: [], recentFiles: [] });
+    expect(readIdeRecents(undefined, throwing)).toEqual({ projects: [], recentFiles: [] });
   });
 });
 

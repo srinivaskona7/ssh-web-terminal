@@ -30,7 +30,7 @@ import {
   toggleLineComment,
   languageForPath
 } from './ide-editing';
-import { IDE_STORE_KEY } from './ide-storage';
+import { IDE_STORE_KEY, ideStoreKey } from './ide-storage';
 import './light-ide.css';
 
 interface OpenFile {
@@ -65,7 +65,7 @@ function imageMimeFor(path: string): string | null {
 }
 const MAX_OUTPUT_LINES = 400;
 const INDENT_UNIT = '  ';
-const STORE_KEY = IDE_STORE_KEY;
+let activeStoreKey = IDE_STORE_KEY;
 
 /** What came of one save attempt; save-all counts only `saved`. */
 type SaveOutcome = 'saved' | 'conflict' | 'failed' | 'busy' | 'missing';
@@ -118,7 +118,7 @@ function bracketPairAt(text: string, caret: number): { open: number; close: numb
 
 function loadValue<T>(key: string, fallback: T): T {
   try {
-    const raw = window.localStorage.getItem(STORE_KEY);
+    const raw = window.localStorage.getItem(activeStoreKey);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     return (key in parsed ? (parsed[key] as T) : fallback);
@@ -129,10 +129,10 @@ function loadValue<T>(key: string, fallback: T): T {
 
 function saveValue(key: string, value: unknown): void {
   try {
-    const raw = window.localStorage.getItem(STORE_KEY);
+    const raw = window.localStorage.getItem(activeStoreKey);
     const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
     parsed[key] = value;
-    window.localStorage.setItem(STORE_KEY, JSON.stringify(parsed));
+    window.localStorage.setItem(activeStoreKey, JSON.stringify(parsed));
   } catch {
     // Storage being unavailable must not break editing.
   }
@@ -153,6 +153,8 @@ export function LightIde({
   session: WorkspaceRemoteSession | null;
   connectedLabel: string;
 }): JSX.Element {
+  const hostKey = session?.isConnected?.() ? `${session.user}@${session.host}:${session.port}` : '';
+  activeStoreKey = ideStoreKey(hostKey);
   const [root, setRoot] = useState<string>('.');
   const [projects, setProjects] = useState<string[]>(() => loadValue<string[]>('projects', ['.']));
   const [recentFiles, setRecentFiles] = useState<string[]>(() =>
@@ -904,6 +906,56 @@ export function LightIde({
     syncCaret(textarea, textarea.value);
   };
 
+  const FILE_TEMPLATES: Record<string, string> = {
+    empty: '',
+    html: '<!DOCTYPE html>\\n<html>\\n<head><meta charset="utf-8"><title>Document</title></head>\\n<body>\\n\\n</body>\\n</html>\\n',
+    python: '#!/usr/bin/env python3\\n\\ndef main():\\n    pass\\n\\n\\nif __name__ == "__main__":\\n    main()\\n',
+    javascript: '// @ts-check\\n\\nfunction main() {\\n  // TODO\\n}\\n\\nmain();\\n',
+    go: 'package main\\n\\nimport "fmt"\\n\\nfunc main() {\\n\\tfmt.Println("hello")\\n}\\n',
+    markdown: '# Title\\n\\n## Section\\n\\n- item\\n',
+    json: '{\\n  "name": "example"\\n}\\n',
+    dockerfile: 'FROM node:20-alpine\\nWORKDIR /app\\nCOPY . .\\nRUN npm ci\\nCMD ["npm", "start"]\\n',
+    shell: '#!/usr/bin/env bash\\nset -euo pipefail\\n\\n',
+  };
+
+  const newFileFromTemplate = async (): Promise<void> => {
+    if (!session?.writeFile || !canEdit) {
+      setStatus('SFTP write is unavailable on this connection.');
+      return;
+    }
+    const templateName = window.prompt(
+      'Template (empty, html, python, javascript, go, markdown, json, dockerfile, shell):',
+      'empty'
+    )?.trim().toLowerCase();
+    if (!templateName || !(templateName in FILE_TEMPLATES)) {
+      setStatus('Unknown template.');
+      return;
+    }
+    const defaultName =
+      templateName === 'python' ? 'main.py' :
+      templateName === 'javascript' ? 'index.js' :
+      templateName === 'go' ? 'main.go' :
+      templateName === 'html' ? 'index.html' :
+      templateName === 'markdown' ? 'README.md' :
+      templateName === 'json' ? 'config.json' :
+      templateName === 'dockerfile' ? 'Dockerfile' :
+      templateName === 'shell' ? 'script.sh' :
+      'untitled.txt';
+    const name = window.prompt('New file name', defaultName)?.trim();
+    if (!name) return;
+    const path = joinPath(root, name);
+    if (entries.some((entry) => entry.name === name) && !window.confirm(`${path} already exists. Replace?`)) return;
+    const content = FILE_TEMPLATES[templateName] ?? '';
+    try {
+      await session.writeFile(path, new TextEncoder().encode(content));
+      setStatus(`Created ${path} from ${templateName} template`);
+      await refresh(root);
+      await openFile(path);
+    } catch (err) {
+      setStatus(`Create failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const newFile = async (): Promise<void> => {
     if (!session?.writeFile || !canEdit) {
       setStatus('SFTP write is unavailable on this connection.');
@@ -1391,6 +1443,9 @@ export function LightIde({
             <div className="ws-mod-actions">
               <Button variant="ghost" onClick={() => void newFile()} testId="ide-new-file">
                 New file
+              </Button>
+              <Button variant="ghost" onClick={() => void newFileFromTemplate()} testId="ide-new-from-template">
+                From template
               </Button>
               <Button variant="ghost" onClick={() => void newFolder()} testId="ide-new-folder">
                 New folder

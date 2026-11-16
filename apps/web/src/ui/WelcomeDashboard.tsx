@@ -41,7 +41,8 @@ function NotReported(): JSX.Element {
 }
 
 export function WelcomeDashboard({ session, onNavigate }: WelcomeDashboardProps): JSX.Element | null {
-  const [recents] = useState<IdeRecents>(() => readIdeRecents());
+  const hostKey = session?.isConnected?.() ? `${session.user}@${session.host}:${session.port}` : '';
+  const [recents] = useState<IdeRecents>(() => readIdeRecents(hostKey));
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [kube, setKube] = useState<KubeTilesResult | null>(null);
 

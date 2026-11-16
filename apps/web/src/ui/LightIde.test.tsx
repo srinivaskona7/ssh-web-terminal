@@ -819,7 +819,7 @@ describe('LightIde editor chrome', () => {
     // Wrapped logical lines span several visual rows, so a fixed-height
     // number column would drift; it is withdrawn instead of lying.
     expect(el.querySelector('[data-testid="ide-gutter"]')).toBeNull();
-    expect(JSON.parse(localStorage.getItem('webssh.ide.v1') ?? '{}').wrap).toBe(true);
+    expect(JSON.parse(localStorage.getItem('webssh.ide.v1:ubuntu@example.test:22') ?? '{}').wrap).toBe(true);
 
     // A fresh mount must come back wrapped from storage alone.
     render(null, el);

@@ -278,6 +278,7 @@ export function SettingsScreen({
       </Card>
       ) : null}
       {settingsSection === 'maintenance' ? (
+      <>
       <Card testId="settings-asset-cache-card">
         <h2>Application Asset Cache Recovery</h2>
         <p>
@@ -304,6 +305,51 @@ export function SettingsScreen({
           ) : null}
         </div>
       </Card>
+      <Card testId="settings-clear-data-card">
+        <h2>Clear local data</h2>
+        <p className="ws-mod-muted">Removes data stored in this browser only. Does not affect the server. Irreversible.</p>
+        <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+          <Button
+            variant="ghost"
+            testId="clear-hosts-data-btn"
+            onClick={() => {
+              if (!window.confirm('Remove all saved hosts from this browser?')) return;
+              try { window.localStorage.removeItem('webssh.hosts.v1'); } catch {}
+              window.location.reload();
+            }}
+          >
+            Clear saved hosts
+          </Button>
+          <Button
+            variant="ghost"
+            testId="clear-ide-recents-btn"
+            onClick={() => {
+              if (!window.confirm('Clear editor recent files/projects for all hosts?')) return;
+              try {
+                for (let i = window.localStorage.length - 1; i >= 0; i--) {
+                  const k = window.localStorage.key(i);
+                  if (k && (k === 'webssh.ide.v1' || k.startsWith('webssh.ide.v1:'))) window.localStorage.removeItem(k);
+                }
+              } catch {}
+              window.location.reload();
+            }}
+          >
+            Clear IDE recents
+          </Button>
+          <Button
+            variant="ghost"
+            testId="reset-preferences-btn"
+            onClick={() => {
+              if (!window.confirm('Reset all preferences (theme, fonts, layout) to defaults?')) return;
+              try { window.localStorage.removeItem('webssh.preferences.v2'); } catch {}
+              window.location.reload();
+            }}
+          >
+            Reset preferences
+          </Button>
+        </div>
+      </Card>
+      </> 
       ) : null}
       {settingsSection === 'administrator' && administrator ? (
       <Card testId="admin-transport-settings">
