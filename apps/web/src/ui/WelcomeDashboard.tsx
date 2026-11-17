@@ -7,7 +7,7 @@
  */
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
-import { Badge, Button, Card } from '@webssh/ui-kit';
+import { Badge, Button, Card, Skeleton } from '@webssh/ui-kit';
 import { isActiveJobState, type JobState } from '../jobs/types.js';
 import type { WorkspaceRemoteSession } from '../session/adapters.js';
 import { readIdeRecents, type IdeRecents } from './ide-storage';
@@ -71,8 +71,9 @@ export function WelcomeDashboard({ session, onNavigate }: WelcomeDashboardProps)
 
   const hasIde = recents.projects.length + recents.recentFiles.length > 0;
   const tiles = kube && kube.ok ? kube.tiles : null;
-  if (!hasIde && jobs.length === 0 && !tiles) return null;
+  const kubeLoading = !!session && session.isConnected() && kube === null;
 
+  if (!hasIde && jobs.length === 0 && !tiles && !kubeLoading) return null;
   const now = Date.now();
   return (
     <div className="welcome-dash" data-testid="welcome-dashboard">
@@ -134,7 +135,14 @@ export function WelcomeDashboard({ session, onNavigate }: WelcomeDashboardProps)
         </Card>
       ) : null}
 
-      {tiles ? (
+      {kubeLoading ? (
+        <Card testId="welcome-kube" className="welcome-dash-card">
+          <h3 className="welcome-dash-title">Kubernetes</h3>
+          <Skeleton label="Loading Kubernetes tiles" />
+          <Skeleton label="Loading Kubernetes tiles" />
+          <Skeleton label="Loading Kubernetes tiles" />
+        </Card>
+      ) : tiles ? (
         <Card testId="welcome-kube" className="welcome-dash-card">
           <h3 className="welcome-dash-title">Kubernetes</h3>
           <dl className="welcome-dash-tiles">

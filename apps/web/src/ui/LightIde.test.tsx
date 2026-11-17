@@ -93,7 +93,7 @@ describe('LightIde', () => {
     expect(el.querySelector('[data-testid="ide-list-error"]')?.textContent).toContain(
       'Disconnected'
     );
-    expect(el.querySelector('[data-testid="ide-file-list"]')?.textContent).toContain('No entries');
+    expect(el.querySelector('[data-testid="ide-file-list"]')?.textContent).toContain('This folder is empty');
   });
 
   it('previews an image as a read-only blob instead of text, and never offers to save it', async () => {

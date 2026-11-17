@@ -4298,6 +4298,17 @@ export function App(): JSX.Element {
                   aria-label="Filter hosts"
                 />
               </div>
+              {hosts.filter((h) => !hostFolderFilter || h.folder === hostFolderFilter).filter((h) => !hostSearch || h.alias.toLowerCase().includes(hostSearch.toLowerCase()) || h.host.toLowerCase().includes(hostSearch.toLowerCase()) || h.tags.some((t) => t.toLowerCase().includes(hostSearch.toLowerCase()))).length === 0 ? (
+                <EmptyState
+                  title="No saved hosts"
+                  description={hostSearch || hostFolderFilter ? 'No hosts match the current filter.' : 'Connect to a server or import an SSH config to get started.'}
+                  action={
+                    <Button variant="primary" onClick={() => { setPendingJump(null); setConnectModalOpen(true); }}>
+                      Connect to a server
+                    </Button>
+                  }
+                />
+              ) : (
               <table data-testid="hosts-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead><tr><th>Host</th><th>Tag</th><th>Last connection</th><th /><th /></tr></thead>
                 <tbody>
@@ -4309,20 +4320,6 @@ export function App(): JSX.Element {
                       <td><Icon name="server" size={14} /> <strong>{h.alias}</strong> {h.user}@{h.host}:{h.port}</td>
                       <td>
                         <span style={{ border: 'var(--border-hairline)', borderRadius: 'var(--radius-pill)', padding: '0 6px' }}>{h.folder ?? '—'}</span>
-                        <Button
-                          variant="ghost"
-                          testId={`set-folder-${h.alias}`}
-                          onClick={() => {
-                            const next = window.prompt('Folder name (blank to clear):', h.folder ?? '');
-                            if (next === null) return;
-                            const profile = hostRegistry.get(h.id);
-                            if (!profile) return;
-                            hostRegistry.upsert({ ...profile, folder: next.trim() || undefined });
-                            setHosts(hostRegistry.list());
-                          }}
-                        >
-                          ✎
-                        </Button>
                       </td>
                       <td>
                         <Badge
@@ -4352,6 +4349,20 @@ export function App(): JSX.Element {
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', padding: 'var(--space-1)' }}>
                           <Button
                             variant="ghost"
+                            testId={`set-folder-${h.alias}`}
+                            onClick={() => {
+                              const next = window.prompt('Folder name (blank to clear):', h.folder ?? '');
+                              if (next === null) return;
+                              const profile = hostRegistry.get(h.id);
+                              if (!profile) return;
+                              hostRegistry.upsert({ ...profile, folder: next.trim() || undefined });
+                              setHosts(hostRegistry.list());
+                            }}
+                          >
+                            Set folder
+                          </Button>
+                          <Button
+                            variant="ghost"
                             testId={`remove-host-${h.alias}`}
                             onClick={() => {
                               if (!window.confirm(`Remove saved host ${h.alias}?`)) return;
@@ -4368,6 +4379,7 @@ export function App(): JSX.Element {
                   ))}
                 </tbody>
               </table>
+              )}
               <Card testId="connected-sessions-panel">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <h2>Connected sessions ({connectionRegistryRef.current.list().filter((c) => c.client.isConnected).length})</h2>
@@ -4578,6 +4590,17 @@ export function App(): JSX.Element {
                   data-testid="sftp-remote-dropzone"
                 >
                 <p className="ws-mod-muted">Drop files here to upload them into {sftpCurrentPath}.</p>
+                {sftpEntries.length === 0 ? (
+                  <EmptyState
+                    title={connected ? 'This folder is empty' : 'Not connected'}
+                    description={connected ? 'Upload a file or create a folder to get started.' : 'Connect to a server to browse its files.'}
+                    action={!connected ? (
+                      <Button variant="primary" onClick={() => { setPendingJump(null); setConnectModalOpen(true); }}>
+                        Connect to a server
+                      </Button>
+                    ) : undefined}
+                  />
+                ) : (
                 <div style={{ overflowX: 'auto' }}>
                 {sftpViewMode === 'list' ? (
                 <table className="ws-mod-table" data-testid="sftp-remote-table">
@@ -4683,6 +4706,7 @@ export function App(): JSX.Element {
                 </div>
                 )}
                 </div>
+                )}
                 </div>
                 {renameTarget ? (
                   <div className="ws-mod-plan" role="group" aria-label="Rename entry">

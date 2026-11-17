@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import { Badge, Button } from '@webssh/ui-kit';
+import { Badge, Button, EmptyState } from '@webssh/ui-kit';
 import type { SftpEntryInfo, WorkspaceRemoteSession } from '../session/adapters';
 import { posixQuote } from '../recipes/engine';
 import {
@@ -1483,7 +1483,11 @@ export function LightIde({
                   </button>
                 </li>
               ))}
-              {entries.length === 0 && !busy ? <li>No entries listed.</li> : null}
+              {entries.length === 0 && !busy ? (
+                <li>
+                  <EmptyState title="This folder is empty" description="Create a file or upload one to get started." />
+                </li>
+              ) : null}
               {busy ? <li>Loading…</li> : null}
             </ul>
 
